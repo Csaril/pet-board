@@ -13,7 +13,7 @@ function fixture() {
   const config: AppConfig = {
     host: '127.0.0.1', port: 4321, dataDir, roomName: 'Test room',
     roomCode: 'room-code-with-enough-length', gmPassword: 'gm-password-with-enough-length',
-    sessionDays: 30, cookieSecure: false,
+    sessionDays: 30, cookieSecure: false, maxUploadBytes: 25 * 1024 * 1024,
   };
   return { dataDir, store, config };
 }

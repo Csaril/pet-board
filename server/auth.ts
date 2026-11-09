@@ -19,7 +19,8 @@ export function authenticate(
   if (!input || typeof input !== 'object') return undefined;
   const body = input as Record<string, unknown>;
   const name = typeof body.name === 'string' ? body.name.trim() : '';
-  const roomCode = typeof body.roomCode === 'string' ? body.roomCode : '';
+  const submittedRoomCode = typeof body.roomCode === 'string' ? body.roomCode : '';
+  const roomCode = config.roomCode.length <= 8 ? submittedRoomCode.toUpperCase() : submittedRoomCode;
   const role: Role | undefined = body.role === 'gm' || body.role === 'player' ? body.role : undefined;
   if (name.length < 1 || name.length > 40 || !role || !constantTimeEqual(roomCode, config.roomCode)) return undefined;
   if (role === 'gm' && (typeof body.gmPassword !== 'string' || !constantTimeEqual(body.gmPassword, config.gmPassword))) return undefined;

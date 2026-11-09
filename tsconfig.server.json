@@ -6,6 +6,7 @@
     "moduleResolution": "NodeNext",
     "outDir": "dist-server",
     "rootDir": ".",
+    "noEmit": false,
     "types": ["node"],
     "allowImportingTsExtensions": false
   },

@@ -10,7 +10,7 @@ import '../styles/global.css';
     <title>Tabletop Board</title>
   </head>
   <body>
-    <main class="shell">
+    <main class="shell" id="login-shell">
       <section class="card" aria-labelledby="title">
         <div class="brand-mark" aria-hidden="true">TB</div>
         <p class="eyebrow">Совместная игровая доска</p>
@@ -19,169 +19,77 @@ import '../styles/global.css';
         <form id="join-form">
           <label for="name">Ваше имя</label>
           <input id="name" name="name" autocomplete="name" maxlength="40" required />
-
           <label for="roomCode">Код комнаты</label>
-          <input id="roomCode" name="roomCode" autocomplete="off" required />
-
+          <input id="roomCode" name="roomCode" autocomplete="off" maxlength="64" required />
           <label for="role">Роль</label>
           <select id="role" name="role">
             <option value="player">Игрок</option>
             <option value="gm">Ведущий</option>
           </select>
-
           <div id="gm-field" hidden>
             <label for="gmPassword">Пароль ведущего</label>
             <input id="gmPassword" name="gmPassword" type="password" autocomplete="current-password" />
           </div>
           <button type="submit">Подключиться</button>
-          <p id="message" class="message" role="status" aria-live="polite"></p>
+          <p id="login-message" class="message" role="status" aria-live="polite"></p>
         </form>
-        <section id="room" class="room" hidden>
-          <div class="room-heading">
-            <div>
-              <p class="eyebrow">Комната</p>
-              <h2 id="room-name"></h2>
-            </div>
-            <span id="connection" class="status"><i></i><span>Подключение…</span></span>
-          </div>
-          <p id="identity" class="identity"></p>
-          <h3>Сейчас в комнате</h3>
-          <ul id="participants" class="participants"></ul>
-          <button id="leave" class="secondary" type="button">Выйти</button>
-        </section>
       </section>
       <footer>Данные комнаты хранятся на компьютере ведущего</footer>
     </main>
+
+    <main id="workspace" class="workspace" hidden>
+      <header class="topbar">
+        <div class="topbar-brand"><span class="brand-mark small" aria-hidden="true">TB</span><div><strong id="room-name">Игровая комната</strong><span id="identity" class="identity"></span></div></div>
+        <div class="topbar-center">
+          <button id="zoom-reset" class="tool-button" type="button" title="Вернуть масштаб к 100%">100%</button>
+          <button id="fit-board" class="tool-button" type="button">Показать всё</button>
+          <span id="connection" class="status"><i></i><span>Подключение…</span></span>
+        </div>
+        <div class="topbar-actions">
+          <button id="library-toggle" class="tool-button gm-only" type="button" hidden>Библиотека</button>
+          <button id="leave" class="tool-button secondary" type="button">Выйти</button>
+        </div>
+      </header>
+      <div class="workspace-body">
+        <section class="canvas-wrap" aria-label="Игровая доска">
+          <div id="board-canvas"></div>
+          <div class="canvas-hint">Колесо мыши — масштаб · перетаскивайте пустое место — перемещение доски</div>
+          <div id="canvas-message" class="canvas-message" role="status" aria-live="polite"></div>
+          <div id="object-tools" class="object-tools" hidden>
+            <span id="selection-name" class="selection-name">Изображение</span>
+            <button id="duplicate-object" type="button" title="Дублировать">Дублировать</button>
+            <button id="flip-x" type="button" title="Отразить по горизонтали">↔</button>
+            <button id="flip-y" type="button" title="Отразить по вертикали">↕</button>
+            <button id="crop-toggle" type="button">Обрезать</button>
+            <button id="crop-reset" type="button" hidden>Сбросить обрезку</button>
+            <label class="stretch-toggle"><input id="free-stretch" type="checkbox" /> Свободный размер</label>
+            <label class="player-move gm-only"><input id="allow-player-move" type="checkbox" /> Разрешить игрокам двигать</label>
+            <label class="move-layer gm-only">Слой <select id="object-layer"></select></label>
+            <button id="object-back" class="gm-only" type="button">Назад</button>
+            <button id="object-front" class="gm-only" type="button">Вперёд</button>
+            <button id="delete-object" class="danger gm-only" type="button">Удалить</button>
+            <button id="crop-cancel" type="button" hidden>Отмена</button>
+          </div>
+        </section>
+
+        <aside id="layers-panel" class="side-panel layers-panel gm-only" hidden>
+          <div class="panel-heading"><div><p class="eyebrow">Рабочее пространство</p><h2>Слои</h2></div><button id="layer-create" class="icon-button" type="button" aria-label="Создать слой">＋</button></div>
+          <p class="panel-note">Слои сверху списка отображаются поверх остальных.</p>
+          <ul id="layers-list" class="layers-list"></ul>
+        </aside>
+      </div>
+
+      <aside id="library-panel" class="library-panel" hidden>
+        <div class="panel-heading"><div><p class="eyebrow">Изображения</p><h2>Библиотека ресурсов</h2></div><button id="library-close" class="icon-button" type="button" aria-label="Закрыть библиотеку">×</button></div>
+        <label class="upload-button" for="image-upload">Загрузить изображение</label>
+        <input id="image-upload" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+        <p class="panel-note">PNG, JPG или WebP · до <span id="upload-limit">25</span> MB</p>
+        <p id="upload-message" class="message" role="status" aria-live="polite"></p>
+        <ul id="assets-list" class="assets-list"></ul>
+      </aside>
+    </main>
     <script>
-      interface RoomState {
-        type: 'room:state';
-        roomName: string;
-        identity: { name: string; role: 'gm' | 'player' };
-        participants: Array<{ name: string; role: 'gm' | 'player' }>;
-      }
-      const form = document.querySelector<HTMLFormElement>('#join-form')!;
-      const role = document.querySelector<HTMLSelectElement>('#role')!;
-      const gmField = document.querySelector<HTMLDivElement>('#gm-field')!;
-      const gmPassword = document.querySelector<HTMLInputElement>('#gmPassword')!;
-      const message = document.querySelector<HTMLParagraphElement>('#message')!;
-      const room = document.querySelector<HTMLElement>('#room')!;
-      const status = document.querySelector<HTMLSpanElement>('#connection')!;
-      const participants = document.querySelector<HTMLUListElement>('#participants')!;
-      let socket: WebSocket | undefined;
-      let retryTimer: ReturnType<typeof setTimeout> | undefined;
-      let reconnectDelay = 500;
-      let leaving = false;
-
-      function showStatus(label: string, kind: string) {
-        status.className = `status ${kind}`;
-        status.querySelector('span')!.textContent = label;
-      }
-
-      function connect() {
-        clearTimeout(retryTimer);
-        showStatus('Подключение…', 'reconnecting');
-        const connection = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
-        socket = connection;
-        connection.addEventListener('open', () => {
-          reconnectDelay = 500;
-          showStatus('В сети', 'online');
-        });
-        connection.addEventListener('message', (event) => {
-          const data = JSON.parse(event.data) as RoomState;
-          if ((data as { type: string }).type === 'session:ended') {
-            leaving = true;
-            clearTimeout(retryTimer);
-            connection.close();
-            room.hidden = true;
-            form.hidden = false;
-            message.textContent = 'Сессия завершена. Подключитесь снова.';
-            return;
-          }
-          if (data.type !== 'room:state') return;
-          document.querySelector<HTMLElement>('#room-name')!.textContent = data.roomName;
-          document.querySelector<HTMLElement>('#identity')!.textContent = `${data.identity.name} · ${data.identity.role === 'gm' ? 'Ведущий' : 'Игрок'}`;
-          participants.replaceChildren(...data.participants.map((person) => {
-            const item = document.createElement('li');
-            const name = document.createElement('span');
-            const badge = document.createElement('span');
-            name.textContent = person.name;
-            badge.textContent = person.role === 'gm' ? 'Ведущий' : 'Игрок';
-            badge.className = 'role-badge';
-            item.append(name, badge);
-            return item;
-          }));
-        });
-        connection.addEventListener('close', (event) => {
-          if (leaving) return;
-          if (event.code === 1008) {
-            showStatus('Нет доступа к комнате', 'offline');
-            return;
-          }
-          showStatus('Переподключение…', 'reconnecting');
-          retryTimer = setTimeout(connect, reconnectDelay);
-          reconnectDelay = Math.min(reconnectDelay * 2, 8000);
-        });
-        connection.addEventListener('error', () => connection.close());
-      }
-
-      role.addEventListener('change', () => {
-        gmField.hidden = role.value !== 'gm';
-        gmPassword.required = role.value === 'gm';
-      });
-
-      form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        message.textContent = '';
-        const values = new FormData(form);
-        const body = {
-          name: values.get('name'),
-          roomCode: values.get('roomCode'),
-          role: values.get('role'),
-          gmPassword: values.get('gmPassword'),
-        };
-        try {
-          const response = await fetch('/api/session', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || 'Не удалось подключиться.');
-          leaving = false;
-          form.hidden = true;
-          room.hidden = false;
-          connect();
-        } catch (error) {
-          message.textContent = error instanceof Error ? error.message : 'Не удалось подключиться.';
-        }
-      });
-
-      document.querySelector<HTMLButtonElement>('#leave')!.addEventListener('click', async () => {
-        leaving = true;
-        clearTimeout(retryTimer);
-        socket?.close();
-        await fetch('/api/session', { method: 'DELETE' });
-        room.hidden = true;
-        form.hidden = false;
-        form.reset();
-        gmField.hidden = true;
-        message.textContent = 'Вы вышли из комнаты.';
-      });
-
-      async function restoreSession() {
-        try {
-          const response = await fetch('/api/session');
-          if (!response.ok) return;
-          await response.json();
-          leaving = false;
-          form.hidden = true;
-          room.hidden = false;
-          connect();
-        } catch {
-          showStatus('Нет соединения с сервером', 'offline');
-        }
-      }
-      void restoreSession();
+      import '../client/app.ts';
     </script>
   </body>
 </html>
