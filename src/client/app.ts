@@ -36,6 +36,8 @@ const notesList = select<HTMLUListElement>('#notes-list');
 const noteDialog = select<HTMLDialogElement>('#note-dialog');
 const assetPickerDialog = select<HTMLDialogElement>('#asset-picker-dialog');
 const stickerCreateDialog = select<HTMLDialogElement>('#sticker-create-dialog');
+const noteImageDropZone = select<HTMLElement>('#note-image-drop-zone');
+const noteImageUploadStatus = select<HTMLUListElement>('#note-image-upload-status');
 const notePlacementHint = select<HTMLElement>('#note-place-hint');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
@@ -83,9 +85,12 @@ let openNoteId: string | undefined;
 let editingNoteId: string | undefined;
 let noteDialogMode: 'view' | 'edit' = 'view';
 let noteRequestSequence = 0;
+let noteEditorGeneration = 0;
 let editingAssetIds: string[] = [];
 let selectedMarkerAssetId: string | undefined;
 let assetPickerMode: 'attachments' | 'marker' = 'attachments';
+let noteDropDepth = 0;
+let pendingNoteUploads = 0;
 let cropMode = false;
 let camera = { x: 0, y: 0, scale: 1 };
 let hasRestoredCamera = false;
@@ -679,6 +684,7 @@ async function openNote(id: string, show = true) {
 function openNoteEditor(note?: NoteRecord) {
   if (identity?.role !== 'gm') return;
   noteRequestSequence += 1;
+  noteEditorGeneration += 1;
   editingNoteId = note?.id; openNoteId = note?.id; noteDialogMode = 'edit';
   select<HTMLElement>('#note-dialog-heading').textContent = note ? 'Редактирование заметки' : 'Новая заметка';
   select<HTMLElement>('#note-privacy').textContent = note ? 'Настройки доступа' : 'Черновик';
@@ -750,40 +756,157 @@ function renderAssetPicker() {
     const name = document.createElement('span'); name.textContent = asset.originalName; name.title = asset.originalName;
     label.append(input, image, name); grid.append(label);
   }
-  select<HTMLElement>('#asset-picker-library').hidden = false;
 }
 
 function openAssetPicker(mode: 'attachments' | 'marker') {
   assetPickerMode = mode; renderAssetPicker();
-  select<HTMLElement>('#asset-picker-upload').hidden = true;
-  select<HTMLButtonElement>('#asset-picker-library-mode').classList.add('active');
-  select<HTMLButtonElement>('#asset-picker-upload-mode').classList.remove('active');
-  select<HTMLButtonElement>('#asset-picker-add').hidden = false;
-  select<HTMLElement>('#asset-picker-upload-message').textContent = '';
+  if (!pendingNoteUploads) clearNoteUploadStatuses();
+  setAssetPickerLibraryMode();
   if (!assetPickerDialog.open) assetPickerDialog.showModal();
 }
 
+interface NoteUploadRow {
+  file: File;
+  item: HTMLLIElement;
+  progress: HTMLProgressElement;
+  status: HTMLSpanElement;
+}
+
+function setUploadRow(row: NoteUploadRow, message: string, state?: 'success' | 'error') {
+  row.status.textContent = message;
+  row.item.classList.toggle('success', state === 'success');
+  row.item.classList.toggle('error', state === 'error');
+}
+
+function uploadNoteAsset(file: File, onProgress: (percent: number) => void): Promise<{ asset: NonNullable<BoardSnapshot['assets']>[number]; deduplicated: boolean }> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', '/api/assets');
+    request.withCredentials = true;
+    request.timeout = 120_000;
+    request.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+    });
+    request.addEventListener('load', () => {
+      let result: { asset?: NonNullable<BoardSnapshot['assets']>[number]; deduplicated?: boolean; error?: string };
+      try { result = JSON.parse(request.responseText) as typeof result; }
+      catch { reject(new Error('Сервер вернул некорректный ответ.')); return; }
+      if (request.status < 200 || request.status >= 300 || !result.asset) {
+        reject(new Error(result.error || `Ошибка загрузки (HTTP ${request.status}).`)); return;
+      }
+      resolve({ asset: result.asset, deduplicated: result.deduplicated === true });
+    });
+    request.addEventListener('error', () => reject(new Error('Не удалось связаться с сервером.')));
+    request.addEventListener('timeout', () => reject(new Error('Истекло время ожидания загрузки.')));
+    const data = new FormData(); data.append('image', file);
+    request.send(data);
+  });
+}
+
 async function uploadNoteImageFiles(files: File[]) {
-  const message = select<HTMLElement>('#asset-picker-upload-message');
+  if (!files.length) return;
+  if (!pendingNoteUploads) clearNoteUploadStatuses();
+  const targetMode = assetPickerMode;
+  const editorGeneration = noteEditorGeneration;
   const limit = roomState?.maxUploadBytes ?? 25 * 1024 * 1024;
-  for (const file of files) {
-    if (file.size > limit) { message.textContent = `${file.name}: превышен лимит ${formatSize(limit)}.`; continue; }
-    const formData = new FormData(); formData.append('image', file);
-    try {
-      const response = await fetch('/api/assets', { method: 'POST', body: formData });
-      const result = await response.json() as { asset?: NonNullable<BoardSnapshot['assets']>[number]; error?: string };
-      if (!response.ok || !result.asset) throw new Error(result.error || 'Не удалось загрузить изображение.');
-      if (roomState) roomState.assets = [...(roomState.assets || []).filter((entry) => entry.id !== result.asset!.id), result.asset];
-      if (assetPickerMode === 'marker') selectedMarkerAssetId = result.asset.id;
-      else if (!editingAssetIds.includes(result.asset.id)) editingAssetIds.push(result.asset.id);
-      message.textContent = `${file.name}: загружено${result.asset.id !== undefined ? ' и добавлено в выбор' : ''}.`;
-      renderAssets(); renderAssetPicker(); renderNoteAttachments(); updateMarkerEditorFields();
-    } catch (error) { message.textContent = `${file.name}: ${error instanceof Error ? error.message : 'ошибка загрузки.'}`; }
-  }
+  const rows: NoteUploadRow[] = files.map((file) => {
+    const item = document.createElement('li'); item.className = 'note-upload-row';
+    const name = document.createElement('span'); name.className = 'note-upload-name'; name.textContent = file.name; name.title = file.name;
+    const progress = document.createElement('progress'); progress.max = 100; progress.value = 0; progress.setAttribute('aria-label', `Загрузка ${file.name}`);
+    const status = document.createElement('span'); status.className = 'note-upload-result'; status.textContent = file.size > limit ? `Ошибка: превышен лимит ${formatSize(limit)}.` : 'В очереди';
+    item.append(name, progress, status); noteImageUploadStatus.append(item);
+    const row = { file, item, progress, status };
+    if (file.size > limit) { progress.hidden = true; item.classList.add('error'); }
+    return row;
+  });
+  pendingNoteUploads += rows.length;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < rows.length) {
+      const row = rows[cursor++]!;
+      if (row.file.size > limit) continue;
+      setUploadRow(row, 'Загрузка · 0%');
+      try {
+        const result = await uploadNoteAsset(row.file, (percent) => {
+          row.progress.value = percent; setUploadRow(row, `Загрузка · ${percent}%`);
+        });
+        row.progress.value = 100;
+        if (roomState) roomState.assets = [...(roomState.assets || []).filter((entry) => entry.id !== result.asset.id), result.asset];
+        const sameEditor = editorGeneration === noteEditorGeneration && noteDialog.open && noteDialogMode === 'edit';
+        const attached = sameEditor && targetMode === 'attachments' && !editingAssetIds.includes(result.asset.id);
+        if (sameEditor && targetMode === 'marker') selectedMarkerAssetId = result.asset.id;
+        else if (attached) editingAssetIds.push(result.asset.id);
+        const resultLabel = result.deduplicated ? 'Уже в библиотеке' : 'Загружено';
+        setUploadRow(row, `${resultLabel} · ${sameEditor && (targetMode === 'marker' || attached || targetMode === 'attachments' && editingAssetIds.includes(result.asset.id)) ? 'прикреплено к заметке' : 'сохранено в библиотеке'}`, 'success');
+        renderAssets(); renderAssetPicker(); renderNoteAttachments(); updateMarkerEditorFields();
+      } catch (error) {
+        row.progress.hidden = true;
+        setUploadRow(row, `Ошибка: ${error instanceof Error ? error.message : 'не удалось загрузить файл.'}`, 'error');
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, rows.length) }, worker));
+  pendingNoteUploads = Math.max(0, pendingNoteUploads - rows.length);
+}
+
+function hasDraggedFiles(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types || []).includes('Files');
+}
+
+function clearNoteUploadStatuses() {
+  noteImageUploadStatus.replaceChildren();
+  noteDropDepth = 0; noteImageDropZone.classList.remove('drag-over');
+}
+
+noteImageDropZone.addEventListener('dragenter', (event) => {
+  if (!hasDraggedFiles(event)) return;
+  event.preventDefault(); noteDropDepth += 1; noteImageDropZone.classList.add('drag-over');
+});
+noteImageDropZone.addEventListener('dragover', (event) => {
+  if (!hasDraggedFiles(event)) return;
+  event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  noteImageDropZone.classList.add('drag-over');
+});
+noteImageDropZone.addEventListener('dragleave', (event) => {
+  if (event.relatedTarget instanceof Node && noteImageDropZone.contains(event.relatedTarget)) return;
+  noteDropDepth = Math.max(0, noteDropDepth - 1);
+  if (!noteDropDepth) noteImageDropZone.classList.remove('drag-over');
+});
+noteImageDropZone.addEventListener('drop', (event) => {
+  if (!hasDraggedFiles(event)) return;
+  event.preventDefault(); event.stopPropagation(); noteDropDepth = 0; noteImageDropZone.classList.remove('drag-over');
+  void uploadNoteImageFiles(Array.from(event.dataTransfer?.files || []));
+});
+noteImageDropZone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select<HTMLInputElement>('#note-image-upload').click(); }
+});
+
+async function uploadNoteImageFilesFromInput(event: Event) {
+  const input = event.currentTarget as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  await uploadNoteImageFiles(files);
+}
+
+function setAssetPickerUploadMode() {
+  select<HTMLElement>('#asset-picker-library').hidden = true;
+  select<HTMLElement>('#asset-picker-upload').hidden = false;
+  select<HTMLButtonElement>('#asset-picker-add').hidden = true;
+  select<HTMLButtonElement>('#asset-picker-library-mode').classList.remove('active');
+  select<HTMLButtonElement>('#asset-picker-upload-mode').classList.add('active');
+}
+
+function setAssetPickerLibraryMode() {
+  select<HTMLElement>('#asset-picker-library').hidden = false;
+  select<HTMLElement>('#asset-picker-upload').hidden = true;
+  select<HTMLButtonElement>('#asset-picker-add').hidden = false;
+  select<HTMLButtonElement>('#asset-picker-library-mode').classList.add('active');
+  select<HTMLButtonElement>('#asset-picker-upload-mode').classList.remove('active');
 }
 
 async function saveNote() {
   if (identity?.role !== 'gm') return;
+  if (pendingNoteUploads > 0) { setNoteMessage('Дождитесь завершения загрузки изображений.'); return; }
   const selectedParticipantIds = Array.from(select<HTMLElement>('#note-participant-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
   const markerType = select<HTMLSelectElement>('#note-marker-type').value;
   if (markerType === 'image' && !selectedMarkerAssetId) { setNoteMessage('Выберите изображение для графической метки.'); return; }
@@ -959,7 +1082,7 @@ select<HTMLButtonElement>('#notes-toggle').addEventListener('click', () => { not
 select<HTMLButtonElement>('#notes-close').addEventListener('click', () => { notesPanel.hidden = true; });
 select<HTMLButtonElement>('#note-create').addEventListener('click', () => openNoteEditor());
 select<HTMLButtonElement>('#note-close').addEventListener('click', closeNoteDialog);
-noteDialog.addEventListener('close', () => { noteRequestSequence += 1; openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); });
+noteDialog.addEventListener('close', () => { noteRequestSequence += 1; noteEditorGeneration += 1; openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); });
 select<HTMLButtonElement>('#note-save').addEventListener('click', () => void saveNote());
 select<HTMLButtonElement>('#note-edit').addEventListener('click', async () => { if (!openNoteId) return; try { const response = await fetch(`/api/notes/${encodeURIComponent(openNoteId)}`, { cache: 'no-store' }); if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note); } catch { setNoteMessage('Не удалось загрузить заметку.'); } });
 select<HTMLButtonElement>('#note-place-marker').addEventListener('click', () => { if (openNoteId) { const id = openNoteId; closeNoteDialog(); startNotePlacement(id); } });
@@ -967,11 +1090,11 @@ select<HTMLSelectElement>('#note-access').addEventListener('change', (event) => 
 select<HTMLSelectElement>('#note-marker-type').addEventListener('change', updateMarkerEditorFields);
 select<HTMLButtonElement>('#note-add-image').addEventListener('click', () => openAssetPicker('attachments'));
 select<HTMLButtonElement>('#note-marker-image-pick').addEventListener('click', () => openAssetPicker('marker'));
-select<HTMLInputElement>('#note-image-upload').addEventListener('change', (event) => { void uploadNoteImageFiles(Array.from((event.currentTarget as HTMLInputElement).files || [])); (event.currentTarget as HTMLInputElement).value = ''; });
+select<HTMLInputElement>('#note-image-upload').addEventListener('change', (event) => { void uploadNoteImageFilesFromInput(event); });
 select<HTMLButtonElement>('#asset-picker-close').addEventListener('click', () => assetPickerDialog.close());
 select<HTMLButtonElement>('#asset-picker-cancel').addEventListener('click', () => assetPickerDialog.close());
-select<HTMLButtonElement>('#asset-picker-library-mode').addEventListener('click', () => { select<HTMLElement>('#asset-picker-library').hidden = false; select<HTMLElement>('#asset-picker-upload').hidden = true; select<HTMLButtonElement>('#asset-picker-add').hidden = false; select<HTMLButtonElement>('#asset-picker-library-mode').classList.add('active'); select<HTMLButtonElement>('#asset-picker-upload-mode').classList.remove('active'); });
-select<HTMLButtonElement>('#asset-picker-upload-mode').addEventListener('click', () => { select<HTMLElement>('#asset-picker-library').hidden = true; select<HTMLElement>('#asset-picker-upload').hidden = false; select<HTMLButtonElement>('#asset-picker-add').hidden = true; select<HTMLButtonElement>('#asset-picker-library-mode').classList.remove('active'); select<HTMLButtonElement>('#asset-picker-upload-mode').classList.add('active'); });
+select<HTMLButtonElement>('#asset-picker-library-mode').addEventListener('click', setAssetPickerLibraryMode);
+select<HTMLButtonElement>('#asset-picker-upload-mode').addEventListener('click', setAssetPickerUploadMode);
 select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
   const values = Array.from(select<HTMLElement>('#asset-picker-grid').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
   if (assetPickerMode === 'marker') { if (values[0]) selectedMarkerAssetId = values[0]; updateMarkerEditorFields(); }
@@ -1093,6 +1216,7 @@ window.addEventListener('dragover', (event) => {
 });
 window.addEventListener('drop', (event) => {
   if (Array.from(event.dataTransfer?.types || []).includes('Files')) event.preventDefault();
+  noteDropDepth = 0; noteImageDropZone.classList.remove('drag-over');
 });
 
 async function restoreSession() {

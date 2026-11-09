@@ -9,7 +9,7 @@ import type { AppConfig } from './config.js';
 import { buildServer } from './index.js';
 import { RoomStore } from './store.js';
 
-function pngFixture(): Buffer {
+function pngFixture(red = 180): Buffer {
   const crc32 = (bytes: Buffer) => {
     let crc = 0xffffffff;
     for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit += 1) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1; }
@@ -23,7 +23,7 @@ function pngFixture(): Buffer {
   const header = Buffer.alloc(13); header.writeUInt32BE(1, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
-    chunk('IDAT', deflateSync(Buffer.from([0, 180, 45, 60, 255]))), chunk('IEND', Buffer.alloc(0)),
+    chunk('IDAT', deflateSync(Buffer.from([0, red, 45, 60, 255]))), chunk('IEND', Buffer.alloc(0)),
   ]);
 }
 const pngBytes = pngFixture();
@@ -113,11 +113,16 @@ test('note HTTP endpoints keep bodies out of board state and enforce audience ac
     const uploaded = await app.inject({ method: 'POST', url: '/api/assets', headers: { origin: 'http://localhost:80', cookie: gm.cookie, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: multipart(boundary, 'note.png', 'image/png', pngBytes) });
     assert.equal(uploaded.statusCode, 200);
     const assetId = uploaded.json().asset.id as string;
+    const secondBoundary = 'note-image-boundary-second';
+    const secondUploaded = await app.inject({ method: 'POST', url: '/api/assets', headers: { origin: 'http://localhost:80', cookie: gm.cookie, 'content-type': `multipart/form-data; boundary=${secondBoundary}` }, payload: multipart(secondBoundary, 'note-second.png', 'image/png', pngFixture(90)) });
+    assert.equal(secondUploaded.statusCode, 200);
+    const secondAssetId = secondUploaded.json().asset.id as string;
     const create = async (access: string, selectedParticipantIds: string[] = [], extra: Record<string, unknown> = {}) => app.inject({
       method: 'POST', url: '/api/notes', headers: { origin: 'http://localhost:80', cookie: gm.cookie },
       payload: { title: `Note ${access}`, body: 'private-body-marker', access, selectedParticipantIds, assetIds: [], ...extra },
     });
-    const all = await create('all-players', [], { markerType: 'image', markerAssetId: assetId, assetIds: [assetId] }); assert.equal(all.statusCode, 200);
+    const all = await create('all-players', [], { markerType: 'image', markerAssetId: assetId, assetIds: [assetId, secondAssetId] }); assert.equal(all.statusCode, 200);
+    assert.deepEqual(all.json().note.assetIds, [assetId, secondAssetId]);
     const selected = await create('selected-players', [ari.identity.participantId]); assert.equal(selected.statusCode, 200);
     const privateNote = await create('gm-only', [], { markerType: 'image', markerAssetId: assetId }); assert.equal(privateNote.statusCode, 200);
     const ids = [all.json().note.id, selected.json().note.id, privateNote.json().note.id] as string[];
@@ -131,7 +136,9 @@ test('note HTTP endpoints keep bodies out of board state and enforce audience ac
     assert.equal(ariBoard.body.includes('private-body-marker'), false);
     assert.deepEqual(ariBoard.json().noteMarkers.map((marker: { id: string }) => marker.id), ['public-note-marker']);
     assert.equal(ariBoard.json().noteMarkers[0].type, 'image');
-    assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[0]}`, headers: { cookie: bea.cookie } })).statusCode, 200);
+    const reloadedWithImages = await app.inject({ method: 'GET', url: `/api/notes/${ids[0]}`, headers: { cookie: bea.cookie } });
+    assert.equal(reloadedWithImages.statusCode, 200);
+    assert.deepEqual(reloadedWithImages.json().note.assetIds, [assetId, secondAssetId]);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: ari.cookie } })).statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: bea.cookie } })).statusCode, 404);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[2]}`, headers: { cookie: ari.cookie } })).statusCode, 404);
@@ -142,6 +149,8 @@ test('note HTTP endpoints keep bodies out of board state and enforce audience ac
     const removeAttachment = await app.inject({ method: 'PUT', url: `/api/notes/${ids[0]}`, headers: { origin: 'http://localhost:80', cookie: gm.cookie }, payload: { title: 'Changed', body: '', access: 'gm-only', selectedParticipantIds: [], assetIds: [], markerType: 'text', markerText: '' } });
     assert.equal(removeAttachment.statusCode, 200);
     assert.ok(store.getAsset(assetId));
+    assert.ok(store.getAsset(secondAssetId));
+    assert.deepEqual(removeAttachment.json().note.assetIds, []);
     assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: ari.cookie } })).statusCode, 404);
   } finally { await app.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
@@ -289,7 +298,13 @@ test('image upload deduplicates content and asset reads follow the current board
     assert.equal(duplicate.statusCode, 200);
     assert.equal(duplicate.json().deduplicated, true);
     assert.equal(duplicate.json().asset.id, assetId);
-    assert.equal(readdirSync(join(dataDir, 'assets')).length, 1);
+    const batch = await Promise.all([
+      upload(gmCookie, 'batch-a.png', pngBytes),
+      upload(gmCookie, 'batch-b.png', pngFixture(90)),
+    ]);
+    assert.deepEqual(batch.map((response) => response.statusCode), [200, 200]);
+    assert.deepEqual(batch.map((response) => response.json().deduplicated), [true, false]);
+    assert.equal(readdirSync(join(dataDir, 'assets')).length, 2);
     assert.equal((await upload(gmCookie, 'misleading.jpg', pngBytes, 'image/jpeg')).statusCode, 415);
     assert.equal((await upload(gmCookie, 'oversized.png', Buffer.alloc(1025))).statusCode, 413);
     assert.equal((await upload(playerCookie, 'forbidden.png')).statusCode, 403);
@@ -314,7 +329,7 @@ test('image upload deduplicates content and asset reads follow the current board
     assert.equal(deniedAsset.statusCode, 404);
     const gmAsset = await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: gmCookie } });
     assert.equal(gmAsset.statusCode, 200);
-    assert.equal((await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: gmCookie } })).json().assets.length, 1);
+    assert.equal((await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: gmCookie } })).json().assets.length, 2);
   } finally {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

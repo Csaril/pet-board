@@ -145,7 +145,14 @@ import '../styles/global.css';
       <div class="note-dialog-heading"><div><p class="eyebrow">Общие ресурсы</p><h2>Изображения</h2></div><button id="asset-picker-close" class="icon-button" type="button" aria-label="Закрыть окно выбора">×</button></div>
       <div class="asset-picker-modes"><button id="asset-picker-library-mode" type="button" class="active">Библиотека</button><button id="asset-picker-upload-mode" type="button">Загрузить новое</button></div>
       <section id="asset-picker-library"><div id="asset-picker-grid" class="asset-picker-grid"></div></section>
-      <section id="asset-picker-upload" hidden><label class="upload-button" for="note-image-upload">Выбрать изображения</label><input id="note-image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /><p id="asset-picker-upload-message" class="message" role="status"></p></section>
+      <section id="asset-picker-upload" hidden>
+        <div id="note-image-drop-zone" class="note-image-drop-zone" tabindex="0" role="group" aria-label="Перетащите изображения в эту область или выберите файлы">
+          <strong>Перетащите изображения сюда</strong><span>PNG, JPG или WebP · можно выбрать несколько файлов</span>
+          <label class="upload-button" for="note-image-upload">Выбрать изображения</label>
+          <input id="note-image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+        </div>
+        <ul id="note-image-upload-status" class="note-image-upload-status" aria-live="polite"></ul>
+      </section>
       <div class="note-dialog-actions"><button id="asset-picker-cancel" class="secondary" type="button">Отмена</button><button id="asset-picker-add" type="button">Добавить выбранные</button></div>
     </dialog>
     <script>

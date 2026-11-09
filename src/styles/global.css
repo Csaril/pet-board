@@ -153,6 +153,21 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .asset-picker-item img { width: 100%; height: 72px; object-fit: contain; border-radius: 4px; background: #f2f4f0; }
 .asset-picker-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-picker-dialog .upload-button { width: fit-content; padding: 0 14px; }
+.note-image-drop-zone { display: grid; justify-items: center; gap: 8px; min-height: 150px; margin: 8px 0 12px; padding: 17px; border: 2px dashed #c8d4ca; border-radius: 9px; background: #fafcf9; color: #58645b; text-align: center; transition: border-color .15s, background .15s, color .15s; }
+.note-image-drop-zone strong { font-size: 13px; }
+.note-image-drop-zone > span { color: #808a82; font-size: 11px; }
+.note-image-drop-zone .upload-button { min-width: 150px; margin: 2px 0 0; padding: 0 12px; }
+.note-image-drop-zone.drag-over { border-color: var(--accent); border-style: solid; background: #eaf2e9; color: #355744; box-shadow: inset 0 0 0 2px #426c5918; }
+.note-image-drop-zone:focus-visible { outline: 3px solid #426c5940; outline-offset: 2px; }
+.note-image-upload-status { display: grid; gap: 7px; max-height: 220px; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+.note-upload-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 8px 9px; border: 1px solid #e2e6df; border-radius: 7px; background: #fff; }
+.note-upload-name { overflow: hidden; color: #465149; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.note-upload-row progress { width: 100%; height: 7px; accent-color: var(--accent); }
+.note-upload-result { color: #6a756d; font-size: 10px; overflow-wrap: anywhere; }
+.note-upload-row.success { border-color: #c9ddcc; background: #f7fbf6; }
+.note-upload-row.success .note-upload-result { color: #386a43; }
+.note-upload-row.error { border-color: #e7cbc7; background: #fff9f8; }
+.note-upload-row.error .note-upload-result { color: #a13d36; }
 .note-marker { cursor: pointer; }
 .sticker-background-butter { fill: #f2e6b8; }
 .sticker-background-rose { fill: #f1d8d4; }
