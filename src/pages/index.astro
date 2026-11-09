@@ -55,6 +55,7 @@ import '../styles/global.css';
           <div id="board-canvas"></div>
           <div class="canvas-hint">Колесо мыши — масштаб · перетаскивайте пустое место — перемещение доски</div>
           <div id="canvas-message" class="canvas-message" role="status" aria-live="polite"></div>
+          <div id="lock-indicator" class="lock-indicator canvas-lock-indicator" hidden>🔒 Слой заблокирован</div>
           <div id="object-tools" class="object-tools" hidden>
             <span id="selection-name" class="selection-name">Изображение</span>
             <button id="duplicate-object" type="button" title="Дублировать">Дублировать</button>
@@ -82,7 +83,10 @@ import '../styles/global.css';
       <aside id="library-panel" class="library-panel" hidden>
         <div class="panel-heading"><div><p class="eyebrow">Изображения</p><h2>Библиотека ресурсов</h2></div><button id="library-close" class="icon-button" type="button" aria-label="Закрыть библиотеку">×</button></div>
         <label class="upload-button" for="image-upload">Загрузить изображение</label>
-        <input id="image-upload" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+        <input id="image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+        <div id="upload-drop-zone" class="upload-drop-zone" tabindex="0" role="button" aria-label="Перетащите сюда изображения для загрузки">
+          Перетащите сюда одно или несколько изображений
+        </div>
         <p class="panel-note">PNG, JPG или WebP · до <span id="upload-limit">25</span> MB</p>
         <p id="upload-message" class="message" role="status" aria-live="polite"></p>
         <ul id="assets-list" class="assets-list"></ul>

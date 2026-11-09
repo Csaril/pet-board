@@ -38,7 +38,21 @@ test('board commands enforce role, layer lock, object permission, and private pr
 
     executeBoardCommand(store, gm, { type: 'layer:update', id: publicLayer.id, changes: { locked: true } });
     assert.throws(() => executeBoardCommand(store, player, { type: 'object:update', id: object.id, changes: { x: 1 } }), /заблокирован/i);
+    for (const changes of [
+      { x: 1 }, { width: 20 }, { height: 30 }, { flipX: true }, { flipY: true },
+      { crop: { x: 0, y: 0, width: 0.5, height: 0.5 } }, { layerId: privateLayer.id }, { orderIndex: 5 },
+    ]) {
+      assert.throws(() => executeBoardCommand(store, gm, { type: 'object:update', id: object.id, changes }), /заблокирован/i);
+    }
     assert.throws(() => executeBoardCommand(store, gm, { type: 'object:delete', id: object.id }), /заблокирован/i);
+    assert.throws(() => executeBoardCommand(store, gm, { type: 'object:duplicate', id: object.id }), /заблокирован/i);
+    assert.throws(() => executeBoardCommand(store, gm, { type: 'object:order', id: object.id, direction: 'front' }), /заблокирован/i);
+    assert.throws(() => executeBoardCommand(store, gm, { type: 'layer:delete', id: publicLayer.id, targetLayerId: privateLayer.id }), /заблокирован/i);
+    assert.throws(() => executeBoardCommand(store, gm, { type: 'layer:delete', id: publicLayer.id, deleteObjects: true }), /заблокирован/i);
+    assert.equal(store.getObject(object.id)?.x, 90);
+    executeBoardCommand(store, gm, { type: 'layer:update', id: publicLayer.id, changes: { locked: false } });
+    executeBoardCommand(store, gm, { type: 'layer:update', id: privateLayer.id, changes: { locked: true } });
+    assert.throws(() => executeBoardCommand(store, gm, { type: 'object:update', id: object.id, changes: { layerId: privateLayer.id } }), /целевой слой заблокирован/i);
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 

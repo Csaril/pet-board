@@ -89,6 +89,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       const id = text(command.id, 'ID слоя', 64);
       const layer = store.getLayer(id);
       if (!layer) throw new BoardCommandError('Слой не найден.');
+      if (layer.locked) throw new BoardCommandError('Слой заблокирован. Сначала разблокируйте его.');
       if (store.getLayers().length <= 1) throw new BoardCommandError('В комнате должен остаться хотя бы один слой.');
       const count = store.countObjectsInLayer(id);
       const targetLayerId = command.targetLayerId === undefined ? undefined : text(command.targetLayerId, 'Целевой слой', 64);

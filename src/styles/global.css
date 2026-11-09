@@ -77,12 +77,16 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .layer-main { display: flex; align-items: center; gap: 6px; }
 .layer-select { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; color: #333b35; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 .layer-action { width: 27px; height: 27px; margin: 0; padding: 0; border: 1px solid #e3e7e1; border-radius: 6px; background: #fff; color: #647067; font-size: 12px; }
+.layer-lock.is-locked { border-color: #e8c98f; background: #fff5e3; color: #855719; }
 .layer-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .layer-meta select { height: 28px; padding: 0 6px; font-size: 10px; }
 .layer-state { color: #858d87; font-size: 10px; }
 .library-panel { position: absolute; z-index: 4; inset: 0 auto 0 0; width: min(370px, 90vw); overflow-y: auto; padding: 18px; border-right: 1px solid #dce1db; background: #fff; box-shadow: 12px 0 28px #1f30200f; }
 .upload-button { display: grid; place-items: center; height: 40px; margin-top: 15px; border: 1px solid #bfcfc2; border-radius: 7px; color: #355744; background: #f4f8f3; font-size: 12px; font-weight: 700; cursor: pointer; }
 .upload-button:hover { background: #eaf2e9; }
+.upload-drop-zone { display: grid; place-items: center; min-height: 82px; margin: 8px 0 4px; padding: 14px; border: 2px dashed #c8d4ca; border-radius: 8px; background: #fafcf9; color: #657168; font-size: 11px; line-height: 1.5; text-align: center; }
+.upload-drop-zone.drag-over { border-color: var(--accent); background: #eaf2e9; color: #355744; }
+.upload-drop-zone:focus-visible { outline: 3px solid #426c5940; outline-offset: 2px; }
 .assets-list { display: grid; gap: 8px; }
 .asset-item { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 7px; border: 1px solid #e4e8e2; border-radius: 8px; }
 .asset-thumb { width: 52px; height: 44px; object-fit: contain; border-radius: 4px; background: #f0f2ef; }
@@ -93,6 +97,9 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .object-tools button { height: 29px; padding: 0 8px; font-size: 10px; }
 .object-tools button.danger { border-color: #ead6d3; color: #9b4b42; }
 .selection-name { max-width: 110px; overflow: hidden; padding: 0 5px; color: #677169; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.lock-indicator { padding: 4px 7px; border-radius: 5px; background: #fff1d8; color: #855719; font-size: 10px; font-weight: 700; }
+.canvas-lock-indicator { position: absolute; z-index: 2; top: 14px; right: 18px; pointer-events: none; }
+#upload-message { white-space: pre-line; overflow-wrap: anywhere; }
 .stretch-toggle, .player-move { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #59635c; font-size: 10px; white-space: nowrap; }
 .stretch-toggle input, .player-move input { width: 13px; height: 13px; margin: 0; }
 .move-layer { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #59635c; font-size: 10px; }

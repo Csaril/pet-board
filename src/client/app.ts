@@ -1,5 +1,6 @@
 import Konva from 'konva';
 import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, CropRect } from '../shared/board.js';
+import { cameraForBounds, isValidCamera, zoomKeepingScreenPoint } from '../shared/camera.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -24,6 +25,7 @@ const layersList = select<HTMLUListElement>('#layers-list');
 const libraryPanel = select<HTMLElement>('#library-panel');
 const assetsList = select<HTMLUListElement>('#assets-list');
 const uploadInput = select<HTMLInputElement>('#image-upload');
+const uploadDropZone = select<HTMLElement>('#upload-drop-zone');
 const uploadMessage = select<HTMLElement>('#upload-message');
 const objectTools = select<HTMLElement>('#object-tools');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
@@ -31,7 +33,7 @@ const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
 const MAX_WORLD_COORDINATE = 10_000_000;
 const MAX_ZOOM = 4;
-const MIN_ZOOM = 0.08;
+const MIN_ZOOM = 0.00001;
 
 type AppIdentity = BoardStateMessage['identity'];
 interface RoomMessage extends BoardStateMessage {
@@ -70,6 +72,7 @@ let activeLayerId: string | undefined;
 let cropMode = false;
 let cropGesture: CropGesture | undefined;
 let camera = { x: 0, y: 0, scale: 1 };
+let hasRestoredCamera = false;
 let panGesture: { x: number; y: number; cameraX: number; cameraY: number } | undefined;
 let messageTimer: number | undefined;
 const imageCache = new Map<string, HTMLImageElement>();
@@ -184,24 +187,28 @@ function cameraStorageKey() { return `tabletop-camera:${location.host}`; }
 function saveCamera() {
   if (!stage) return;
   camera = { x: stage.x(), y: stage.y(), scale: stage.scaleX() };
-  localStorage.setItem(cameraStorageKey(), JSON.stringify(camera));
+  try { localStorage.setItem(cameraStorageKey(), JSON.stringify({ version: 2, camera })); } catch { /* Storage can be disabled or full. */ }
 }
 function restoreCamera() {
+  camera = { x: 0, y: 0, scale: 1 };
+  hasRestoredCamera = false;
   try {
-    const stored = JSON.parse(localStorage.getItem(cameraStorageKey()) || 'null') as Partial<typeof camera> | null;
-    if (stored && Number.isFinite(stored.x) && Number.isFinite(stored.y) && Number.isFinite(stored.scale) && stored.scale! >= MIN_ZOOM && stored.scale! <= MAX_ZOOM) {
-      camera = { x: stored.x!, y: stored.y!, scale: stored.scale! };
+    const stored = JSON.parse(localStorage.getItem(cameraStorageKey()) || 'null') as { version?: number; camera?: unknown } | null;
+    if (stored?.version === 2 && isValidCamera(stored.camera, MAX_WORLD_COORDINATE * MAX_ZOOM, MIN_ZOOM, MAX_ZOOM)) {
+      camera = stored.camera;
+      hasRestoredCamera = true;
     }
-  } catch { camera = { x: 0, y: 0, scale: 1 }; }
+  } catch { /* Use a centered initial camera when storage is invalid or unavailable. */ }
 }
 
 function setupStage() {
   restoreCamera();
   const width = Math.max(1, canvasWrap.clientWidth);
   const height = Math.max(1, canvasWrap.clientHeight);
+  if (!hasRestoredCamera) camera = { x: width / 2, y: height / 2, scale: 1 };
   stage = new Konva.Stage({ container: canvasContainer, width, height, x: camera.x, y: camera.y, scaleX: camera.scale, scaleY: camera.scale });
   boardLayer = new Konva.Layer({ listening: true });
-  interactionLayer = new Konva.Layer({ listening: false });
+  interactionLayer = new Konva.Layer({ listening: true });
   transformer = new Konva.Transformer({
     rotateEnabled: false,
     flipEnabled: false,
@@ -242,24 +249,29 @@ function setupStage() {
     const oldScale = stage!.scaleX();
     const pointer = stage!.getPointerPosition();
     if (!pointer) return;
-    const world = { x: (pointer.x - stage!.x()) / oldScale, y: (pointer.y - stage!.y()) / oldScale };
     const factor = 1.06;
     const nextScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, oldScale * (event.evt.deltaY > 0 ? 1 / factor : factor)));
-    stage!.scale({ x: nextScale, y: nextScale });
-    stage!.position({ x: pointer.x - world.x * nextScale, y: pointer.y - world.y * nextScale });
+    const next = zoomKeepingScreenPoint({ x: stage!.x(), y: stage!.y(), scale: oldScale }, pointer, nextScale);
+    stage!.scale({ x: next.scale, y: next.scale });
+    stage!.position({ x: next.x, y: next.y });
     saveCamera();
     boardLayer!.batchDraw();
     interactionLayer!.batchDraw();
   });
   resizeObserver = new ResizeObserver(() => {
     if (!stage) return;
+    const oldWidth = stage.width(); const oldHeight = stage.height();
     stage.size({ width: Math.max(1, canvasWrap.clientWidth), height: Math.max(1, canvasWrap.clientHeight) });
+    stage.position({ x: stage.x() + (stage.width() - oldWidth) / 2, y: stage.y() + (stage.height() - oldHeight) / 2 });
+    saveCamera();
     interactionLayer?.batchDraw();
   });
   resizeObserver.observe(canvasWrap);
   select<HTMLButtonElement>('#zoom-reset').addEventListener('click', () => {
-    stage!.position({ x: 0, y: 0 });
-    stage!.scale({ x: 1, y: 1 });
+    const center = { x: stage!.width() / 2, y: stage!.height() / 2 };
+    const next = zoomKeepingScreenPoint({ x: stage!.x(), y: stage!.y(), scale: stage!.scaleX() }, center, 1);
+    stage!.scale({ x: next.scale, y: next.scale });
+    stage!.position({ x: next.x, y: next.y });
     saveCamera();
     boardLayer!.batchDraw();
     interactionLayer!.batchDraw();
@@ -271,20 +283,13 @@ function fitAllObjects() {
   if (!stage || !roomState) return;
   const visibleIds = new Set(roomState.layers.filter((layer) => layer.visible).map((layer) => layer.id));
   const objects = roomState.objects.filter((item) => visibleIds.has(item.layerId));
-  if (!objects.length) {
-    stage.position({ x: stage.width() / 2, y: stage.height() / 2 });
-    stage.scale({ x: 1, y: 1 });
-    saveCamera();
-    return;
-  }
-  const minX = Math.min(...objects.map((item) => item.x));
-  const minY = Math.min(...objects.map((item) => item.y));
-  const maxX = Math.max(...objects.map((item) => item.x + item.width));
-  const maxY = Math.max(...objects.map((item) => item.y + item.height));
-  const padding = 64;
-  const scale = Math.max(MIN_ZOOM, Math.min(1, (stage.width() - padding * 2) / Math.max(1, maxX - minX), (stage.height() - padding * 2) / Math.max(1, maxY - minY)));
-  stage.scale({ x: scale, y: scale });
-  stage.position({ x: (stage.width() - (maxX - minX) * scale) / 2 - minX * scale, y: (stage.height() - (maxY - minY) * scale) / 2 - minY * scale });
+  const bounds = objects.length ? {
+    minX: Math.min(...objects.map((item) => item.x)), minY: Math.min(...objects.map((item) => item.y)),
+    maxX: Math.max(...objects.map((item) => item.x + item.width)), maxY: Math.max(...objects.map((item) => item.y + item.height)),
+  } : undefined;
+  const next = cameraForBounds(bounds, stage.width(), stage.height(), 64, MAX_ZOOM);
+  stage.position({ x: next.x, y: next.y });
+  stage.scale({ x: next.scale, y: next.scale });
   saveCamera();
   boardLayer!.batchDraw();
   interactionLayer!.batchDraw();
@@ -340,9 +345,9 @@ function drawObjects() {
         draggable: canMove(item, layer) && !(cropMode && selectedObjectId === item.id),
         name: `board-object ${item.id}`,
       });
-      const imageNode = new Konva.Image({ image: htmlImage, listening: false });
+      const imageNode = new Konva.Image({ image: htmlImage, listening: true });
       updateImageNode(imageNode, item, htmlImage);
-      const border = new Konva.Rect({ x: 0, y: 0, width: item.width, height: item.height, stroke: '#426c59', strokeWidth: 1, dash: [5, 3], listening: false, strokeEnabled: false });
+      const border = new Konva.Rect({ x: 0, y: 0, width: item.width, height: item.height, stroke: layer.locked ? '#bd7b20' : '#1684d4', strokeWidth: 2, dash: [5, 3], listening: false, strokeEnabled: false });
       group.add(imageNode, border);
       group.on('click tap', (event) => { event.cancelBubble = true; setSelectedObject(item.id); });
       group.on('dragend', () => { void runCommand('object:update', { id: item.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }); });
@@ -382,11 +387,13 @@ function updateSelectionControls() {
   const rendered = item && renderedObjects.get(item.id);
   objectTools.hidden = !item || !layer || !rendered || identity?.role !== 'gm';
   if (!item || !layer || !rendered) {
+    select<HTMLElement>('#lock-indicator').hidden = true;
     transformer?.nodes([]);
     return;
   }
   select<HTMLElement>('#selection-name').textContent = roomState?.assets?.find((asset) => asset.id === item.assetId)?.originalName || 'Изображение';
   rendered.border.strokeEnabled(true);
+  select<HTMLElement>('#lock-indicator').hidden = !layer.locked;
   selectedLayer.replaceChildren(...(roomState?.layers || []).map((entry) => {
     const option = document.createElement('option'); option.value = entry.id; option.textContent = entry.name; option.disabled = entry.locked && entry.id !== item.layerId; return option;
   }));
@@ -506,7 +513,7 @@ function renderLayers() {
     choose.addEventListener('click', () => { activeLayerId = layer.id; localStorage.setItem(`tabletop-active-layer:${location.host}`, layer.id); renderLayers(); });
     const visible = document.createElement('button'); visible.type = 'button'; visible.className = 'layer-action'; visible.textContent = layer.visible ? '◉' : '○'; visible.title = layer.visible ? 'Скрыть слой' : 'Показать слой';
     visible.addEventListener('click', () => void runCommand('layer:update', { id: layer.id, changes: { visible: !layer.visible } }));
-    const locked = document.createElement('button'); locked.type = 'button'; locked.className = 'layer-action'; locked.textContent = layer.locked ? '🔒' : '▢'; locked.title = layer.locked ? 'Разблокировать' : 'Заблокировать';
+    const locked = document.createElement('button'); locked.type = 'button'; locked.className = `layer-action layer-lock${layer.locked ? ' is-locked' : ''}`; locked.textContent = layer.locked ? '🔒' : '🔓'; locked.title = layer.locked ? 'Разблокировать слой' : 'Заблокировать слой'; locked.setAttribute('aria-label', locked.title); locked.setAttribute('aria-pressed', String(layer.locked));
     locked.addEventListener('click', () => void runCommand('layer:update', { id: layer.id, changes: { locked: !layer.locked } }));
     main.append(choose, visible, locked);
     const meta = document.createElement('div'); meta.className = 'layer-meta';
@@ -640,20 +647,59 @@ stretchControl.addEventListener('change', () => { if (transformer) transformer.k
 allowPlayerMoveControl.addEventListener('change', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { allowPlayerMove: allowPlayerMoveControl.checked } }));
 selectedLayer.addEventListener('change', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { layerId: selectedLayer.value } }));
 
-uploadInput.addEventListener('change', async () => {
-  const file = uploadInput.files?.[0];
+async function uploadFiles(files: File[]) {
   uploadInput.value = '';
-  if (!file) return;
+  if (!files.length) return;
   const limit = roomState?.maxUploadBytes ?? 25 * 1024 * 1024;
-  if (file.size > limit) { uploadMessage.textContent = `Файл больше лимита ${formatSize(limit)}.`; return; }
-  uploadMessage.textContent = 'Загрузка…';
-  const body = new FormData(); body.append('image', file);
-  try {
-    const response = await fetch('/api/assets', { method: 'POST', body });
-    const result = await response.json() as { deduplicated?: boolean; error?: string };
-    if (!response.ok) throw new Error(result.error || 'Не удалось загрузить файл.');
-    uploadMessage.textContent = result.deduplicated ? 'Такой ресурс уже есть в библиотеке.' : 'Изображение добавлено.';
-  } catch (error) { uploadMessage.textContent = error instanceof Error ? error.message : 'Ошибка загрузки.'; }
+  const statuses = files.map((file) => ({ file, result: file.size > limit ? `Ошибка: файл больше лимита ${formatSize(limit)}` : 'Загрузка…' }));
+  const renderStatus = () => { uploadMessage.textContent = statuses.map(({ file, result }) => `${file.name}: ${result}`).join('\n'); };
+  renderStatus();
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < statuses.length) {
+      const index = cursor++;
+      const current = statuses[index]!;
+      if (current.file.size > limit) continue;
+      const body = new FormData(); body.append('image', current.file);
+      try {
+        const response = await fetch('/api/assets', { method: 'POST', body });
+        const result = await response.json() as { deduplicated?: boolean; error?: string };
+        if (!response.ok) throw new Error(result.error || 'Не удалось загрузить файл.');
+        current.result = result.deduplicated ? 'Уже есть в библиотеке (дубликат).' : 'Загружено.';
+      } catch (error) { current.result = `Ошибка: ${error instanceof Error ? error.message : 'не удалось загрузить.'}`; }
+      renderStatus();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, statuses.length) }, worker));
+}
+
+uploadInput.addEventListener('change', () => { void uploadFiles(Array.from(uploadInput.files || [])); });
+uploadDropZone.addEventListener('dragenter', (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+  event.preventDefault(); uploadDropZone.classList.add('drag-over');
+});
+uploadDropZone.addEventListener('dragover', (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+  event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  uploadDropZone.classList.add('drag-over');
+});
+uploadDropZone.addEventListener('dragleave', (event) => {
+  if (event.relatedTarget instanceof Node && uploadDropZone.contains(event.relatedTarget)) return;
+  uploadDropZone.classList.remove('drag-over');
+});
+uploadDropZone.addEventListener('drop', (event) => {
+  event.preventDefault(); event.stopPropagation(); uploadDropZone.classList.remove('drag-over');
+  void uploadFiles(Array.from(event.dataTransfer?.files || []));
+});
+uploadDropZone.addEventListener('click', () => uploadInput.click());
+uploadDropZone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); uploadInput.click(); }
+});
+window.addEventListener('dragover', (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes('Files')) event.preventDefault();
+});
+window.addEventListener('drop', (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes('Files')) event.preventDefault();
 });
 
 async function restoreSession() {
