@@ -17,7 +17,9 @@ import { saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
 import type { DiceRollEntry } from '../src/shared/board.js';
 import { systemModuleRegistry } from '../src/modules/registry.js';
+import { pbtaSheetSchema, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
 import { calculatePbtARoll, rollFreeDice, type SituationalModifier } from '../src/modules/system/pbta-2d6/roll.js';
+import { executeSheetCommand } from './sheets.js';
 
 const COOKIE_PATH = '/';
 
@@ -149,6 +151,19 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     }
     if (characterOwnerId && characterOwnerId !== actor.participantId) throw new BoardCommandError('Владелец характеристики не совпадает с участником броска.');
     if (original && identity.role !== 'gm' && original.authorId !== identity.participantId) throw new BoardCommandError('Повторный бросок может выполнить его автор.');
+    if (!original && characterId && characterOwnerId) {
+      const sheet = store.getSheet(characterId);
+      if (sheet) {
+        if (sheet.systemId !== pbtaSystemModule.id) throw new BoardCommandError('Лист не относится к активной системе PbtA.');
+        if (!sheet.assignedPlayerId || sheet.assignedPlayerId !== characterOwnerId || sheet.assignedPlayerId !== actor.participantId) {
+          throw new BoardCommandError('Лист персонажа не назначен участнику броска.');
+        }
+        const characteristic = pbtaSheetSchema.characteristics.find((entry) => entry.name === characteristicName);
+        if (!characteristic || sheet.characteristics[characteristic.key] !== bonus) {
+          throw new BoardCommandError('Бонус не совпадает со значением характеристики в листе персонажа.');
+        }
+      }
+    }
     const result = calculatePbtARoll({ characteristicBonus: bonus as number, situationalModifier: modifier as SituationalModifier, disadvantage }, secureRandomInt);
     return {
       id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: actor.participantId, actorName: actor.name,
@@ -162,6 +177,23 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     reply.header('Cache-Control', 'no-store');
     return { ...store.snapshot(session.identity), maxUploadBytes: config.maxUploadBytes };
+  });
+
+  app.get('/api/sheets', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    reply.header('Cache-Control', 'no-store');
+    return { sheets: store.getSheetsFor(session.identity) };
+  });
+
+  app.get('/api/sheets/:id', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const { id } = request.params as { id: string };
+    const sheet = store.getSheetFor(id, session.identity);
+    if (!sheet) return reply.code(404).send({ error: 'Лист персонажа не найден.' });
+    reply.header('Cache-Control', 'no-store');
+    return { sheet };
   });
 
   app.get('/api/notes', async (request, reply) => {
@@ -270,13 +302,12 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Загрузка доступна только ведущему.' });
     try {
       const file = await request.file({ limits: { fileSize: config.maxUploadBytes, files: 1, fields: 0 } });
       if (!file || file.fieldname !== 'image') return reply.code(400).send({ error: 'Выберите файл изображения.' });
       const bytes = await file.toBuffer();
       if (file.file.truncated) return reply.code(413).send({ error: 'Файл превышает установленный лимит.' });
-      const result = await saveImageAsset(store, config.dataDir, bytes, file.mimetype, file.filename, config.maxUploadBytes);
+      const result = await saveImageAsset(store, config.dataDir, bytes, file.mimetype, file.filename, config.maxUploadBytes, session.identity.participantId);
       sendState();
       return { asset: result.asset, deduplicated: result.deduplicated };
     } catch (error) {
@@ -342,6 +373,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
         if (input.type === 'dice:pbta' || input.type === 'dice:free' || input.type === 'dice:reroll') {
           const entry = createDiceRoll(liveSession.identity, input);
           store.saveDiceRoll(entry);
+        } else if (typeof input.type === 'string' && input.type.startsWith('sheet:')) {
+          executeSheetCommand(store, liveSession.identity, input);
         } else if (input.type === 'room:system:set') {
           if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.');
           if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version'].includes(key))) throw new BoardCommandError('Некорректные настройки системы.');

@@ -307,7 +307,6 @@ test('image upload deduplicates content and asset reads follow the current board
     assert.equal(readdirSync(join(dataDir, 'assets')).length, 2);
     assert.equal((await upload(gmCookie, 'misleading.jpg', pngBytes, 'image/jpeg')).statusCode, 415);
     assert.equal((await upload(gmCookie, 'oversized.png', Buffer.alloc(1025))).statusCode, 413);
-    assert.equal((await upload(playerCookie, 'forbidden.png')).statusCode, 403);
 
     const hiddenAsset = await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: playerCookie } });
     assert.equal(hiddenAsset.statusCode, 404);
@@ -330,6 +329,13 @@ test('image upload deduplicates content and asset reads follow the current board
     const gmAsset = await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: gmCookie } });
     assert.equal(gmAsset.statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: gmCookie } })).json().assets.length, 2);
+
+    const playerUpload = await upload(playerCookie, 'player-own.png', pngFixture(210));
+    assert.equal(playerUpload.statusCode, 200);
+    assert.equal(playerUpload.json().deduplicated, false);
+    const playerAssetId = playerUpload.json().asset.id as string;
+    assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${playerAssetId}`, headers: { cookie: playerCookie } })).statusCode, 200);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${playerAssetId}`, headers: { cookie: gmCookie } })).statusCode, 200);
   } finally {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

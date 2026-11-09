@@ -105,12 +105,56 @@ export interface NoteListItem {
   markerId?: string;
 }
 
+export type SheetCharacteristicKey = 'might' | 'insight' | 'glory' | 'will';
+
+export interface CharacterSheetCounter {
+  id: string;
+  name: string;
+  value: number;
+  orderIndex: number;
+}
+
+export interface CharacterSheetAbility {
+  id: string;
+  name: string;
+  description: string;
+  assetId: string | null;
+  counterEnabled: boolean;
+  counterName: string;
+  counterValue: number;
+  checkboxEnabled: boolean;
+  checkboxLabel: string;
+  checked: boolean;
+  orderIndex: number;
+}
+
+export interface CharacterSheet {
+  id: string;
+  creatorId: string;
+  creatorName: string;
+  assignedPlayerId: string | null;
+  assignedPlayerName: string | null;
+  systemId: string;
+  systemVersion: string;
+  schemaVersion: number;
+  characterName: string;
+  portraitAssetId: string | null;
+  characteristics: Record<SheetCharacteristicKey, number>;
+  fate: number;
+  counters: CharacterSheetCounter[];
+  abilities: CharacterSheetAbility[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BoardSnapshot {
   layers: BoardLayer[];
   objects: BoardImage[];
   stickers: BoardSticker[];
   noteMarkers: NoteMarker[];
   assets?: BoardAsset[];
+  availableAssets?: BoardAsset[];
+  sheets: CharacterSheet[];
   activeSystem: { id: string; version: string } | null;
   diceRolls: DiceRollEntry[];
 }

@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -18,6 +18,15 @@ export interface StickerPatch { text?: string; x?: number; y?: number; width?: n
 export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string }
 export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string }
 export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number }
+export interface SheetInput {
+  id: string; creatorId: string; creatorName: string; assignedPlayerId: string | null; assignedPlayerName: string | null;
+  systemId: string; systemVersion: string; schemaVersion: number;
+  characterName: string; portraitAssetId: string | null; characteristics: Record<SheetCharacteristicKey, number>; fate: number;
+}
+export interface SheetPatch { characterName?: string; portraitAssetId?: string | null; characteristics?: Record<SheetCharacteristicKey, number>; fate?: number }
+export interface CounterPatch { name?: string; value?: number }
+export interface AbilityInput { id: string; name: string; description: string; assetId: string | null; counterEnabled: boolean; counterName: string; counterValue: number; checkboxEnabled: boolean; checkboxLabel: string; checked: boolean }
+export interface AbilityPatch { name?: string; description?: string; assetId?: string | null; counterEnabled?: boolean; counterName?: string; counterValue?: number; checkboxEnabled?: boolean; checkboxLabel?: string; checked?: boolean; orderIndex?: number }
 
 type LayerRow = { id: string; name: string; order_index: number; visible: number; locked: number; audience: LayerAudience };
 type ObjectRow = {
@@ -28,6 +37,17 @@ type AssetRow = { id: string; sha256: string; mime_type: BoardAsset['mimeType'];
 type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; order_index: number };
 type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null };
 type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
+type SheetRow = {
+  id: string; creator_id: string; creator_name: string; assigned_player_id: string | null; assigned_player_name: string | null;
+  system_id: string; system_version: string; schema_version: number;
+  character_name: string; portrait_asset_id: string | null; characteristics_json: string; fate: number; created_at: string; updated_at: string;
+};
+type CounterRow = { id: string; sheet_id: string; name: string; value: number; order_index: number };
+type AbilityRow = {
+  id: string; sheet_id: string; name: string; description: string; asset_id: string | null;
+  counter_enabled: number; counter_name: string; counter_value: number;
+  checkbox_enabled: number; checkbox_label: string; checked: number; order_index: number;
+};
 
 function toLayer(row: LayerRow): BoardLayer {
   return { id: row.id, name: row.name, orderIndex: row.order_index, visible: row.visible === 1, locked: row.locked === 1, audience: row.audience };
@@ -50,6 +70,17 @@ function toSticker(row: StickerRow): BoardSticker {
 }
 function toNoteMarker(row: NoteMarkerRow): NoteMarker {
   return { id: row.id, noteId: row.note_id, layerId: row.layer_id, x: row.x, y: row.y, orderIndex: row.order_index, type: row.marker_type, text: row.marker_text || row.title, ...(row.marker_asset_id ? { assetId: row.marker_asset_id, assetWidth: row.asset_width || 1, assetHeight: row.asset_height || 1 } : {}) };
+}
+function toCounter(row: CounterRow): CharacterSheetCounter {
+  return { id: row.id, name: row.name, value: row.value, orderIndex: row.order_index };
+}
+function toAbility(row: AbilityRow): CharacterSheetAbility {
+  return {
+    id: row.id, name: row.name, description: row.description, assetId: row.asset_id,
+    counterEnabled: row.counter_enabled === 1, counterName: row.counter_name, counterValue: row.counter_value,
+    checkboxEnabled: row.checkbox_enabled === 1, checkboxLabel: row.checkbox_label, checked: row.checked === 1,
+    orderIndex: row.order_index,
+  };
 }
 
 export class RoomStore {
@@ -182,7 +213,95 @@ export class RoomStore {
         order_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS stickers_layer_order ON stickers(layer_id, order_index);
+      CREATE TABLE IF NOT EXISTS asset_uploaders (
+        asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+        participant_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (asset_id, participant_id)
+      );
+      CREATE INDEX IF NOT EXISTS asset_uploaders_participant ON asset_uploaders(participant_id);
+      CREATE TABLE IF NOT EXISTS character_sheets (
+        id TEXT PRIMARY KEY,
+        creator_id TEXT NOT NULL,
+        creator_name TEXT NOT NULL,
+        assigned_player_id TEXT,
+        assigned_player_name TEXT,
+        system_id TEXT NOT NULL,
+        system_version TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        character_name TEXT NOT NULL DEFAULT '',
+        portrait_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
+        characteristics_json TEXT NOT NULL,
+        fate INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS character_sheets_system ON character_sheets(system_id);
+      CREATE TABLE IF NOT EXISTS character_counters (
+        id TEXT PRIMARY KEY,
+        sheet_id TEXT NOT NULL REFERENCES character_sheets(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        value INTEGER NOT NULL,
+        order_index INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS character_counters_sheet_order ON character_counters(sheet_id, order_index);
+      CREATE TABLE IF NOT EXISTS character_abilities (
+        id TEXT PRIMARY KEY,
+        sheet_id TEXT NOT NULL REFERENCES character_sheets(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
+        counter_enabled INTEGER NOT NULL DEFAULT 0 CHECK (counter_enabled IN (0, 1)),
+        counter_name TEXT NOT NULL DEFAULT '',
+        counter_value INTEGER NOT NULL DEFAULT 0,
+        checkbox_enabled INTEGER NOT NULL DEFAULT 0 CHECK (checkbox_enabled IN (0, 1)),
+        checkbox_label TEXT NOT NULL DEFAULT '',
+        checked INTEGER NOT NULL DEFAULT 0 CHECK (checked IN (0, 1)),
+        order_index INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS character_abilities_sheet_order ON character_abilities(sheet_id, order_index);
+      CREATE INDEX IF NOT EXISTS character_abilities_asset ON character_abilities(asset_id);
     `);
+    const sheetColumns = this.db.pragma('table_info(character_sheets)') as Array<{ name: string }>;
+    if (sheetColumns.length > 0 && !sheetColumns.some((column) => column.name === 'creator_id')) {
+      this.db.pragma('foreign_keys = OFF');
+      try {
+        this.db.transaction(() => {
+          this.db.exec('DROP TABLE IF EXISTS character_sheets_new');
+          this.db.exec(`CREATE TABLE character_sheets_new (
+            id TEXT PRIMARY KEY,
+            creator_id TEXT NOT NULL,
+            creator_name TEXT NOT NULL,
+            assigned_player_id TEXT,
+            assigned_player_name TEXT,
+            system_id TEXT NOT NULL,
+            system_version TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            character_name TEXT NOT NULL DEFAULT '',
+            portrait_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
+            characteristics_json TEXT NOT NULL,
+            fate INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )`);
+          this.db.exec(`INSERT INTO character_sheets_new
+            (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version,
+             character_name, portrait_asset_id, characteristics_json, fate, created_at, updated_at)
+            SELECT id, owner_id, owner_name, owner_id, owner_name, system_id, system_version, schema_version,
+             character_name, portrait_asset_id, characteristics_json, fate, created_at, updated_at
+            FROM character_sheets`);
+          this.db.exec('DROP TABLE character_sheets');
+          this.db.exec('ALTER TABLE character_sheets_new RENAME TO character_sheets');
+          this.db.exec('CREATE INDEX IF NOT EXISTS character_sheets_system ON character_sheets(system_id)');
+          this.db.exec('CREATE INDEX IF NOT EXISTS character_sheets_assigned ON character_sheets(assigned_player_id)');
+        })();
+      } finally {
+        this.db.pragma('foreign_keys = ON');
+      }
+      const violations = this.db.pragma('foreign_key_check') as unknown[];
+      if (violations.length > 0) throw new Error('Не удалось проверить целостность листов персонажей после миграции.');
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS character_sheets_assigned ON character_sheets(assigned_player_id)');
     const stickerSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stickers'").get() as { sql: string } | undefined;
     if (stickerSchema && !stickerSchema.sql.includes("'black'")) {
       const migrateStickerColors = this.db.transaction(() => {
@@ -467,6 +586,8 @@ export class RoomStore {
     if (!this.getAsset(assetId)) return false;
     if (identity.role === 'gm') return true;
     if (this.isAssetUsedByPublicObject(assetId)) return true;
+    if (this.isAssetUploadedBy(assetId, identity.participantId)) return true;
+    if (this.isAssetUsedBySheet(assetId, identity)) return true;
     const noteIds = this.db.prepare('SELECT note_id FROM note_assets WHERE asset_id = ?').all(assetId) as Array<{ note_id: string }>;
     const markerNoteIds = this.db.prepare("SELECT id AS note_id FROM notes WHERE marker_asset_id = ? AND marker_type = 'image'").all(assetId) as Array<{ note_id: string }>;
     return [...noteIds, ...markerNoteIds].some(({ note_id }) => this.canReadNote(note_id, identity));
@@ -514,17 +635,162 @@ export class RoomStore {
   }
   deleteSticker(id: string): void { this.db.prepare('DELETE FROM stickers WHERE id = ?').run(id); }
 
+  getSheets(): CharacterSheet[] {
+    const rows = this.db.prepare(`SELECT * FROM character_sheets
+      ORDER BY assigned_player_id IS NULL DESC, assigned_player_name COLLATE NOCASE ASC, character_name COLLATE NOCASE ASC, updated_at DESC`).all() as SheetRow[];
+    return rows.map((row) => this.hydrateSheet(row));
+  }
+  getSheetsFor(identity: Identity): CharacterSheet[] {
+    if (identity.role === 'gm') return this.getSheets();
+    const rows = this.db.prepare(`SELECT * FROM character_sheets
+      WHERE assigned_player_id IS NOT NULL
+      ORDER BY character_name COLLATE NOCASE ASC, updated_at DESC`).all() as SheetRow[];
+    return rows.map((row) => this.hydrateSheet(row));
+  }
+  getSheet(id: string): CharacterSheet | undefined {
+    const row = this.db.prepare('SELECT * FROM character_sheets WHERE id = ?').get(id) as SheetRow | undefined;
+    return row ? this.hydrateSheet(row) : undefined;
+  }
+  /** Players only receive sheets that have an assigned player; unassigned drafts stay GM-only. */
+  getSheetFor(id: string, identity: Identity): CharacterSheet | undefined {
+    const sheet = this.getSheet(id);
+    if (!sheet) return undefined;
+    if (identity.role === 'gm' || sheet.assignedPlayerId) return sheet;
+    return undefined;
+  }
+  getSheetsByAssignedPlayer(participantId: string, systemId?: string): CharacterSheet[] {
+    const rows = systemId
+      ? this.db.prepare('SELECT * FROM character_sheets WHERE assigned_player_id = ? AND system_id = ? ORDER BY created_at ASC').all(participantId, systemId) as SheetRow[]
+      : this.db.prepare('SELECT * FROM character_sheets WHERE assigned_player_id = ? ORDER BY created_at ASC').all(participantId) as SheetRow[];
+    return rows.map((row) => this.hydrateSheet(row));
+  }
+  canEditSheet(id: string, identity: Identity): boolean {
+    const row = this.db.prepare('SELECT assigned_player_id FROM character_sheets WHERE id = ?').get(id) as { assigned_player_id: string | null } | undefined;
+    return Boolean(row) && (identity.role === 'gm' || row!.assigned_player_id === identity.participantId);
+  }
+  assignSheet(id: string, playerId: string | null, playerName: string | null): void {
+    this.db.prepare('UPDATE character_sheets SET assigned_player_id = ?, assigned_player_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(playerId, playerName, id);
+  }
+  private hydrateSheet(row: SheetRow): CharacterSheet {
+    let characteristics: Record<SheetCharacteristicKey, number> = { might: 0, insight: 0, glory: 0, will: 0 };
+    try {
+      const parsed = JSON.parse(row.characteristics_json) as Partial<Record<SheetCharacteristicKey, unknown>>;
+      if (parsed && typeof parsed === 'object') {
+        for (const key of ['might', 'insight', 'glory', 'will'] as const) {
+          const value = parsed[key];
+          if (typeof value === 'number' && Number.isSafeInteger(value)) characteristics[key] = value;
+        }
+      }
+    } catch { /* Invalid legacy values fall back to zero. */ }
+    const counters = (this.db.prepare('SELECT * FROM character_counters WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as CounterRow[]).map(toCounter);
+    const abilities = (this.db.prepare('SELECT * FROM character_abilities WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as AbilityRow[]).map(toAbility);
+    return {
+      id: row.id, creatorId: row.creator_id, creatorName: row.creator_name,
+      assignedPlayerId: row.assigned_player_id, assignedPlayerName: row.assigned_player_name,
+      systemId: row.system_id, systemVersion: row.system_version, schemaVersion: row.schema_version,
+      characterName: row.character_name, portraitAssetId: row.portrait_asset_id, characteristics,
+      fate: row.fate, counters, abilities, createdAt: row.created_at, updatedAt: row.updated_at,
+    };
+  }
+  createSheet(sheet: SheetInput): void {
+    this.db.prepare(`INSERT INTO character_sheets
+      (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate);
+  }
+  updateSheet(id: string, patch: SheetPatch): void {
+    const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate' };
+    const entries = Object.entries(patch) as Array<[keyof SheetPatch, SheetPatch[keyof SheetPatch]]>;
+    if (!entries.length) return;
+    this.db.prepare(`UPDATE character_sheets SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
+      .run({ id, ...Object.fromEntries(entries.map(([key, value]) => [key, key === 'characteristics' ? JSON.stringify(value) : value])) });
+  }
+  createCounter(sheetId: string, counter: Omit<CharacterSheetCounter, 'orderIndex'>): CharacterSheetCounter {
+    const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM character_counters WHERE sheet_id = ?').get(sheetId) as { next: number }).next;
+    this.db.prepare('INSERT INTO character_counters (id, sheet_id, name, value, order_index) VALUES (?, ?, ?, ?, ?)')
+      .run(counter.id, sheetId, counter.name, counter.value, orderIndex);
+    this.touchSheet(sheetId);
+    return { ...counter, orderIndex };
+  }
+  updateCounter(sheetId: string, id: string, patch: CounterPatch): void {
+    const columns: Record<keyof CounterPatch, string> = { name: 'name', value: 'value' };
+    const entries = Object.entries(patch) as Array<[keyof CounterPatch, CounterPatch[keyof CounterPatch]]>;
+    if (!entries.length) return;
+    this.db.prepare(`UPDATE character_counters SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')} WHERE id = @id AND sheet_id = @sheetId`)
+      .run({ id, sheetId, ...Object.fromEntries(entries) });
+    this.touchSheet(sheetId);
+  }
+  deleteCounter(sheetId: string, id: string): void {
+    this.db.prepare('DELETE FROM character_counters WHERE id = ? AND sheet_id = ?').run(id, sheetId);
+    this.touchSheet(sheetId);
+  }
+  reorderCounters(sheetId: string, ids: string[]): void {
+    const update = this.db.prepare('UPDATE character_counters SET order_index = ? WHERE id = ? AND sheet_id = ?');
+    this.db.transaction(() => ids.forEach((id, index) => update.run(index, id, sheetId)))();
+    this.touchSheet(sheetId);
+  }
+  createAbility(sheetId: string, ability: AbilityInput): CharacterSheetAbility {
+    const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM character_abilities WHERE sheet_id = ?').get(sheetId) as { next: number }).next;
+    this.db.prepare(`INSERT INTO character_abilities
+      (id, sheet_id, name, description, asset_id, counter_enabled, counter_name, counter_value, checkbox_enabled, checkbox_label, checked, order_index)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(ability.id, sheetId, ability.name, ability.description, ability.assetId, Number(ability.counterEnabled), ability.counterName, ability.counterValue, Number(ability.checkboxEnabled), ability.checkboxLabel, Number(ability.checked), orderIndex);
+    this.touchSheet(sheetId);
+    return { ...ability, orderIndex };
+  }
+  updateAbility(sheetId: string, id: string, patch: AbilityPatch): void {
+    const columns: Record<keyof AbilityPatch, string> = {
+      name: 'name', description: 'description', assetId: 'asset_id', counterEnabled: 'counter_enabled', counterName: 'counter_name',
+      counterValue: 'counter_value', checkboxEnabled: 'checkbox_enabled', checkboxLabel: 'checkbox_label', checked: 'checked', orderIndex: 'order_index',
+    };
+    const entries = Object.entries(patch) as Array<[keyof AbilityPatch, AbilityPatch[keyof AbilityPatch]]>;
+    if (!entries.length) return;
+    this.db.prepare(`UPDATE character_abilities SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')} WHERE id = @id AND sheet_id = @sheetId`)
+      .run({
+        id, sheetId, ...Object.fromEntries(entries.map(([key, value]) => [
+          key, key === 'counterEnabled' || key === 'checkboxEnabled' || key === 'checked' ? Number(value) : value,
+        ])),
+      });
+    this.touchSheet(sheetId);
+  }
+  deleteAbility(sheetId: string, id: string): void {
+    this.db.prepare('DELETE FROM character_abilities WHERE id = ? AND sheet_id = ?').run(id, sheetId);
+    this.touchSheet(sheetId);
+  }
+  reorderAbilities(sheetId: string, ids: string[]): void {
+    const update = this.db.prepare('UPDATE character_abilities SET order_index = ? WHERE id = ? AND sheet_id = ?');
+    this.db.transaction(() => ids.forEach((id, index) => update.run(index, id, sheetId)))();
+    this.touchSheet(sheetId);
+  }
+  private touchSheet(id: string): void {
+    this.db.prepare('UPDATE character_sheets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+  }
+  recordAssetUploader(assetId: string, participantId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO asset_uploaders (asset_id, participant_id) VALUES (?, ?)').run(assetId, participantId);
+  }
+  isAssetUploadedBy(assetId: string, participantId: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM asset_uploaders WHERE asset_id = ? AND participant_id = ?').get(assetId, participantId));
+  }
+  isAssetUsedBySheet(assetId: string, identity: Identity): boolean {
+    const assignedFilter = identity.role === 'gm' ? '' : 'AND sheet.assigned_player_id IS NOT NULL';
+    return Boolean(this.db.prepare(`SELECT 1 FROM character_sheets AS sheet WHERE sheet.portrait_asset_id = ? ${assignedFilter}
+      UNION SELECT 1 FROM character_abilities AS ability JOIN character_sheets AS sheet ON sheet.id = ability.sheet_id
+      WHERE ability.asset_id = ? ${assignedFilter} LIMIT 1`).get(assetId, assetId));
+  }
+
   snapshot(identityOrRole: Identity | Role, participantId = ''): BoardSnapshot {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
     const allLayers = this.getLayers();
-    const common = { activeSystem: this.activeSystem, diceRolls: this.getDiceRolls() };
+    const common = { activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity) };
     if (role === 'gm') return { ...common, layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
     const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
     const visibleIds = new Set(layers.map((layer) => layer.id));
     const stickers = this.getStickers().filter((sticker) => visibleIds.has(sticker.layerId));
     const noteMarkers = this.getNoteMarkers().filter((marker) => visibleIds.has(marker.layerId) && this.canReadNote(marker.noteId, identity));
-    return { ...common, layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers };
+    const availableAssets = this.getAssets().filter((asset) => this.canReadAsset(asset.id, identity));
+    return { ...common, layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers, availableAssets };
   }
 
   backup(path: string): Promise<Database.BackupMetadata> { return this.db.backup(path); }

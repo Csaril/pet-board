@@ -1,7 +1,9 @@
 import Konva from 'konva';
-import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant } from '../shared/board.js';
+import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
+import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
+import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -50,6 +52,22 @@ const systemSave = select<HTMLButtonElement>('#room-system-save');
 const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
 const pbtaActorRow = select<HTMLElement>('#pbta-actor-row');
 const pbtaActor = select<HTMLSelectElement>('#pbta-actor');
+const sheetsPanel = select<HTMLElement>('#sheets-panel');
+const sheetsList = select<HTMLUListElement>('#sheets-list');
+const sheetPanel = select<HTMLElement>('#sheet-panel');
+const sheetCollapse = select<HTMLButtonElement>('#sheet-collapse');
+const sheetContent = select<HTMLElement>('#sheet-content');
+const sheetNameHeading = select<HTMLElement>('#sheet-name-heading');
+const sheetOwnerLabel = select<HTMLElement>('#sheet-owner');
+const sheetSystemLabel = select<HTMLElement>('#sheet-system');
+const sheetPortrait = select<HTMLImageElement>('#sheet-portrait');
+const sheetPortraitFallback = select<HTMLElement>('#sheet-portrait-fallback');
+const sheetEditToggle = select<HTMLButtonElement>('#sheet-edit-toggle');
+const sheetMessage = select<HTMLElement>('#sheet-message');
+const sheetRollPanel = select<HTMLElement>('#sheet-roll-panel');
+const sheetRollName = select<HTMLElement>('#sheet-roll-name');
+const sheetRollControls = select<HTMLElement>('#sheet-roll-controls');
+const pbtaControlsHome = select<HTMLElement>('#pbta-controls-home');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
@@ -99,7 +117,17 @@ let noteRequestSequence = 0;
 let noteEditorGeneration = 0;
 let editingAssetIds: string[] = [];
 let selectedMarkerAssetId: string | undefined;
-let assetPickerMode: 'attachments' | 'marker' = 'attachments';
+type AssetPickerMode = 'attachments' | 'marker' | 'sheet-portrait' | 'ability';
+let assetPickerMode: AssetPickerMode = 'attachments';
+let selectedSheetPortraitAssetId: string | undefined;
+let selectedAbilityAssetId: string | undefined;
+let openSheetId: string | undefined;
+let sheetDialogMode: SheetPanelMode = DEFAULT_SHEET_PANEL_MODE;
+let sheetGeneration = 0;
+let editingAbilityId: string | undefined;
+let openOwnSheetAfterCreate = false;
+let pendingSheetRestoreId: string | undefined;
+let pendingRollContext: { characteristicName: string; characteristicBonus: number; characterId: string; characterOwnerId: string } | undefined;
 let noteDropDepth = 0;
 let knownDiceRollIds: Set<string> | undefined;
 let unseenDiceRolls = 0;
@@ -670,8 +698,9 @@ function clampFloatingPanel(panel: HTMLElement): void {
   const currentY = Number.parseFloat(panel.style.top);
   const x = Number.isFinite(currentX) ? currentX : 16;
   const y = Number.isFinite(currentY) ? currentY : Math.max(16, window.innerHeight - height - 16);
-  panel.style.left = `${Math.max(0, Math.min(x, Math.max(0, window.innerWidth - width)))}px`;
-  panel.style.top = `${Math.max(0, Math.min(y, Math.max(0, window.innerHeight - height)))}px`;
+  const position = clampFloatingPosition(x, y, width, height, window.innerWidth, window.innerHeight);
+  panel.style.left = `${position.x}px`;
+  panel.style.top = `${position.y}px`;
   panel.style.right = 'auto';
   panel.style.bottom = 'auto';
 }
@@ -730,6 +759,90 @@ function restoreFloatingPanel(panel: HTMLElement, key: 'dice-tools' | 'dice-hist
   clampFloatingPanel(panel);
 }
 
+function saveSheetPanelPreference(): void {
+  if (!identity) return;
+  const rect = sheetPanel.getBoundingClientRect();
+  const storedX = Number.parseFloat(sheetPanel.style.left);
+  const storedY = Number.parseFloat(sheetPanel.style.top);
+  const preference: SheetPanelPreference = {
+    version: 1,
+    open: !sheetPanel.hidden,
+    collapsed: sheetPanel.classList.contains('is-collapsed'),
+    x: Number.isFinite(storedX) ? storedX : rect.left,
+    y: Number.isFinite(storedY) ? storedY : rect.top,
+    sheetId: openSheetId ?? null,
+  };
+  writeSheetPanelPreference(localStorage, identity.participantId, preference);
+}
+
+function setSheetCollapsed(collapsed: boolean, persist = true): void {
+  sheetPanel.classList.toggle('is-collapsed', collapsed);
+  sheetCollapse.textContent = collapsed ? '▸' : '–';
+  sheetCollapse.title = collapsed ? 'Развернуть лист' : 'Свернуть лист';
+  sheetCollapse.setAttribute('aria-label', sheetCollapse.title);
+  sheetCollapse.setAttribute('aria-expanded', String(!collapsed));
+  if (collapsed) closeSheetRollPanel();
+  clampFloatingPanel(sheetPanel);
+  if (persist) saveSheetPanelPreference();
+}
+
+function restoreSheetPanelPreference(participantId: string): void {
+  const preference = readSheetPanelPreference(localStorage, participantId);
+  const oldVisibility = sheetPanel.style.visibility;
+  sheetPanel.hidden = false;
+  sheetPanel.style.visibility = 'hidden';
+  const rect = sheetPanel.getBoundingClientRect();
+  const width = rect.width || Math.min(470, Math.max(0, window.innerWidth - 24));
+  const height = rect.height || Math.min(700, Math.max(0, window.innerHeight - 24));
+  const x = preference?.x ?? Math.max(16, window.innerWidth - width - 20);
+  const y = preference?.y ?? Math.min(84, Math.max(16, window.innerHeight - height - 16));
+  sheetPanel.style.left = `${x}px`;
+  sheetPanel.style.top = `${y}px`;
+  sheetPanel.style.right = 'auto';
+  sheetPanel.style.bottom = 'auto';
+  sheetPanel.style.visibility = oldVisibility;
+  sheetPanel.hidden = true;
+  setSheetCollapsed(preference?.collapsed ?? false, false);
+  pendingSheetRestoreId = preference?.open && preference.sheetId ? preference.sheetId : undefined;
+}
+
+function positionSheetRollPanel(): void {
+  const anchor = sheetPanel.hidden ? undefined : sheetPanel.getBoundingClientRect();
+  const rect = measureFloatingPanel(sheetRollPanel);
+  const width = rect.width || Math.min(330, Math.max(0, window.innerWidth - 24));
+  const height = rect.height || Math.min(420, Math.max(0, window.innerHeight - 24));
+  let x = anchor ? anchor.right + 10 : window.innerWidth - width - 20;
+  if (anchor && x + width > window.innerWidth - 8) x = anchor.left - width - 10;
+  const y = anchor ? anchor.top + 12 : Math.max(16, (window.innerHeight - height) / 2);
+  const position = clampFloatingPosition(x, y, width, height, window.innerWidth, window.innerHeight);
+  sheetRollPanel.style.left = `${position.x}px`;
+  sheetRollPanel.style.top = `${position.y}px`;
+  sheetRollPanel.style.right = 'auto';
+  sheetRollPanel.style.bottom = 'auto';
+}
+
+function raiseSheetRollPanel(): void {
+  if (sheetRollPanel.hidden) return;
+  const panelZ = Number.parseInt(sheetPanel.hidden ? '0' : sheetPanel.style.zIndex || '0', 10);
+  floatingPanelZ = Math.max(floatingPanelZ, Number.isFinite(panelZ) ? panelZ : 0) + 1;
+  sheetRollPanel.style.zIndex = String(floatingPanelZ);
+  if (!sheetPanel.hidden) sheetPanel.style.zIndex = String(Math.max(1, floatingPanelZ - 1));
+}
+
+function openSheetRollPanel(characteristicName: string): void {
+  sheetRollName.textContent = characteristicName;
+  if (pbtaControls.parentElement !== sheetRollControls) sheetRollControls.append(pbtaControls);
+  sheetRollPanel.hidden = false;
+  positionSheetRollPanel();
+  raiseSheetRollPanel();
+}
+
+function closeSheetRollPanel(): void {
+  if (!sheetRollPanel.hidden) sheetRollPanel.hidden = true;
+  if (pbtaControls.parentElement !== pbtaControlsHome) pbtaControlsHome.append(pbtaControls);
+  pendingRollContext = undefined;
+}
+
 function saveLayerPanelPreference(collapsed: boolean): void {
   if (!identity || identity.role !== 'gm') return;
   try { localStorage.setItem(uiStorageKey(identity.participantId, 'layers'), JSON.stringify({ version: 1, collapsed })); } catch { /* Local UI preferences are optional. */ }
@@ -750,6 +863,7 @@ function setupParticipantUi(participantId: string): void {
   unseenDiceRolls = 0;
   restoreFloatingPanel(diceToolsPanel, 'dice-tools', 'left', participantId);
   restoreFloatingPanel(diceHistoryPanel, 'dice-history', 'right', participantId);
+  restoreSheetPanelPreference(participantId);
   updateDiceBadge();
   if (identity?.role === 'gm') {
     let collapsed = false;
@@ -761,8 +875,11 @@ function setupParticipantUi(participantId: string): void {
   }
 }
 
-function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dice-history'): void {
-  panel.addEventListener('pointerdown', () => { panel.style.zIndex = String(++floatingPanelZ); });
+function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dice-history' | 'sheet'): void {
+  panel.addEventListener('pointerdown', () => {
+    panel.style.zIndex = String(++floatingPanelZ);
+    if (key === 'sheet') raiseSheetRollPanel();
+  });
   const handle = panel.querySelector<HTMLElement>('[data-panel-drag-handle]');
   if (!handle) return;
   handle.addEventListener('pointerdown', (event) => {
@@ -770,6 +887,7 @@ function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dic
     event.preventDefault();
     event.stopPropagation();
     panel.style.zIndex = String(++floatingPanelZ);
+    if (key === 'sheet') raiseSheetRollPanel();
     clampFloatingPanel(panel);
     const initial = panel.getBoundingClientRect();
     const pointerX = event.clientX;
@@ -787,7 +905,8 @@ function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dic
       handle.removeEventListener('pointerup', finish);
       handle.removeEventListener('pointercancel', finish);
       if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-      if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
+      if (key === 'sheet') saveSheetPanelPreference();
+      else if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
     };
     handle.addEventListener('pointermove', move);
     handle.addEventListener('pointerup', finish);
@@ -805,6 +924,12 @@ function updateBoard(state: RoomMessage) {
   }
   knownDiceRollIds = nextIds;
   roomState = state;
+  if (pendingSheetRestoreId) {
+    const restoreId = pendingSheetRestoreId;
+    pendingSheetRestoreId = undefined;
+    const sheet = state.sheets.find((entry) => entry.id === restoreId);
+    if (sheet) openSheet(sheet);
+  }
   if (identity) {
     const key = `tabletop-active-layer:${location.host}`;
     if (!state.layers.some((layer) => layer.id === activeLayerId)) {
@@ -819,6 +944,18 @@ function updateBoard(state: RoomMessage) {
   renderLayers();
   renderAssets();
   renderDicePanel();
+  renderSheetsCatalog();
+  if (openSheetId) renderSheetPanel();
+  if (openOwnSheetAfterCreate && identity) {
+    const ownSheet = state.sheets
+      .filter((sheet) => identity!.role === 'gm' ? !sheet.assignedPlayerId : sheet.assignedPlayerId === identity!.participantId)
+      .filter((sheet) => sheet.systemId === pbtaSystemModule.id)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (ownSheet) {
+      openOwnSheetAfterCreate = false;
+      openSheet(ownSheet);
+    }
+  }
   drawObjects();
   if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
   if (openNoteId && noteDialog.open && noteDialogMode === 'view') void openNote(openNoteId, false);
@@ -837,6 +974,7 @@ function renderDicePanel() {
   systemSelect.disabled = identity.role !== 'gm';
   systemSave.hidden = identity.role !== 'gm' || systemSelect.value === nextSystem;
   pbtaControls.hidden = nextSystem !== 'pbta-2d6';
+  if (nextSystem !== 'pbta-2d6' && !sheetRollPanel.hidden) closeSheetRollPanel();
   pbtaActorRow.hidden = identity.role !== 'gm';
   pbtaActor.hidden = identity.role !== 'gm';
   const actorValue = pbtaActor.value;
@@ -876,6 +1014,565 @@ function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
     reroll.addEventListener('click', () => void runCommand('dice:reroll', { rollId: roll.id })); item.append(reroll);
   }
   return item;
+}
+
+function accessibleAssets() {
+  return roomState?.assets ?? roomState?.availableAssets ?? [];
+}
+
+function canEditSheet(sheet: CharacterSheet): boolean {
+  return identity?.role === 'gm' || sheet.assignedPlayerId === identity?.participantId;
+}
+
+function canPrepareSheetRoll(sheet: CharacterSheet): boolean {
+  if (!identity) return false;
+  if (!sheet.assignedPlayerId) return false;
+  return identity.role === 'gm' ? true : sheet.assignedPlayerId === identity.participantId;
+}
+
+function sheetInitial(name: string): string {
+  return (name.trim()[0] || '?').toUpperCase();
+}
+
+function makeSheetPortrait(assetId: string | null, name: string, className: string): HTMLElement {
+  if (assetId) {
+    const image = document.createElement('img');
+    image.className = className;
+    image.src = `/api/assets/${encodeURIComponent(assetId)}`;
+    image.alt = `Портрет ${name}`;
+    image.loading = 'lazy';
+    return image;
+  }
+  const fallback = document.createElement('span');
+  fallback.className = `${className} sheet-portrait-fallback`;
+  fallback.textContent = sheetInitial(name);
+  fallback.setAttribute('aria-hidden', 'true');
+  return fallback;
+}
+
+function sheetAssignedLabel(sheet: CharacterSheet): string {
+  return sheet.assignedPlayerId ? `Игрок: ${sheet.assignedPlayerName || 'неизвестен'}` : 'Не назначен';
+}
+
+function appendSheetSection(title: string, sheets: CharacterSheet[], emptyText: string, options: { create?: boolean; assign?: boolean } = {}) {
+  const heading = document.createElement('li');
+  heading.className = 'sheet-catalog-heading-row';
+  const label = document.createElement('h3');
+  label.textContent = `${title} · ${sheets.length}`;
+  heading.append(label);
+  if (options.create) heading.append(makeCreateSheetButton());
+  sheetsList.append(heading);
+  if (!sheets.length) {
+    const empty = document.createElement('li');
+    empty.className = 'sheet-catalog-empty-row';
+    empty.textContent = emptyText;
+    sheetsList.append(empty);
+    return;
+  }
+  for (const sheet of sheets) sheetsList.append(renderSheetCatalogCard(sheet, options.assign === true));
+}
+
+function makeCreateSheetButton(): HTMLButtonElement {
+  const create = document.createElement('button');
+  create.type = 'button';
+  create.className = 'sheet-catalog-action';
+  create.textContent = '＋ Создать';
+  create.disabled = roomState?.activeSystem?.id !== pbtaSystemModule.id;
+  create.title = create.disabled ? 'Сначала включите систему PbtA.' : 'Создать лист персонажа';
+  create.addEventListener('click', createOwnSheet);
+  return create;
+}
+
+function renderSheetCatalogCard(sheet: CharacterSheet, assign: boolean): HTMLLIElement {
+  const item = document.createElement('li');
+  item.className = 'sheet-catalog-item';
+  const portrait = makeSheetPortrait(sheet.portraitAssetId, sheet.characterName || 'Без имени', 'sheet-catalog-portrait');
+  const copy = document.createElement('div');
+  copy.className = 'sheet-catalog-copy';
+  const owner = document.createElement('span');
+  owner.className = `sheet-catalog-owner${sheet.assignedPlayerId ? '' : ' unassigned'}`;
+  owner.textContent = sheetAssignedLabel(sheet);
+  const character = document.createElement('strong');
+  character.className = 'sheet-catalog-character';
+  character.textContent = sheet.characterName || 'Без имени';
+  copy.append(owner, character);
+  item.append(portrait, copy);
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'sheet-catalog-action';
+  open.textContent = 'Открыть';
+  open.addEventListener('click', () => openSheet(sheet));
+  item.append(open);
+  if (assign && identity?.role === 'gm') {
+    const players = (roomState?.participants || []).filter((participant) => participant.role === 'player');
+    const row = document.createElement('div');
+    row.className = 'sheet-catalog-assign';
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', `Назначить игрока для ${sheet.characterName || 'персонажа'}`);
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Назначить игроку…';
+    select.append(placeholder);
+    for (const player of players) {
+      const option = document.createElement('option');
+      option.value = player.participantId;
+      option.textContent = player.name;
+      select.append(option);
+    }
+    if (sheet.assignedPlayerId && !players.some((player) => player.participantId === sheet.assignedPlayerId)) {
+      const option = document.createElement('option');
+      option.value = sheet.assignedPlayerId;
+      option.textContent = `${sheet.assignedPlayerName || 'Игрок'} (не в сети)`;
+      select.append(option);
+    }
+    if (sheet.assignedPlayerId) select.value = sheet.assignedPlayerId;
+    const assignButton = document.createElement('button');
+    assignButton.type = 'button';
+    assignButton.className = 'sheet-catalog-action';
+    assignButton.textContent = sheet.assignedPlayerId ? 'Переназначить' : 'Назначить';
+    assignButton.addEventListener('click', () => {
+      const playerId = select.value;
+      if (!playerId) { showCanvasMessage('Выберите игрока для назначения.', true); return; }
+      const playerName = select.selectedOptions[0]?.textContent || 'выбранного игрока';
+      if (!window.confirm(`Назначить лист «${sheet.characterName || 'Без имени'}» игроку ${playerName}?`)) return;
+      void runCommand('sheet:assign', { id: sheet.id, playerId });
+    });
+    row.append(select, assignButton);
+    if (sheet.assignedPlayerId) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'sheet-catalog-action danger-text';
+      clear.textContent = 'Снять';
+      clear.addEventListener('click', () => {
+        if (!window.confirm(`Снять назначение с листа «${sheet.characterName || 'Без имени'}»?`)) return;
+        void runCommand('sheet:assign', { id: sheet.id, playerId: null });
+      });
+      row.append(clear);
+    }
+    item.append(row);
+  }
+  return item;
+}
+
+function renderSheetsCatalog() {
+  sheetsList.replaceChildren();
+  if (!roomState || !identity) return;
+  const currentIdentity = identity;
+  const sheets = [...(roomState.sheets || [])];
+  if (currentIdentity.role === 'gm') {
+    const assigned = sheets.filter((sheet) => sheet.assignedPlayerId).sort((left, right) => (left.assignedPlayerName || '').localeCompare(right.assignedPlayerName || '', 'ru'));
+    const unassigned = sheets.filter((sheet) => !sheet.assignedPlayerId).sort((left, right) => left.characterName.localeCompare(right.characterName, 'ru'));
+    appendSheetSection('Назначенные персонажи', assigned, 'Пока нет назначенных персонажей.', { assign: true });
+    appendSheetSection('Подготовленные персонажи', unassigned, 'Неназначенных персонажей нет.', { assign: true, create: true });
+    return;
+  }
+  const own = sheets.filter((sheet) => sheet.assignedPlayerId === currentIdentity.participantId);
+  const others = sheets.filter((sheet) => sheet.assignedPlayerId && sheet.assignedPlayerId !== currentIdentity.participantId);
+  appendSheetSection('Мои персонажи', own, 'У вас пока нет персонажей. Создайте первого.', { create: true });
+  appendSheetSection('Другие персонажи', others, 'Других назначенных персонажей пока нет.');
+}
+
+function createOwnSheet() {
+  if (!identity || !roomState || roomState.activeSystem?.id !== pbtaSystemModule.id) return;
+  const name = window.prompt('Имя персонажа', identity.name);
+  if (name === null) return;
+  openOwnSheetAfterCreate = true;
+  void runCommand('sheet:create', { characterName: name.trim() });
+}
+
+function openSheet(sheet: CharacterSheet) {
+  closeSheetRollPanel();
+  openSheetId = sheet.id;
+  sheetDialogMode = DEFAULT_SHEET_PANEL_MODE;
+  sheetGeneration += 1;
+  editingAbilityId = undefined;
+  sheetMessage.textContent = '';
+  sheetPanel.hidden = false;
+  sheetPanel.style.zIndex = String(++floatingPanelZ);
+  renderSheetPanel();
+  clampFloatingPanel(sheetPanel);
+  saveSheetPanelPreference();
+}
+
+function closeSheetPanel() {
+  closeSheetRollPanel();
+  sheetGeneration += 1;
+  openSheetId = undefined;
+  editingAbilityId = undefined;
+  sheetPanel.hidden = true;
+  saveSheetPanelPreference();
+}
+
+function sheetSection(title: string, className: string): HTMLElement {
+  const section = document.createElement('section');
+  section.className = `sheet-section ${className}`;
+  const heading = document.createElement('h3');
+  heading.textContent = title;
+  section.append(heading);
+  return section;
+}
+
+function numberFromInput(input: HTMLInputElement, fallback: number): number {
+  const value = Number(input.value);
+  return Number.isSafeInteger(value) ? value : fallback;
+}
+
+function makeStepper(
+  value: number, min: number, max: number, label: string,
+  onChange: (value: number) => void,
+): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'sheet-stepper';
+  const minus = document.createElement('button'); minus.type = 'button'; minus.textContent = '−'; minus.setAttribute('aria-label', `Уменьшить ${label}`);
+  const input = document.createElement('input'); input.type = 'number'; input.min = String(min); input.max = String(max); input.value = String(value); input.setAttribute('aria-label', label);
+  const plus = document.createElement('button'); plus.type = 'button'; plus.textContent = '+'; plus.setAttribute('aria-label', `Увеличить ${label}`);
+  const emit = (next: number) => {
+    const bounded = Math.max(min, Math.min(max, Math.round(next)));
+    input.value = String(bounded);
+    onChange(bounded);
+  };
+  minus.addEventListener('click', () => emit(numberFromInput(input, value) - 1));
+  plus.addEventListener('click', () => emit(numberFromInput(input, value) + 1));
+  input.addEventListener('change', () => emit(numberFromInput(input, value)));
+  wrap.append(minus, input, plus);
+  return wrap;
+}
+
+function moveIds<T extends { id: string; orderIndex: number }>(items: T[], id: string, direction: -1 | 1): string[] | undefined {
+  const sorted = [...items].sort((left, right) => left.orderIndex - right.orderIndex);
+  const index = sorted.findIndex((item) => item.id === id);
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= sorted.length) return undefined;
+  const [moving] = sorted.splice(index, 1);
+  sorted.splice(target, 0, moving!);
+  return sorted.map((item) => item.id);
+}
+
+function prepareSheetRoll(sheet: CharacterSheet, key: SheetCharacteristicKey, characteristicName: string) {
+  if (!identity || !roomState || !canPrepareSheetRoll(sheet)) return;
+  const active = roomState.activeSystem;
+  if (!active || active.id !== pbtaSystemModule.id || active.version !== pbtaSystemModule.version) {
+    showCanvasMessage('В комнате не выбрана система PbtA.', true);
+    return;
+  }
+  const assignedPlayerId = sheet.assignedPlayerId;
+  if (!assignedPlayerId) {
+    showCanvasMessage('Лист не назначен игроку — бросок недоступен.', true);
+    return;
+  }
+  if (identity.role === 'gm') {
+    if (![...pbtaActor.options].some((option) => option.value === assignedPlayerId)) {
+      showCanvasMessage('Назначенный игрок не подключён, бросок от его имени недоступен.', true);
+      return;
+    }
+    pbtaActor.value = assignedPlayerId;
+  }
+  pendingRollContext = buildSheetRollContext(sheet, key, characteristicName);
+  select<HTMLInputElement>('#pbta-bonus').value = String(pendingRollContext.characteristicBonus);
+  openSheetRollPanel(characteristicName);
+}
+
+function renderSheetPanel() {
+  const sheet = openSheetId ? (roomState?.sheets || []).find((entry) => entry.id === openSheetId) : undefined;
+  if (!sheet || !identity) {
+    openSheetId = undefined;
+    sheetPanel.hidden = true;
+    closeSheetRollPanel();
+    saveSheetPanelPreference();
+    return;
+  }
+  const canEdit = canEditSheet(sheet);
+  if (!canEdit) sheetDialogMode = DEFAULT_SHEET_PANEL_MODE;
+  sheetNameHeading.textContent = sheet.characterName || 'Без имени';
+  sheetOwnerLabel.textContent = sheet.assignedPlayerName ? `Игрок: ${sheet.assignedPlayerName}` : 'Не назначен';
+  sheetSystemLabel.textContent = `${pbtaSystemModule.name} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
+  if (sheet.portraitAssetId) {
+    sheetPortrait.src = `/api/assets/${encodeURIComponent(sheet.portraitAssetId)}`;
+    sheetPortrait.alt = `Портрет ${sheet.characterName || sheet.assignedPlayerName || sheet.creatorName}`;
+    sheetPortrait.hidden = false;
+    sheetPortraitFallback.hidden = true;
+  } else {
+    sheetPortrait.hidden = true;
+    sheetPortrait.removeAttribute('src');
+    sheetPortraitFallback.hidden = false;
+    sheetPortraitFallback.textContent = sheetInitial(sheet.characterName || sheet.assignedPlayerName || sheet.creatorName);
+  }
+  sheetEditToggle.hidden = !canEdit;
+  sheetEditToggle.textContent = sheetDialogMode === 'edit' ? 'Просмотр' : 'Редактировать';
+  sheetEditToggle.setAttribute('aria-pressed', String(sheetDialogMode === 'edit'));
+  const editing = canChangeSheetStructure(sheetDialogMode, canEdit);
+  sheetContent.replaceChildren();
+
+  if (editing) {
+    const identitySection = sheetSection('Персонаж', 'sheet-identity-section');
+    const fields = document.createElement('div'); fields.className = 'sheet-fields';
+    const nameLabel = document.createElement('label'); nameLabel.textContent = 'Имя персонажа';
+    const nameInput = document.createElement('input'); nameInput.maxLength = 80; nameInput.value = sheet.characterName; nameInput.placeholder = 'Без имени';
+    nameInput.addEventListener('change', () => void runCommand('sheet:update', { id: sheet.id, changes: { characterName: nameInput.value } }));
+    nameLabel.append(nameInput);
+    const portraitRow = document.createElement('div'); portraitRow.className = 'sheet-portrait-actions';
+    const pickPortrait = document.createElement('button'); pickPortrait.type = 'button'; pickPortrait.className = 'secondary'; pickPortrait.textContent = 'Выбрать портрет';
+    pickPortrait.addEventListener('click', () => openAssetPicker('sheet-portrait'));
+    portraitRow.append(pickPortrait);
+    if (sheet.portraitAssetId) {
+      const clearPortrait = document.createElement('button'); clearPortrait.type = 'button'; clearPortrait.className = 'secondary danger-text'; clearPortrait.textContent = 'Убрать портрет';
+      clearPortrait.addEventListener('click', () => void runCommand('sheet:update', { id: sheet.id, changes: { portraitAssetId: null } }));
+      portraitRow.append(clearPortrait);
+    }
+    fields.append(nameLabel, portraitRow);
+    identitySection.append(fields);
+    sheetContent.append(identitySection);
+  }
+
+  const characteristics = sheetSection('Характеристики', 'sheet-characteristics-section');
+  if (canPrepareSheetRoll(sheet)) {
+    const hint = document.createElement('p'); hint.className = 'panel-note'; hint.textContent = 'Нажмите на название характеристики, чтобы открыть окно броска PbtA.';
+    characteristics.append(hint);
+  }
+  const characteristicGrid = document.createElement('div'); characteristicGrid.className = 'sheet-characteristics';
+  for (const definition of pbtaSheetSchema.characteristics) {
+    const card = document.createElement('div'); card.className = 'sheet-characteristic';
+    const name = document.createElement('button'); name.type = 'button'; name.className = 'sheet-characteristic-name'; name.textContent = definition.name;
+    if (canPrepareSheetRoll(sheet)) {
+      name.title = 'Подготовить бросок по этой характеристике';
+      name.addEventListener('click', () => prepareSheetRoll(sheet, definition.key, definition.name));
+    } else {
+      name.disabled = true;
+      name.title = 'Только просмотр';
+    }
+    card.append(name);
+    if (editing) {
+      card.append(makeStepper(sheet.characteristics[definition.key], -1000, 1000, definition.name, (value) => {
+        void runCommand('sheet:update', { id: sheet.id, changes: { characteristics: { [definition.key]: value } } });
+      }));
+    } else {
+      const value = document.createElement('span'); value.className = 'sheet-characteristic-value'; value.textContent = formatSigned(sheet.characteristics[definition.key]);
+      card.append(value);
+    }
+    characteristicGrid.append(card);
+  }
+  characteristics.append(characteristicGrid);
+  sheetContent.append(characteristics);
+
+  const fate = sheetSection('Сила Судьбы', 'sheet-fate-section');
+  const fateRow = document.createElement('div'); fateRow.className = 'sheet-resource';
+  const fateLabel = document.createElement('strong'); fateLabel.textContent = 'Сила Судьбы';
+  fateRow.append(fateLabel);
+  if (canEdit) {
+    fateRow.append(makeStepper(sheet.fate, -1_000_000_000, 1_000_000_000, 'Сила Судьбы', (value) => {
+      void runCommand('sheet:fate:update', { sheetId: sheet.id, value });
+    }));
+  } else {
+    const value = document.createElement('span'); value.className = 'sheet-resource-value'; value.textContent = String(sheet.fate);
+    fateRow.append(value);
+  }
+  const fateNote = document.createElement('p'); fateNote.className = 'panel-note'; fateNote.textContent = 'Не списывается автоматически при повторном броске — учитывайте расход вручную.';
+  fate.append(fateRow, fateNote);
+  sheetContent.append(fate);
+
+  const counters = sheetSection('Дополнительные счётчики', 'sheet-counters-section');
+  const sortedCounters = [...sheet.counters].sort((left, right) => left.orderIndex - right.orderIndex);
+  if (!sortedCounters.length) {
+    const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Дополнительных счётчиков нет.';
+    counters.append(empty);
+  }
+  for (const counter of sortedCounters) {
+    const row = document.createElement('div'); row.className = 'sheet-counter-row';
+    if (editing) {
+      const name = document.createElement('input'); name.value = counter.name; name.maxLength = 80; name.setAttribute('aria-label', 'Название счётчика');
+      name.addEventListener('change', () => void runCommand('sheet:counter:update', { sheetId: sheet.id, id: counter.id, changes: { name: name.value } }));
+      row.append(name, makeStepper(counter.value, -1_000_000_000, 1_000_000_000, counter.name, (value) => {
+        void runCommand('sheet:counter:update', { sheetId: sheet.id, id: counter.id, changes: { value } });
+      }));
+      const tools = document.createElement('div'); tools.className = 'sheet-row-tools';
+      tools.append(
+        makeRowButton('↑', 'Переместить выше', () => {
+          const ids = moveIds(sheet.counters, counter.id, -1); if (ids) void runCommand('sheet:counter:reorder', { sheetId: sheet.id, ids });
+        }),
+        makeRowButton('↓', 'Переместить ниже', () => {
+          const ids = moveIds(sheet.counters, counter.id, 1); if (ids) void runCommand('sheet:counter:reorder', { sheetId: sheet.id, ids });
+        }),
+        makeRowButton('×', 'Удалить счётчик', () => void runCommand('sheet:counter:delete', { sheetId: sheet.id, id: counter.id }), true),
+      );
+      row.append(tools);
+    } else {
+      const name = document.createElement('span'); name.textContent = counter.name;
+      if (canEdit) {
+        row.append(name, makeStepper(counter.value, -1_000_000_000, 1_000_000_000, counter.name, (value) => {
+          void runCommand('sheet:counter:value', { sheetId: sheet.id, id: counter.id, value });
+        }));
+      } else {
+        const value = document.createElement('strong'); value.textContent = String(counter.value);
+        row.append(name, value);
+      }
+    }
+    counters.append(row);
+  }
+  if (editing) {
+    const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary sheet-add-button'; add.textContent = '＋ Счётчик';
+    add.addEventListener('click', () => {
+      const name = window.prompt('Название счётчика', 'Ресурс');
+      if (name?.trim()) void runCommand('sheet:counter:create', { sheetId: sheet.id, name: name.trim(), value: 0 });
+    });
+    counters.append(add);
+  }
+  sheetContent.append(counters);
+
+  const abilities = sheetSection('Особые способности', 'sheet-abilities-section');
+  const collapsed = readCollapsedAbilities(localStorage, identity.participantId, sheet.id);
+  const sortedAbilities = [...sheet.abilities].sort((left, right) => left.orderIndex - right.orderIndex);
+  if (!sortedAbilities.length) {
+    const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Особых способностей нет.';
+    abilities.append(empty);
+  }
+  for (const ability of sortedAbilities) {
+    abilities.append(renderSheetAbility(sheet, ability, editing, collapsed.has(ability.id)));
+  }
+  if (editing) {
+    const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary sheet-add-button'; add.textContent = '＋ Способность';
+    add.addEventListener('click', () => {
+      const name = window.prompt('Название способности', 'Новая способность');
+      if (name?.trim()) void runCommand('sheet:ability:create', { sheetId: sheet.id, name: name.trim() });
+    });
+    abilities.append(add);
+  }
+  sheetContent.append(abilities);
+}
+
+function makeRowButton(label: string, title: string, action: () => void, danger = false): HTMLButtonElement {
+  const button = document.createElement('button'); button.type = 'button'; button.className = danger ? 'sheet-row-button danger-text' : 'sheet-row-button'; button.textContent = label; button.title = title; button.setAttribute('aria-label', title);
+  button.addEventListener('click', action);
+  return button;
+}
+
+function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbility, editing: boolean, collapsed: boolean): HTMLElement {
+  const card = document.createElement('article'); card.className = 'sheet-ability';
+  const header = document.createElement('div'); header.className = 'sheet-ability-header';
+  const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'sheet-ability-expand'; expand.textContent = collapsed ? '▸' : '▾'; expand.setAttribute('aria-expanded', String(!collapsed)); expand.setAttribute('aria-label', collapsed ? 'Развернуть способность' : 'Свернуть способность');
+  expand.addEventListener('click', () => {
+    if (!identity) return;
+    setAbilityCollapsed(localStorage, identity.participantId, sheet.id, ability.id, !collapsed);
+    renderSheetPanel();
+  });
+  const image = makeSheetPortrait(ability.assetId, ability.name, 'sheet-ability-image');
+  const title = document.createElement('strong'); title.className = 'sheet-ability-name'; title.textContent = ability.name || 'Без названия';
+  header.append(expand, image, title);
+  if (collapsed && ability.counterEnabled) {
+    const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = `${ability.counterName || 'Счётчик'}: ${ability.counterValue}`;
+    header.append(summary);
+  }
+  if (collapsed && ability.checkboxEnabled && ability.checked) {
+    const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = ability.checkboxLabel || 'Отмечено';
+    header.append(summary);
+  }
+  card.append(header);
+  if (collapsed) return card;
+
+  const body = document.createElement('div'); body.className = 'sheet-ability-body';
+  const description = document.createElement('div'); description.className = 'sheet-ability-description'; description.textContent = ability.description || 'Описание не задано.';
+  body.append(description);
+
+  if (ability.counterEnabled) {
+    const counter = document.createElement('div'); counter.className = 'sheet-resource sheet-ability-resource';
+    const label = document.createElement('strong'); label.textContent = ability.counterName || 'Счётчик';
+    counter.append(label);
+    if (canEditSheet(sheet)) {
+      counter.append(makeStepper(ability.counterValue, -1_000_000_000, 1_000_000_000, ability.counterName || 'Счётчик способности', (value) => {
+        if (editing) void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterValue: value } });
+        else void runCommand('sheet:ability:value', { sheetId: sheet.id, id: ability.id, counterValue: value });
+      }));
+    } else {
+      const value = document.createElement('span'); value.className = 'sheet-resource-value'; value.textContent = String(ability.counterValue);
+      counter.append(value);
+    }
+    body.append(counter);
+  }
+
+  if (ability.checkboxEnabled) {
+    const checkLabel = document.createElement('label'); checkLabel.className = 'sheet-ability-check';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = ability.checked; checkbox.disabled = !canEditSheet(sheet);
+    checkbox.addEventListener('change', () => {
+      if (editing) void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checked: checkbox.checked } });
+      else void runCommand('sheet:ability:value', { sheetId: sheet.id, id: ability.id, checked: checkbox.checked });
+    });
+    checkLabel.append(checkbox, document.createTextNode(ability.checkboxLabel || 'Отметка'));
+    body.append(checkLabel);
+  }
+
+  if (editing) {
+    const editor = document.createElement('div'); editor.className = 'sheet-ability-editor';
+    const nameLabel = document.createElement('label'); nameLabel.textContent = 'Название';
+    const name = document.createElement('input'); name.value = ability.name; name.maxLength = 80;
+    name.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { name: name.value } }));
+    nameLabel.append(name);
+    const descriptionLabel = document.createElement('label'); descriptionLabel.textContent = 'Описание';
+    const descriptionInput = document.createElement('textarea'); descriptionInput.rows = 5; descriptionInput.maxLength = 8000; descriptionInput.value = ability.description;
+    descriptionInput.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { description: descriptionInput.value } }));
+    descriptionLabel.append(descriptionInput);
+    editor.append(nameLabel, descriptionLabel);
+
+    const imageRow = document.createElement('div'); imageRow.className = 'sheet-portrait-actions';
+    const pick = document.createElement('button'); pick.type = 'button'; pick.className = 'secondary'; pick.textContent = 'Выбрать картинку';
+    pick.addEventListener('click', () => { editingAbilityId = ability.id; selectedAbilityAssetId = ability.assetId ?? undefined; openAssetPicker('ability'); });
+    imageRow.append(pick);
+    if (ability.assetId) {
+      const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'secondary danger-text'; clear.textContent = 'Убрать картинку';
+      clear.addEventListener('click', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { assetId: null } }));
+      imageRow.append(clear);
+    }
+    editor.append(imageRow);
+
+    const counterToggle = document.createElement('label'); counterToggle.className = 'sheet-inline-check';
+    const counterEnabled = document.createElement('input'); counterEnabled.type = 'checkbox'; counterEnabled.checked = ability.counterEnabled;
+    counterEnabled.addEventListener('change', () => {
+      const next = counterEnabled.checked;
+      void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterEnabled: next, ...(next && !ability.counterName ? { counterName: 'Заряды' } : {}) } });
+    });
+    counterToggle.append(counterEnabled, document.createTextNode(' Числовой счётчик'));
+    editor.append(counterToggle);
+    if (ability.counterEnabled) {
+      const counterNameLabel = document.createElement('label'); counterNameLabel.textContent = 'Название счётчика';
+      const counterName = document.createElement('input'); counterName.value = ability.counterName; counterName.maxLength = 80;
+      counterName.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterName: counterName.value } }));
+      counterNameLabel.append(counterName);
+      editor.append(counterNameLabel);
+    }
+
+    const checkboxToggle = document.createElement('label'); checkboxToggle.className = 'sheet-inline-check';
+    const checkboxEnabled = document.createElement('input'); checkboxEnabled.type = 'checkbox'; checkboxEnabled.checked = ability.checkboxEnabled;
+    checkboxEnabled.addEventListener('change', () => {
+      const next = checkboxEnabled.checked;
+      void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checkboxEnabled: next, ...(next && !ability.checkboxLabel ? { checkboxLabel: 'Использовано' } : {}) } });
+    });
+    checkboxToggle.append(checkboxEnabled, document.createTextNode(' Чекбокс'));
+    editor.append(checkboxToggle);
+    if (ability.checkboxEnabled) {
+      const checkboxLabel = document.createElement('label'); checkboxLabel.textContent = 'Подпись чекбокса';
+      const checkboxText = document.createElement('input'); checkboxText.value = ability.checkboxLabel; checkboxText.maxLength = 80;
+      checkboxText.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checkboxLabel: checkboxText.value } }));
+      checkboxLabel.append(checkboxText);
+      const checkedLabel = document.createElement('label'); checkedLabel.className = 'sheet-inline-check';
+      const checked = document.createElement('input'); checked.type = 'checkbox'; checked.checked = ability.checked;
+      checked.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checked: checked.checked } }));
+      checkedLabel.append(checked, document.createTextNode(' Отмечено'));
+      editor.append(checkboxLabel, checkedLabel);
+    }
+
+    const tools = document.createElement('div'); tools.className = 'sheet-row-tools';
+    tools.append(
+      makeRowButton('↑', 'Переместить выше', () => {
+        const ids = moveIds(sheet.abilities, ability.id, -1); if (ids) void runCommand('sheet:ability:reorder', { sheetId: sheet.id, ids });
+      }),
+      makeRowButton('↓', 'Переместить ниже', () => {
+        const ids = moveIds(sheet.abilities, ability.id, 1); if (ids) void runCommand('sheet:ability:reorder', { sheetId: sheet.id, ids });
+      }),
+      makeRowButton('×', 'Удалить способность', () => void runCommand('sheet:ability:delete', { sheetId: sheet.id, id: ability.id }), true),
+    );
+    editor.append(tools);
+    body.append(editor);
+  }
+  card.append(body);
+  return card;
 }
 
 function setNoteMessage(message: string) { select<HTMLElement>('#note-message').textContent = message; }
@@ -986,18 +1683,32 @@ function renderNoteAttachments() {
 
 function renderAssetPicker() {
   const grid = select<HTMLElement>('#asset-picker-grid'); grid.replaceChildren();
-  for (const asset of roomState?.assets || []) {
+  const singleChoice = assetPickerMode === 'marker' || assetPickerMode === 'sheet-portrait' || assetPickerMode === 'ability';
+  for (const asset of accessibleAssets()) {
     const label = document.createElement('label'); label.className = 'asset-picker-item';
-    const input = document.createElement('input'); input.type = assetPickerMode === 'marker' ? 'radio' : 'checkbox'; input.name = 'asset-picker-selection'; input.value = asset.id;
-    input.checked = assetPickerMode === 'marker' ? asset.id === selectedMarkerAssetId : editingAssetIds.includes(asset.id);
+    const input = document.createElement('input'); input.type = singleChoice ? 'radio' : 'checkbox'; input.name = 'asset-picker-selection'; input.value = asset.id;
+    input.checked = assetPickerMode === 'marker' ? asset.id === selectedMarkerAssetId
+      : assetPickerMode === 'sheet-portrait' ? asset.id === selectedSheetPortraitAssetId
+        : assetPickerMode === 'ability' ? asset.id === selectedAbilityAssetId
+          : editingAssetIds.includes(asset.id);
     const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = ''; image.loading = 'lazy';
     const name = document.createElement('span'); name.textContent = asset.originalName; name.title = asset.originalName;
     label.append(input, image, name); grid.append(label);
   }
+  if (!accessibleAssets().length) {
+    const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Нет доступных изображений. Загрузите новое.';
+    grid.append(empty);
+  }
 }
 
-function openAssetPicker(mode: 'attachments' | 'marker') {
-  assetPickerMode = mode; renderAssetPicker();
+function openAssetPicker(mode: AssetPickerMode) {
+  assetPickerMode = mode;
+  if (mode === 'sheet-portrait') {
+    selectedSheetPortraitAssetId = roomState?.sheets.find((sheet) => sheet.id === openSheetId)?.portraitAssetId ?? undefined;
+  } else if (mode === 'ability') {
+    selectedAbilityAssetId = roomState?.sheets.find((sheet) => sheet.id === openSheetId)?.abilities.find((ability) => ability.id === editingAbilityId)?.assetId ?? undefined;
+  }
+  renderAssetPicker();
   if (!pendingNoteUploads) clearNoteUploadStatuses();
   setAssetPickerLibraryMode();
   if (!assetPickerDialog.open) assetPickerDialog.showModal();
@@ -1046,6 +1757,7 @@ async function uploadNoteImageFiles(files: File[]) {
   if (!pendingNoteUploads) clearNoteUploadStatuses();
   const targetMode = assetPickerMode;
   const editorGeneration = noteEditorGeneration;
+  const sheetEditorGeneration = sheetGeneration;
   const limit = roomState?.maxUploadBytes ?? 25 * 1024 * 1024;
   const rows: NoteUploadRow[] = files.map((file) => {
     const item = document.createElement('li'); item.className = 'note-upload-row';
@@ -1069,13 +1781,20 @@ async function uploadNoteImageFiles(files: File[]) {
           row.progress.value = percent; setUploadRow(row, `Загрузка · ${percent}%`);
         });
         row.progress.value = 100;
-        if (roomState) roomState.assets = [...(roomState.assets || []).filter((entry) => entry.id !== result.asset.id), result.asset];
+        if (roomState) {
+          roomState.assets = [...(roomState.assets || []).filter((entry) => entry.id !== result.asset.id), result.asset];
+          roomState.availableAssets = [...(roomState.availableAssets || []).filter((entry) => entry.id !== result.asset.id), result.asset];
+        }
         const sameEditor = editorGeneration === noteEditorGeneration && noteDialog.open && noteDialogMode === 'edit';
+        const sameSheetEditor = sheetEditorGeneration === sheetGeneration && !sheetPanel.hidden;
         const attached = sameEditor && targetMode === 'attachments' && !editingAssetIds.includes(result.asset.id);
         if (sameEditor && targetMode === 'marker') selectedMarkerAssetId = result.asset.id;
         else if (attached) editingAssetIds.push(result.asset.id);
+        if (sameSheetEditor && targetMode === 'sheet-portrait') { selectedSheetPortraitAssetId = result.asset.id; renderSheetPanel(); }
+        else if (sameSheetEditor && targetMode === 'ability') { selectedAbilityAssetId = result.asset.id; renderSheetPanel(); }
         const resultLabel = result.deduplicated ? 'Уже в библиотеке' : 'Загружено';
-        setUploadRow(row, `${resultLabel} · ${sameEditor && (targetMode === 'marker' || attached || targetMode === 'attachments' && editingAssetIds.includes(result.asset.id)) ? 'прикреплено к заметке' : 'сохранено в библиотеке'}`, 'success');
+        const selectedForSheet = sameSheetEditor && (targetMode === 'sheet-portrait' || targetMode === 'ability');
+        setUploadRow(row, `${resultLabel} · ${selectedForSheet ? 'выбрано для листа' : sameEditor && (targetMode === 'marker' || attached || targetMode === 'attachments' && editingAssetIds.includes(result.asset.id)) ? 'прикреплено к заметке' : 'сохранено в библиотеке'}`, 'success');
         renderAssets(); renderAssetPicker(); renderNoteAttachments(); updateMarkerEditorFields();
       } catch (error) {
         row.progress.hidden = true;
@@ -1278,6 +1997,11 @@ function closeWorkspace(message: string) {
   resizeObserver?.disconnect();
   stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined; cropTransformer = undefined;
   selectedObjectId = undefined; roomState = undefined; imageCache.clear(); renderedObjects.clear();
+  closeSheetRollPanel();
+  sheetPanel.hidden = true;
+  openSheetId = undefined; editingAbilityId = undefined; pendingRollContext = undefined; openOwnSheetAfterCreate = false;
+  uiPreferencesParticipantId = undefined;
+  sheetsPanel.hidden = true;
   workspace.hidden = true; loginShell.hidden = false;
   form.reset();
   gmField.hidden = true;
@@ -1320,13 +2044,44 @@ select<HTMLButtonElement>('#dice-tools-close').addEventListener('click', () => s
 select<HTMLButtonElement>('#dice-history-close').addEventListener('click', () => setFloatingPanelOpen(diceHistoryPanel, 'dice-history', false));
 select<HTMLButtonElement>('#dice-tools-reset').addEventListener('click', () => resetFloatingPanelPosition(diceToolsPanel, 'dice-tools', 'left'));
 select<HTMLButtonElement>('#dice-history-reset').addEventListener('click', () => resetFloatingPanelPosition(diceHistoryPanel, 'dice-history', 'right'));
+select<HTMLButtonElement>('#sheets-toggle').addEventListener('click', () => {
+  sheetsPanel.hidden = !sheetsPanel.hidden;
+  select<HTMLButtonElement>('#sheets-toggle').setAttribute('aria-expanded', String(!sheetsPanel.hidden));
+  if (!sheetsPanel.hidden) renderSheetsCatalog();
+});
+select<HTMLButtonElement>('#sheets-close').addEventListener('click', () => {
+  sheetsPanel.hidden = true;
+  select<HTMLButtonElement>('#sheets-toggle').setAttribute('aria-expanded', 'false');
+});
+select<HTMLButtonElement>('#sheet-close').addEventListener('click', closeSheetPanel);
+select<HTMLButtonElement>('#sheet-roll-close').addEventListener('click', closeSheetRollPanel);
+sheetCollapse.addEventListener('click', () => setSheetCollapsed(!sheetPanel.classList.contains('is-collapsed')));
+sheetEditToggle.addEventListener('click', () => {
+  sheetDialogMode = toggleSheetMode(sheetDialogMode);
+  sheetGeneration += 1;
+  renderSheetPanel();
+  clampFloatingPanel(sheetPanel);
+  saveSheetPanelPreference();
+});
+select<HTMLInputElement>('#pbta-bonus').addEventListener('input', () => {
+  if (pendingRollContext && Number(select<HTMLInputElement>('#pbta-bonus').value) !== pendingRollContext.characteristicBonus) pendingRollContext = undefined;
+});
+pbtaActor.addEventListener('change', () => {
+  if (pendingRollContext && identity?.role === 'gm' && pbtaActor.value !== pendingRollContext.characterOwnerId) pendingRollContext = undefined;
+});
 makeFloatingPanelDraggable(diceToolsPanel, 'dice-tools');
 makeFloatingPanelDraggable(diceHistoryPanel, 'dice-history');
+makeFloatingPanelDraggable(sheetPanel, 'sheet');
 window.addEventListener('resize', () => {
   for (const [panel, key] of [[diceToolsPanel, 'dice-tools'], [diceHistoryPanel, 'dice-history']] as const) {
     clampFloatingPanel(panel);
     if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
   }
+  if (!sheetPanel.hidden) {
+    clampFloatingPanel(sheetPanel);
+    saveSheetPanelPreference();
+  }
+  if (!sheetRollPanel.hidden) positionSheetRollPanel();
 });
 select<HTMLButtonElement>('#layers-collapse').addEventListener('click', () => setLayersCollapsed(true));
 layersExpandButton.addEventListener('click', () => setLayersCollapsed(false));
@@ -1343,7 +2098,14 @@ select<HTMLButtonElement>('#pbta-roll').addEventListener('click', () => {
   const situationalModifier = Number(select<HTMLSelectElement>('#pbta-modifier').value);
   const disadvantage = select<HTMLInputElement>('#pbta-disadvantage').checked;
   const actorId = identity?.role === 'gm' ? pbtaActor.value : undefined;
-  void runCommand('dice:pbta', { characteristicBonus, situationalModifier, disadvantage, ...(actorId ? { actorId } : {}) });
+  let context = pendingRollContext;
+  if (context && (characteristicBonus !== context.characteristicBonus
+    || (identity?.role === 'gm' ? actorId !== context.characterOwnerId : context.characterOwnerId !== identity?.participantId))) context = undefined;
+  void runCommand('dice:pbta', {
+    characteristicBonus, situationalModifier, disadvantage,
+    ...(actorId ? { actorId } : {}),
+    ...(context ? { characteristicName: context.characteristicName, characterId: context.characterId, characterOwnerId: context.characterOwnerId } : {}),
+  });
 });
 select<HTMLButtonElement>('#free-roll').addEventListener('click', () => {
   const count = Number(select<HTMLInputElement>('#free-count').value);
@@ -1373,7 +2135,11 @@ select<HTMLButtonElement>('#asset-picker-upload-mode').addEventListener('click',
 select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
   const values = Array.from(select<HTMLElement>('#asset-picker-grid').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
   if (assetPickerMode === 'marker') { if (values[0]) selectedMarkerAssetId = values[0]; updateMarkerEditorFields(); }
-  else editingAssetIds = [...new Set([...editingAssetIds, ...values])];
+  else if (assetPickerMode === 'sheet-portrait') {
+    if (values[0] && openSheetId) void runCommand('sheet:update', { id: openSheetId, changes: { portraitAssetId: values[0] } });
+  } else if (assetPickerMode === 'ability') {
+    if (editingAbilityId && openSheetId) void runCommand('sheet:ability:update', { sheetId: openSheetId, id: editingAbilityId, changes: { assetId: values[0] ?? null } });
+  } else editingAssetIds = [...new Set([...editingAssetIds, ...values])];
   renderNoteAttachments(); assetPickerDialog.close();
 });
 select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });

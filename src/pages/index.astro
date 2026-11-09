@@ -48,6 +48,7 @@ import '../styles/global.css';
           <span id="connection" class="status"><i></i><span>Подключение…</span></span>
         </div>
         <div class="topbar-actions">
+          <button id="sheets-toggle" class="tool-button" type="button" aria-controls="sheets-panel" aria-expanded="false">Листы</button>
           <button id="notes-toggle" class="tool-button gm-only" type="button" hidden>Заметки</button>
           <button id="note-create" class="tool-button gm-only" type="button" hidden>＋ Заметка</button>
           <button id="sticker-create" class="tool-button" type="button" hidden>＋ Стикер</button>
@@ -95,14 +96,16 @@ import '../styles/global.css';
           <aside id="dice-tools-panel" class="floating-dice-panel dice-tools-panel" aria-label="Инструменты бросков" hidden>
             <div class="dice-panel-heading" data-panel-drag-handle><span class="panel-grip" aria-hidden="true">⠿</span><div class="panel-title"><p class="eyebrow">Игровые броски</p><h2>Инструменты</h2></div><button id="dice-tools-reset" class="icon-button panel-reset" type="button" title="Вернуть панель на место" aria-label="Вернуть панель инструментов на место">⌖</button><button id="dice-tools-close" class="icon-button" type="button" aria-label="Закрыть инструменты бросков">×</button></div>
             <div class="dice-room-system"><label for="room-system">Система комнаты</label><select id="room-system" disabled><option value="none">Без системы</option><option value="pbta-2d6">PbtA</option></select><button id="room-system-save" type="button" hidden>Применить</button></div>
-            <section id="pbta-roll-controls" class="dice-roll-controls" hidden aria-label="Проверка PbtA">
-              <h3>Проверка PbtA</h3>
-              <label for="pbta-bonus">Бонус характеристики</label><input id="pbta-bonus" type="number" min="-1000" max="1000" value="0" />
-              <label for="pbta-modifier">Ситуационный модификатор</label><select id="pbta-modifier"><option value="0">Без модификатора</option><option value="1">Превосходство (+1)</option><option value="-1">Угнетение (-1)</option></select>
-              <label class="dice-checkbox"><input id="pbta-disadvantage" type="checkbox" /> Помеха</label>
-              <label id="pbta-actor-row" for="pbta-actor" hidden>Бросок за игрока</label><select id="pbta-actor" hidden></select>
-              <button id="pbta-roll" type="button">Бросить 2d6</button>
-            </section>
+            <div id="pbta-controls-home">
+              <section id="pbta-roll-controls" class="dice-roll-controls" hidden aria-label="Проверка PbtA">
+                <h3>Проверка PbtA</h3>
+                <label for="pbta-bonus">Бонус характеристики</label><input id="pbta-bonus" type="number" min="-1000" max="1000" value="0" />
+                <label for="pbta-modifier">Ситуационный модификатор</label><select id="pbta-modifier"><option value="0">Без модификатора</option><option value="1">Превосходство (+1)</option><option value="-1">Угнетение (-1)</option></select>
+                <label class="dice-checkbox"><input id="pbta-disadvantage" type="checkbox" /> Помеха</label>
+                <label id="pbta-actor-row" for="pbta-actor" hidden>Бросок за игрока</label><select id="pbta-actor" hidden></select>
+                <button id="pbta-roll" type="button">Бросить 2d6</button>
+              </section>
+            </div>
             <section class="dice-roll-controls" aria-label="Свободный бросок">
               <h3>Свободный бросок</h3>
               <div class="free-dice-fields"><label for="free-count">Кубиков</label><input id="free-count" type="number" min="1" max="20" value="1" /><label for="free-sides">Тип</label><select id="free-sides"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>12</option><option>20</option><option>100</option></select></div>
@@ -141,6 +144,12 @@ import '../styles/global.css';
         <div class="panel-heading"><div><p class="eyebrow">Подготовка игры</p><h2>Заметки</h2></div><button id="notes-close" class="icon-button" type="button" aria-label="Закрыть заметки">×</button></div>
         <ul id="notes-list" class="assets-list"></ul>
       </aside>
+
+      <aside id="sheets-panel" class="library-panel sheets-panel" hidden>
+        <div class="panel-heading"><div><p class="eyebrow">Персонажи</p><h2>Листы</h2></div><button id="sheets-close" class="icon-button" type="button" aria-label="Закрыть каталог листов">×</button></div>
+        <p class="panel-note">Один игрок может иметь несколько листов. Назначенный лист редактирует игрок, любой лист — ведущий. Остальные участники могут только просматривать.</p>
+        <ul id="sheets-list" class="sheets-list"></ul>
+      </aside>
     </main>
     <dialog id="sticker-create-dialog" class="compact-dialog">
       <h2>Новый стикер</h2>
@@ -167,6 +176,41 @@ import '../styles/global.css';
       <div class="note-dialog-actions"><button id="note-edit" type="button" hidden>Редактировать</button><button id="note-place-marker" type="button" hidden>Поставить метку</button><button id="note-save" type="button">Сохранить</button></div>
       <p id="note-message" class="message" role="status" aria-live="polite"></p>
     </dialog>
+    <aside id="sheet-panel" class="floating-sheet-panel" aria-label="Лист персонажа" hidden>
+      <div class="sheet-panel-heading" data-panel-drag-handle>
+        <span class="panel-grip" aria-hidden="true">⠿</span>
+        <div class="sheet-panel-identity">
+          <div class="sheet-portrait-wrap">
+            <img id="sheet-portrait" class="sheet-dialog-portrait" alt="" hidden />
+            <span id="sheet-portrait-fallback" class="sheet-dialog-portrait sheet-portrait-fallback" aria-hidden="true"></span>
+          </div>
+          <div class="sheet-panel-title">
+            <p id="sheet-owner" class="eyebrow"></p>
+            <h2 id="sheet-name-heading">Лист персонажа</h2>
+            <p id="sheet-system" class="panel-note"></p>
+          </div>
+        </div>
+        <div class="sheet-panel-actions">
+          <button id="sheet-edit-toggle" type="button">Редактировать</button>
+          <button id="sheet-collapse" class="icon-button" type="button" aria-label="Свернуть лист" aria-expanded="true" title="Свернуть лист">–</button>
+          <button id="sheet-close" class="icon-button" type="button" aria-label="Закрыть лист">×</button>
+        </div>
+      </div>
+      <div id="sheet-panel-body" class="sheet-panel-body">
+        <p id="sheet-message" class="message" role="status" aria-live="polite"></p>
+        <div id="sheet-content" class="sheet-content"></div>
+      </div>
+    </aside>
+    <aside id="sheet-roll-panel" class="sheet-roll-panel" aria-label="Окно броска по характеристике" hidden>
+      <div class="sheet-roll-heading">
+        <div>
+          <p class="eyebrow">Проверка характеристики</p>
+          <h2 id="sheet-roll-name">Характеристика</h2>
+        </div>
+        <button id="sheet-roll-close" class="icon-button" type="button" aria-label="Закрыть окно броска">×</button>
+      </div>
+      <div id="sheet-roll-controls" class="sheet-roll-controls"></div>
+    </aside>
     <dialog id="asset-picker-dialog" class="asset-picker-dialog">
       <div class="note-dialog-heading"><div><p class="eyebrow">Общие ресурсы</p><h2>Изображения</h2></div><button id="asset-picker-close" class="icon-button" type="button" aria-label="Закрыть окно выбора">×</button></div>
       <div class="asset-picker-modes"><button id="asset-picker-library-mode" type="button" class="active">Библиотека</button><button id="asset-picker-upload-mode" type="button">Загрузить новое</button></div>

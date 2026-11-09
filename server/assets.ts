@@ -14,12 +14,16 @@ export async function saveImageAsset(
   claimedMime: string,
   originalName: string,
   maxBytes: number,
+  uploadedById?: string,
 ): Promise<{ asset: BoardAsset; deduplicated: boolean }> {
   if (bytes.length === 0 || bytes.length > maxBytes) throw new UnsupportedImageError('Размер файла превышает установленный лимит.');
   const info = inspectImage(bytes, claimedMime);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const existing = store.findAsset(sha256, info.mimeType);
-  if (existing) return { asset: existing, deduplicated: true };
+  if (existing) {
+    if (uploadedById) store.recordAssetUploader(existing.id, uploadedById);
+    return { asset: existing, deduplicated: true };
+  }
 
   const safeName = originalName.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 255) || 'image';
   const asset = {
@@ -33,13 +37,17 @@ export async function saveImageAsset(
   await writeFile(filePath, bytes, { flag: 'wx', mode: 0o600 });
   try {
     store.createAsset(asset);
+    if (uploadedById) store.recordAssetUploader(asset.id, uploadedById);
     const saved = store.getAsset(asset.id);
     if (!saved) throw new Error('Stored asset could not be read back.');
     return { asset: saved, deduplicated: false };
   } catch (error) {
     await unlink(filePath).catch(() => undefined);
     const duplicate = store.findAsset(sha256, info.mimeType);
-    if (duplicate) return { asset: duplicate, deduplicated: true };
+    if (duplicate) {
+      if (uploadedById) store.recordAssetUploader(duplicate.id, uploadedById);
+      return { asset: duplicate, deduplicated: true };
+    }
     throw error;
   }
 }
