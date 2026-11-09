@@ -25,7 +25,8 @@ test('authentication validates room and GM secret on server and persists role', 
     assert.equal(authenticate({ name: 'GM', role: 'gm', roomCode: config.roomCode, gmPassword: 'wrong-password-12345' }, config, store), undefined);
     const result = authenticate({ name: '  Morgan  ', role: 'player', roomCode: config.roomCode }, config, store);
     assert.ok(result);
-    assert.deepEqual(result.identity, { name: 'Morgan', role: 'player' });
+    assert.deepEqual({ name: result.identity.name, role: result.identity.role }, { name: 'Morgan', role: 'player' });
+    assert.equal(result.identity.participantId, sessionDigest(result.sessionId));
     assert.deepEqual(store.getSession(sessionDigest(result.sessionId)), result.identity);
     assert.equal(store.createSession('another-gm', { name: 'GM', role: 'gm' }, Date.now() + 60_000), true);
     assert.equal(authenticate({ name: 'GM 2', role: 'gm', roomCode: config.roomCode, gmPassword: config.gmPassword }, config, store), undefined);

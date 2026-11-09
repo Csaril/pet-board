@@ -70,7 +70,8 @@ test('HTTP session endpoints enforce origin, set a protected cookie, and restore
       payload: { name: 'Morgan', role: 'player', roomCode: config.roomCode },
     });
     assert.equal(login.statusCode, 200);
-    assert.deepEqual(login.json().identity, { name: 'Morgan', role: 'player' });
+    assert.deepEqual({ name: login.json().identity.name, role: login.json().identity.role }, { name: 'Morgan', role: 'player' });
+    assert.match(login.json().identity.participantId, /^[0-9a-f]{64}$/);
     const cookie = login.headers['set-cookie'];
     assert.equal(typeof cookie, 'string');
     assert.match(cookie as string, /HttpOnly/);
@@ -78,7 +79,7 @@ test('HTTP session endpoints enforce origin, set a protected cookie, and restore
 
     const restored = await app.inject({ method: 'GET', url: '/api/session', headers: { cookie: (cookie as string).split(';')[0] } });
     assert.equal(restored.statusCode, 200);
-    assert.deepEqual(restored.json().identity, { name: 'Morgan', role: 'player' });
+    assert.deepEqual({ name: restored.json().identity.name, role: restored.json().identity.role }, { name: 'Morgan', role: 'player' });
     const logout = await app.inject({
       method: 'DELETE', url: '/api/session', headers: { origin: 'http://localhost:80', cookie: (cookie as string).split(';')[0] },
     });
@@ -89,6 +90,45 @@ test('HTTP session endpoints enforce origin, set a protected cookie, and restore
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('note HTTP endpoints keep bodies out of board state and enforce audience access', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-board-note-api-'));
+  const config: AppConfig = {
+    host: '127.0.0.1', port: 0, dataDir, roomName: 'Campaign',
+    roomCode: 'room-code-with-enough-length', gmPassword: 'gm-password-with-enough-length',
+    sessionDays: 30, cookieSecure: false, maxUploadBytes: 25 * 1024 * 1024,
+  };
+  const app = await buildServer({ config, store: new RoomStore(dataDir, config.roomName), logger: false });
+  try {
+    const login = async (name: string, role: 'gm' | 'player') => {
+      const response = await app.inject({ method: 'POST', url: '/api/session', headers: { origin: 'http://localhost:80' }, payload: { name, role, roomCode: config.roomCode, gmPassword: role === 'gm' ? config.gmPassword : undefined } });
+      assert.equal(response.statusCode, 200);
+      return { cookie: (response.headers['set-cookie'] as string).split(';')[0]!, identity: response.json().identity as { participantId: string } };
+    };
+    const gm = await login('Keeper', 'gm'); const ari = await login('Ari', 'player'); const bea = await login('Bea', 'player');
+    const create = async (access: string, selectedParticipantIds: string[] = []) => app.inject({
+      method: 'POST', url: '/api/notes', headers: { origin: 'http://localhost:80', cookie: gm.cookie },
+      payload: { title: `Note ${access}`, body: 'private-body-marker', access, selectedParticipantIds, assetIds: [] },
+    });
+    const all = await create('all-players'); assert.equal(all.statusCode, 200);
+    const selected = await create('selected-players', [ari.identity.participantId]); assert.equal(selected.statusCode, 200);
+    const privateNote = await create('gm-only'); assert.equal(privateNote.statusCode, 200);
+    const ids = [all.json().note.id, selected.json().note.id, privateNote.json().note.id] as string[];
+    const gmBoard = await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: gm.cookie } });
+    assert.equal(gmBoard.body.includes('private-body-marker'), false);
+    assert.equal(gmBoard.json().noteMarkers.length, 0);
+    const ariBoard = await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: ari.cookie } });
+    assert.equal(ariBoard.body.includes('private-body-marker'), false);
+    assert.equal(ariBoard.json().noteMarkers.length, 0);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[0]}`, headers: { cookie: bea.cookie } })).statusCode, 200);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: ari.cookie } })).statusCode, 200);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: bea.cookie } })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[2]}`, headers: { cookie: ari.cookie } })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: '/api/notes', headers: { cookie: ari.cookie } })).statusCode, 403);
+    const noOrigin = await app.inject({ method: 'PUT', url: `/api/notes/${ids[0]}`, headers: { cookie: gm.cookie }, payload: { title: 'changed', body: '', access: 'gm-only', selectedParticipantIds: [], assetIds: [] } });
+    assert.equal(noOrigin.statusCode, 403);
+  } finally { await app.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 
 test('GM and two player sessions connect over WebSocket and a player session can reconnect', async () => {
@@ -117,7 +157,7 @@ test('GM and two player sessions connect over WebSocket and a player session can
       assert.equal(response.statusCode, 200);
       return (response.headers['set-cookie'] as string).split(';')[0];
     };
-    const connect = (cookie: string) => new Promise<{ socket: WebSocket; state: { identity: { name: string; role: string }; participants: unknown[] } }>((resolve, reject) => {
+    const connect = (cookie: string) => new Promise<{ socket: WebSocket; state: { identity: { participantId: string; name: string; role: string }; participants: unknown[] } }>((resolve, reject) => {
       const socket = new WebSocket(`ws://${host}/ws`, { headers: { origin, cookie } });
       activeSockets.push(socket);
       socket.once('error', reject);
@@ -129,15 +169,16 @@ test('GM and two player sessions connect over WebSocket and a player session can
     const secondPlayerCookie = await login('Bea', 'player');
     const gm = await connect(gmCookie);
     const firstPlayer = await connect(firstPlayerCookie);
-    const secondPlayer = await connect(secondPlayerCookie);
-    assert.deepEqual(gm.state.identity, { name: 'Keeper', role: 'gm' });
-    assert.deepEqual(firstPlayer.state.identity, { name: 'Ari', role: 'player' });
-    assert.deepEqual(secondPlayer.state.identity, { name: 'Bea', role: 'player' });
-    assert.equal(secondPlayer.state.participants.length, 3);
-    await Promise.all([
+    const participantUpdates = Promise.all([
       nextSocketMessage(gm.socket, (message) => message.type === 'room:state' && Array.isArray(message.participants) && message.participants.length === 3, 'GM participant update'),
       nextSocketMessage(firstPlayer.socket, (message) => message.type === 'room:state' && Array.isArray(message.participants) && message.participants.length === 3, 'player participant update'),
     ]);
+    const secondPlayer = await connect(secondPlayerCookie);
+    assert.deepEqual({ name: gm.state.identity.name, role: gm.state.identity.role }, { name: 'Keeper', role: 'gm' });
+    assert.deepEqual({ name: firstPlayer.state.identity.name, role: firstPlayer.state.identity.role }, { name: 'Ari', role: 'player' });
+    assert.deepEqual({ name: secondPlayer.state.identity.name, role: secondPlayer.state.identity.role }, { name: 'Bea', role: 'player' });
+    assert.equal(secondPlayer.state.participants.length, 3);
+    await participantUpdates;
 
     const privateLayerMessage = nextSocketMessage(gm.socket, (message) => message.type === 'command:result' && message.requestId === 'private-layer', 'private layer acknowledgement');
     const gmPrivateProjection = nextSocketMessage(gm.socket, (message) => Boolean(message.type === 'room:state' && (message.layers as Array<{ name: string }> | undefined)?.some((layer) => layer.name === 'GM secrets')), 'GM private projection');
@@ -173,11 +214,22 @@ test('GM and two player sessions connect over WebSocket and a player session can
     assert.equal((await allowedMoveAck).ok, true);
     await movedState;
 
+    const cropAck = nextSocketMessage(gm.socket, (message) => message.type === 'command:result' && message.requestId === 'shared-crop', 'crop update acknowledgement');
+    const firstCroppedProjection = nextSocketMessage(firstPlayer.socket, (message) => message.type === 'room:state' && (message.objects as Array<{ crop?: { x: number }; width?: number }> | undefined)?.[0]?.crop?.x === 0.25, 'first player cropped object');
+    const secondCroppedProjection = nextSocketMessage(secondPlayer.socket, (message) => message.type === 'room:state' && (message.objects as Array<{ crop?: { x: number }; width?: number }> | undefined)?.[0]?.crop?.x === 0.25, 'second player cropped object');
+    gm.socket.send(JSON.stringify({ type: 'object:update', requestId: 'shared-crop', id: boardObject.id, changes: { crop: { x: 0.25, y: 0, width: 0.5, height: 1 }, width: 8, height: 6 } }));
+    assert.equal((await cropAck).ok, true);
+    for (const state of await Promise.all([firstCroppedProjection, secondCroppedProjection])) {
+      const projected = (state.objects as Array<{ crop: { x: number; width: number }; width: number; height: number }>)[0]!;
+      assert.deepEqual(projected.crop, { x: 0.25, y: 0, width: 0.5, height: 1 });
+      assert.deepEqual({ width: projected.width, height: projected.height }, { width: 8, height: 6 });
+    }
+
     const oldSocketClosed = new Promise<void>((resolve) => firstPlayer.socket.once('close', () => resolve()));
     firstPlayer.socket.close();
     await oldSocketClosed;
     const restoredPlayer = await connect(firstPlayerCookie);
-    assert.deepEqual(restoredPlayer.state.identity, { name: 'Ari', role: 'player' });
+    assert.deepEqual({ name: restoredPlayer.state.identity.name, role: restoredPlayer.state.identity.role }, { name: 'Ari', role: 'player' });
   } finally {
     await Promise.all(activeSockets.map((socket) => new Promise<void>((resolve) => {
       if (socket.readyState === WebSocket.CLOSED) return resolve();
@@ -232,7 +284,7 @@ test('image upload deduplicates content and asset reads follow the current board
     const publicLayer = store.getLayers()[0]!;
     store.createObject({
       id: 'object-public', assetId, layerId: publicLayer.id, x: 0, y: 0, width: 1, height: 1,
-      orderIndex: 0, flipX: false, flipY: false, crop: null, allowPlayerMove: false,
+      orderIndex: 0, flipX: false, flipY: false, crop: null, allowPlayerMove: false, freeStretch: false,
     });
     const visibleAsset = await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: playerCookie } });
     assert.equal(visibleAsset.statusCode, 200);

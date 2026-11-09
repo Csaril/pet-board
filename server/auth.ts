@@ -27,9 +27,9 @@ export function authenticate(
 
   const token = randomBytes(32).toString('base64url');
   const sessionId = sessionDigest(token);
-  const identity = { name, role };
+  const identity = { participantId: sessionId, name, role };
   const expiresAt = now + config.sessionDays * 24 * 60 * 60 * 1000;
-  return store.createSession(sessionId, identity, expiresAt) ? { sessionId: token, identity } : undefined;
+  return store.createSession(sessionId, { name, role }, expiresAt) ? { sessionId: token, identity } : undefined;
 }
 
 export function sessionDigest(sessionId: string): string {

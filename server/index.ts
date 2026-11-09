@@ -7,7 +7,9 @@ import websocket from '@fastify/websocket';
 import { createReadStream, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
+import type { NoteAccess } from '../src/shared/board.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
 import { executeBoardCommand, BoardCommandError } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
@@ -15,6 +17,24 @@ import { saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
 
 const COOKIE_PATH = '/';
+
+function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[] } | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !['title', 'body', 'access', 'selectedParticipantIds', 'assetIds'].includes(key))) return undefined;
+  if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return undefined;
+  if (typeof body.body !== 'string' || body.body.length > 20_000) return undefined;
+  if (body.access !== 'gm-only' && body.access !== 'all-players' && body.access !== 'selected-players') return undefined;
+  if (!Array.isArray(body.selectedParticipantIds) || body.selectedParticipantIds.length > 6 || body.selectedParticipantIds.some((id) => typeof id !== 'string' || !/^[0-9a-f]{64}$/i.test(id))) return undefined;
+  const selectedParticipantIds = [...new Set(body.selectedParticipantIds as string[])];
+  if (selectedParticipantIds.length !== body.selectedParticipantIds.length) return undefined;
+  if (body.access === 'selected-players' && (!selectedParticipantIds.length || selectedParticipantIds.some((id) => !store.isPlayerParticipant(id)))) return undefined;
+  if (body.access !== 'selected-players' && selectedParticipantIds.length) return undefined;
+  if (!Array.isArray(body.assetIds) || body.assetIds.length > 20 || body.assetIds.some((id) => typeof id !== 'string' || !store.getAsset(id))) return undefined;
+  const assetIds = [...new Set(body.assetIds as string[])];
+  if (assetIds.length !== body.assetIds.length) return undefined;
+  return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds };
+}
 
 function isSameOrigin(origin: string | undefined, host: string | undefined): boolean {
   if (!origin || !host) return false;
@@ -58,7 +78,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     for (const [sessionId, connections] of sockets) {
       const identity = store.getSession(sessionId);
       if (!identity) continue;
-      const snapshot = store.snapshot(identity.role);
+      const snapshot = store.snapshot(identity);
       const payload = JSON.stringify({ type: 'room:state', roomName: store.roomName, identity, participants, maxUploadBytes: config.maxUploadBytes, ...snapshot });
       for (const socket of connections) if (socket.readyState === 1) socket.send(payload);
     }
@@ -68,7 +88,65 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     reply.header('Cache-Control', 'no-store');
-    return { ...store.snapshot(session.identity.role), maxUploadBytes: config.maxUploadBytes };
+    return { ...store.snapshot(session.identity), maxUploadBytes: config.maxUploadBytes };
+  });
+
+  app.get('/api/notes', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Список заметок доступен только ведущему.' });
+    reply.header('Cache-Control', 'no-store');
+    return { notes: store.listNotes() };
+  });
+
+  app.post('/api/notes', async (request, reply) => {
+    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может создавать только ведущий.' });
+    const input = parseNotePayload(request.body, store);
+    if (!input) return reply.code(400).send({ error: 'Проверьте заголовок, текст, доступ, участников и изображения заметки.' });
+    const id = randomUUID();
+    store.createNote({ id, ...input, creatorId: session.identity.participantId });
+    reply.header('Cache-Control', 'no-store');
+    sendState();
+    return { note: store.getNote(id) };
+  });
+
+  app.get('/api/notes/:id', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const { id } = request.params as { id: string };
+    if (!store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    reply.header('Cache-Control', 'no-store');
+    return { note: store.getNote(id) };
+  });
+
+  app.put('/api/notes/:id', async (request, reply) => {
+    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может редактировать только ведущий.' });
+    const { id } = request.params as { id: string };
+    if (!store.getNote(id)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    const input = parseNotePayload(request.body, store);
+    if (!input) return reply.code(400).send({ error: 'Проверьте заголовок, текст, доступ, участников и изображения заметки.' });
+    store.updateNote(id, input);
+    reply.header('Cache-Control', 'no-store');
+    sendState();
+    return { note: store.getNote(id) };
+  });
+
+  app.delete('/api/notes/:id', async (request, reply) => {
+    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять заметки может только ведущий.' });
+    const { id } = request.params as { id: string };
+    if (!store.getNote(id)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    store.deleteNote(id);
+    sendState();
+    return reply.code(204).send();
   });
 
   app.post('/api/session', {
@@ -144,7 +222,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
     const asset = store.getAsset(id);
-    if (!asset || (session.identity.role !== 'gm' && !store.isAssetUsedByPublicObject(id))) {
+    if (!asset || !store.canReadAsset(id, session.identity)) {
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
     reply.type(asset.mimeType).header('Cache-Control', 'private, no-store').header('X-Content-Type-Options', 'nosniff');

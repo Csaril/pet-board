@@ -68,7 +68,7 @@ test('asset upload deduplicates by content and MIME, not by file name', async ()
     const layer = store.getLayers()[0]!;
     store.createObject({
       id: 'crop-check', assetId: first.asset.id, layerId: layer.id, x: 0, y: 0, width: 1, height: 1,
-      orderIndex: 0, flipX: false, flipY: false, crop: null, allowPlayerMove: false,
+      orderIndex: 0, flipX: false, flipY: false, crop: null, allowPlayerMove: false, freeStretch: false,
     });
     store.updateObject('crop-check', { crop: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 } });
     assert.deepEqual(readFileSync(join(dataDir, 'assets', first.asset.id)), firstBytes);

@@ -104,4 +104,36 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .stretch-toggle input, .player-move input { width: 13px; height: 13px; margin: 0; }
 .move-layer { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #59635c; font-size: 10px; }
 .move-layer select { width: 100px; height: 28px; padding: 0 5px; font-size: 10px; }
+.sticker-tools { bottom: 48px; }
+.sticker-color-control { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: #59635c; font-size: 10px; }
+.sticker-color-control select { width: 92px; height: 29px; padding: 0 5px; font-size: 10px; }
+.player-sticker-setting { display: flex; align-items: center; gap: 7px; margin: 15px 0; color: #536057; font-size: 12px; }
+.player-sticker-setting input { width: 15px; height: 15px; margin: 0; }
+.note-dialog { width: min(620px, calc(100vw - 32px)); max-height: min(86vh, 900px); overflow: auto; padding: 22px; border: 1px solid #dce1db; border-radius: 12px; background: #fff; color: inherit; box-shadow: 0 18px 60px #1b2c2040; }
+.note-dialog::backdrop { background: #18231dcc; }
+.note-dialog-heading { display: flex; justify-content: space-between; align-items: start; gap: 14px; margin-bottom: 14px; }
+.note-dialog-heading h2 { font-size: 20px; }
+.privacy-indicator { display: inline-block; margin: 0 0 5px; padding: 3px 7px; border-radius: 5px; background: #f1f2ee; color: #5c665e; font-size: 10px; }
+.privacy-indicator.private { background: #fff1d8; color: #855719; }
+.note-editor-fields { display: grid; gap: 7px; }
+.note-editor-fields > label { margin: 6px 0 0; }
+.note-editor-fields textarea { width: 100%; min-height: 140px; padding: 10px; border: 1px solid #d8ded7; border-radius: 8px; color: inherit; font: inherit; line-height: 1.5; resize: vertical; }
+.note-participants, .note-assets { margin: 8px 0 0; padding: 10px; border: 1px solid #e2e6df; border-radius: 8px; }
+.note-participants legend, .note-assets legend { padding: 0 4px; color: #667168; font-size: 11px; }
+.note-participant-row, .note-asset-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; color: #4d5750; font-size: 12px; }
+.note-participant-row input, .note-asset-row input { width: 15px; height: 15px; margin: 0; }
+.note-view-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 9px; }
+.note-view-images img { width: 100%; max-height: 300px; object-fit: contain; border: 1px solid #e3e7e1; border-radius: 7px; background: #f7f8f5; }
+.note-view-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #343c36; font-size: 14px; line-height: 1.65; }
+.note-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.note-dialog-actions button { height: 36px; margin: 0; padding: 0 12px; }
+.note-entry { display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 9px; border: 1px solid #e4e8e2; border-radius: 8px; background: #fff; }
+.note-entry-title { min-width: 0; overflow: hidden; color: #404941; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.note-entry-actions { display: flex; gap: 4px; }
+.note-entry-actions button { height: 28px; margin: 0; padding: 0 7px; font-size: 10px; }
+.note-marker { cursor: pointer; }
+.sticker-background-butter { fill: #f2e6b8; }
+.sticker-background-rose { fill: #f1d8d4; }
+.sticker-background-sky { fill: #d9e8ed; }
+.sticker-background-sage { fill: #dce8d9; }
 @media (max-width: 900px) { .topbar { padding: 0 10px; gap: 6px; } .topbar-brand, .topbar-actions { min-width: unset; } .topbar-center { gap: 5px; } .topbar-center .status { display: none; } .side-panel { width: 235px; flex-basis: 235px; } }

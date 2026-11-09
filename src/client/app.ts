@@ -1,6 +1,7 @@
 import Konva from 'konva';
-import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, CropRect } from '../shared/board.js';
-import { cameraForBounds, isValidCamera, zoomKeepingScreenPoint } from '../shared/camera.js';
+import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CropRect, NoteListItem, NoteRecord, RoomParticipant } from '../shared/board.js';
+import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
+import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -28,6 +29,12 @@ const uploadInput = select<HTMLInputElement>('#image-upload');
 const uploadDropZone = select<HTMLElement>('#upload-drop-zone');
 const uploadMessage = select<HTMLElement>('#upload-message');
 const objectTools = select<HTMLElement>('#object-tools');
+const stickerTools = select<HTMLElement>('#sticker-tools');
+const markerTools = select<HTMLElement>('#marker-tools');
+const notesPanel = select<HTMLElement>('#notes-panel');
+const notesList = select<HTMLUListElement>('#notes-list');
+const noteDialog = select<HTMLDialogElement>('#note-dialog');
+const notePlacementHint = select<HTMLElement>('#note-place-hint');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
@@ -37,7 +44,7 @@ const MIN_ZOOM = 0.00001;
 
 type AppIdentity = BoardStateMessage['identity'];
 interface RoomMessage extends BoardStateMessage {
-  participants: Array<{ name: string; role: 'gm' | 'player' }>;
+  participants: RoomParticipant[];
 }
 interface PendingCommand {
   resolve: () => void;
@@ -48,13 +55,10 @@ interface RenderedObject {
   group: Konva.Group;
   image: Konva.Image;
   border: Konva.Rect;
+  cropShades: Konva.Rect[];
 }
-interface CropGesture {
-  id: string;
-  group: Konva.Group;
-  selection: Konva.Rect;
-  start: { x: number; y: number };
-}
+interface RenderedSticker { group: Konva.Group; background: Konva.Rect; text: Konva.Text }
+interface RenderedMarker { group: Konva.Group }
 
 let identity: AppIdentity | undefined;
 let roomState: RoomMessage | undefined;
@@ -66,17 +70,26 @@ let stage: Konva.Stage | undefined;
 let boardLayer: Konva.Layer | undefined;
 let interactionLayer: Konva.Layer | undefined;
 let transformer: Konva.Transformer | undefined;
+let cropTransformer: Konva.Transformer | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let selectedObjectId: string | undefined;
+let selectedStickerId: string | undefined;
+let selectedMarkerId: string | undefined;
 let activeLayerId: string | undefined;
+let notePlacementId: string | undefined;
+let openNoteId: string | undefined;
+let editingNoteId: string | undefined;
+let noteDialogMode: 'view' | 'edit' = 'view';
+let noteRequestSequence = 0;
 let cropMode = false;
-let cropGesture: CropGesture | undefined;
 let camera = { x: 0, y: 0, scale: 1 };
 let hasRestoredCamera = false;
 let panGesture: { x: number; y: number; cameraX: number; cameraY: number } | undefined;
 let messageTimer: number | undefined;
 const imageCache = new Map<string, HTMLImageElement>();
 const renderedObjects = new Map<string, RenderedObject>();
+const renderedStickers = new Map<string, RenderedSticker>();
+const renderedMarkers = new Map<string, RenderedMarker>();
 const pendingCommands = new Map<string, PendingCommand>();
 
 function showConnection(label: string, state: 'online' | 'reconnecting' | 'offline') {
@@ -93,7 +106,7 @@ function showCanvasMessage(message: string, error = false) {
 }
 
 function login(role: AppIdentity['role'], name: string) {
-  identity = { role, name };
+  identity = { participantId: '', role, name };
   loginShell.hidden = true;
   workspace.hidden = false;
   for (const element of document.querySelectorAll<HTMLElement>('.gm-only')) element.hidden = role !== 'gm';
@@ -219,8 +232,27 @@ function setupStage() {
     anchorFill: '#fff',
     anchorSize: 8,
     padding: 1,
+    enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
+  });
+  cropTransformer = new Konva.Transformer({
+    rotateEnabled: false, flipEnabled: false, keepRatio: false, enabledAnchors: ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right'],
+    ignoreStroke: true, borderStroke: '#426c59', anchorStroke: '#426c59', anchorFill: '#fff', anchorSize: 8, padding: 1,
+    boundBoxFunc: (_oldBox, newBox) => {
+      const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+      const rendered = selectedObjectId ? renderedObjects.get(selectedObjectId) : undefined;
+      if (!cropMode || !item || !rendered) return newBox;
+      const inverse = rendered.group.getAbsoluteTransform().copy().invert();
+      const first = inverse.point({ x: newBox.x, y: newBox.y });
+      const second = inverse.point({ x: newBox.x + newBox.width, y: newBox.y + newBox.height });
+      const minSize = Math.min(8, item.width, item.height);
+      const bounded = clampRect({ x: Math.min(first.x, second.x), y: Math.min(first.y, second.y), width: Math.abs(second.x - first.x), height: Math.abs(second.y - first.y) }, item.width, item.height, minSize);
+      const topLeft = rendered.group.getAbsoluteTransform().point({ x: bounded.x, y: bounded.y });
+      const bottomRight = rendered.group.getAbsoluteTransform().point({ x: bounded.x + bounded.width, y: bounded.y + bounded.height });
+      return { ...newBox, x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y };
+    },
   });
   interactionLayer.add(transformer);
+  interactionLayer.add(cropTransformer);
   stage.add(boardLayer, interactionLayer);
   stage.on('mousedown touchstart', (event) => {
     if (event.target !== stage || cropMode) return;
@@ -229,7 +261,6 @@ function setupStage() {
     panGesture = { x: pointer.x, y: pointer.y, cameraX: stage!.x(), cameraY: stage!.y() };
   });
   stage.on('mousemove touchmove', () => {
-    if (cropGesture) updateCropGesture();
     if (!panGesture) return;
     const pointer = stage!.getPointerPosition();
     if (!pointer) return;
@@ -238,11 +269,25 @@ function setupStage() {
   });
   stage.on('mouseup touchend', () => {
     panGesture = undefined;
-    if (cropGesture) commitCropGesture();
-    else saveCamera();
+    saveCamera();
   });
   stage.on('click tap', (event) => {
-    if (event.target === stage && selectedObjectId) setSelectedObject(undefined);
+    if (event.target !== stage) return;
+    if (notePlacementId) {
+      const pointer = stage!.getPointerPosition();
+      const layer = activeLayerId && roomState?.layers.find((entry) => entry.id === activeLayerId);
+      if (!pointer || !layer || layer.locked || identity?.role !== 'gm') { showCanvasMessage('Выберите открытый слой для метки.', true); return; }
+      const world = screenToWorld(pointer, { x: stage!.x(), y: stage!.y(), scale: stage!.scaleX() });
+      const noteId = notePlacementId;
+      notePlacementId = undefined;
+      notePlacementHint.hidden = true;
+      const existingMarker = roomState?.noteMarkers.find((marker) => marker.noteId === noteId);
+      if (existingMarker) void runCommand('note-marker:update', { id: existingMarker.id, changes: { layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) } });
+      else void runCommand('note-marker:create', { noteId, layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) });
+      canvasContainer.style.cursor = '';
+      return;
+    }
+    if (selectedObjectId || selectedStickerId || selectedMarkerId) setSelectedObject(undefined);
   });
   stage.on('wheel', (event) => {
     event.evt.preventDefault();
@@ -279,13 +324,25 @@ function setupStage() {
   select<HTMLButtonElement>('#fit-board').addEventListener('click', fitAllObjects);
 }
 
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && notePlacementId) {
+    notePlacementId = undefined; notePlacementHint.hidden = true; canvasContainer.style.cursor = '';
+  }
+});
+
 function fitAllObjects() {
   if (!stage || !roomState) return;
   const visibleIds = new Set(roomState.layers.filter((layer) => layer.visible).map((layer) => layer.id));
   const objects = roomState.objects.filter((item) => visibleIds.has(item.layerId));
-  const bounds = objects.length ? {
-    minX: Math.min(...objects.map((item) => item.x)), minY: Math.min(...objects.map((item) => item.y)),
-    maxX: Math.max(...objects.map((item) => item.x + item.width)), maxY: Math.max(...objects.map((item) => item.y + item.height)),
+  const boundsRects: Rect[] = objects.map((item) => {
+    const rect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
+    return { x: item.x + rect.x, y: item.y + rect.y, width: rect.width, height: rect.height };
+  });
+  for (const sticker of roomState.stickers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height });
+  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: 38, height: 38 });
+  const bounds = boundsRects.length ? {
+    minX: Math.min(...boundsRects.map((rect) => rect.x)), minY: Math.min(...boundsRects.map((rect) => rect.y)),
+    maxX: Math.max(...boundsRects.map((rect) => rect.x + rect.width)), maxY: Math.max(...boundsRects.map((rect) => rect.y + rect.height)),
   } : undefined;
   const next = cameraForBounds(bounds, stage.width(), stage.height(), 64, MAX_ZOOM);
   stage.position({ x: next.x, y: next.y });
@@ -312,11 +369,6 @@ function canMove(item: BoardImage, layer: BoardLayer): boolean {
   return identity?.role === 'gm' || (identity?.role === 'player' && item.allowPlayerMove && layer.audience === 'all-players' && layer.visible);
 }
 
-function imageCrop(item: BoardImage, image: HTMLImageElement) {
-  const crop = item.crop ?? { x: 0, y: 0, width: 1, height: 1 };
-  return { x: crop.x * image.naturalWidth, y: crop.y * image.naturalHeight, width: crop.width * image.naturalWidth, height: crop.height * image.naturalHeight };
-}
-
 function updateImageNode(node: Konva.Image, item: BoardImage, image: HTMLImageElement) {
   node.setAttrs({
     x: item.flipX ? item.width : 0,
@@ -325,63 +377,152 @@ function updateImageNode(node: Konva.Image, item: BoardImage, image: HTMLImageEl
     height: item.height,
     scaleX: item.flipX ? -1 : 1,
     scaleY: item.flipY ? -1 : 1,
-    crop: imageCrop(item, image),
     image,
   });
+}
+
+function cropBox(node: Konva.Rect, width: number, height: number): Rect {
+  return clampRect({ x: node.x(), y: node.y(), width: node.width() * Math.abs(node.scaleX()), height: node.height() * Math.abs(node.scaleY()) }, width, height);
+}
+
+function updateCropShades(rendered: RenderedObject, width: number, height: number) {
+  const box = cropBox(rendered.border, width, height);
+  const [top, bottom, left, right] = rendered.cropShades;
+  top!.setAttrs({ x: 0, y: 0, width, height: box.y });
+  bottom!.setAttrs({ x: 0, y: box.y + box.height, width, height: Math.max(0, height - box.y - box.height) });
+  left!.setAttrs({ x: 0, y: box.y, width: box.x, height: box.height });
+  right!.setAttrs({ x: box.x + box.width, y: box.y, width: Math.max(0, width - box.x - box.width), height: box.height });
 }
 
 function drawObjects() {
   if (!boardLayer || !roomState) return;
   boardLayer.destroyChildren();
   transformer?.nodes([]);
+  cropTransformer?.nodes([]);
   renderedObjects.clear();
+  renderedStickers.clear(); renderedMarkers.clear();
   const visibleLayers = roomState.layers.filter((layer) => layer.visible).sort((a, b) => a.orderIndex - b.orderIndex);
   for (const layer of visibleLayers) {
     const objects = roomState.objects.filter((object) => object.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex);
     for (const item of objects) {
+      const editingCrop = cropMode && selectedObjectId === item.id;
       const htmlImage = cachedImage(item.assetId);
       const group = new Konva.Group({
         x: item.x, y: item.y, width: item.width, height: item.height,
         draggable: canMove(item, layer) && !(cropMode && selectedObjectId === item.id),
         name: `board-object ${item.id}`,
+        ...(!editingCrop ? { clipFunc: (context: Konva.Context) => {
+          const rect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
+          context.rect(rect.x, rect.y, rect.width, rect.height);
+        } } : {}),
       });
       const imageNode = new Konva.Image({ image: htmlImage, listening: true });
       updateImageNode(imageNode, item, htmlImage);
-      const border = new Konva.Rect({ x: 0, y: 0, width: item.width, height: item.height, stroke: layer.locked ? '#bd7b20' : '#1684d4', strokeWidth: 2, dash: [5, 3], listening: false, strokeEnabled: false });
-      group.add(imageNode, border);
+      const cropRect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
+      const cropShades = [0, 1, 2, 3].map(() => new Konva.Rect({ fill: '#1119', listening: false, perfectDrawEnabled: false }));
+      const border = new Konva.Rect({ ...cropRect, stroke: editingCrop ? '#426c59' : layer.locked ? '#bd7b20' : '#1684d4', strokeWidth: 2, dash: [5, 3], listening: editingCrop, strokeEnabled: false, fill: editingCrop ? '#ffffff01' : undefined, draggable: editingCrop && identity?.role === 'gm' && !layer.locked });
+      group.add(imageNode, ...cropShades, border);
+      const rendered: RenderedObject = { group, image: imageNode, border, cropShades };
+      if (editingCrop) {
+        border.on('click tap', (event) => { event.cancelBubble = true; });
+        updateCropShades(rendered, item.width, item.height);
+        border.dragBoundFunc((position) => {
+          const transform = group.getAbsoluteTransform().copy().invert();
+          const local = transform.point(position);
+          const bounded = clampRect({ x: local.x, y: local.y, width: border.width(), height: border.height() }, item.width, item.height);
+          return group.getAbsoluteTransform().point({ x: bounded.x, y: bounded.y });
+        });
+        border.on('dragmove transform', () => { updateCropShades(rendered, item.width, item.height); boardLayer?.batchDraw(); });
+        border.on('dragend', () => { updateCropShades(rendered, item.width, item.height); });
+        border.on('transformend', () => {
+          const bounded = cropBox(border, item.width, item.height);
+          border.setAttrs({ ...bounded, scaleX: 1, scaleY: 1 });
+          updateCropShades(rendered, item.width, item.height);
+          cropTransformer?.forceUpdate();
+          boardLayer?.batchDraw();
+        });
+      }
       group.on('click tap', (event) => { event.cancelBubble = true; setSelectedObject(item.id); });
       group.on('dragend', () => { void runCommand('object:update', { id: item.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }); });
+      group.on('transform', () => {
+        if (identity?.role !== 'gm' || layer.locked || item.freeStretch) return;
+        const asset = roomState?.assets?.find((entry) => entry.id === item.assetId);
+        const aspect = asset ? asset.width / asset.height : item.width / item.height;
+        const scales = lockTransformScales(item.width, item.height, group.scaleX(), group.scaleY(), aspect);
+        group.scale({ x: scales.scaleX, y: scales.scaleY });
+      });
       group.on('transformend', () => {
         if (identity?.role !== 'gm' || layer.locked) return;
-        const width = Math.max(1, Math.round(group.width() * Math.abs(group.scaleX())));
-        const height = Math.max(1, Math.round(group.height() * Math.abs(group.scaleY())));
+        const asset = roomState?.assets?.find((entry) => entry.id === item.assetId);
+        const aspect = asset ? asset.width / asset.height : item.width / item.height;
+        const size = transformedSize(group.width(), group.height(), group.scaleX(), group.scaleY(), item.freeStretch, aspect);
+        const width = Math.max(1, Math.round(size.width));
+        const height = Math.max(1, Math.round(size.height));
+        const x = clampWorld(group.x()); const y = clampWorld(group.y());
         group.scale({ x: 1, y: 1 });
-        group.size({ width, height });
-        void runCommand('object:update', { id: item.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()), width, height } });
-      });
-      group.on('mousedown touchstart', (event) => {
-        if (!cropMode || selectedObjectId !== item.id || identity?.role !== 'gm' || layer.locked) return;
-        event.cancelBubble = true;
-        startCropGesture(item.id, group);
+        item.width = width; item.height = height; item.x = x; item.y = y;
+        drawObjects();
+        void runCommand('object:update', { id: item.id, changes: { x, y, width, height } });
       });
       boardLayer.add(group);
-      renderedObjects.set(item.id, { group, image: imageNode, border });
+      renderedObjects.set(item.id, rendered);
+    }
+    for (const sticker of (roomState.stickers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
+      const colors: Record<BoardSticker['bgColor'], string> = { butter: '#fff1b8', rose: '#ffd6df', sky: '#d7efff', sage: '#d9efdc' };
+      const textColors: Record<BoardSticker['textColor'], string> = { ink: '#28302b', plum: '#663a58' };
+      const group = new Konva.Group({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height, draggable: !layer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId), name: `board-sticker ${sticker.id}` });
+      const background = new Konva.Rect({ width: sticker.width, height: sticker.height, fill: colors[sticker.bgColor], cornerRadius: 8, stroke: '#0002', strokeWidth: 1 });
+      const text = new Konva.Text({ x: 10, y: 8, width: sticker.width - 20, height: sticker.height - 16, text: sticker.text, fontFamily: 'system-ui, sans-serif', fontSize: sticker.fontSize, fill: textColors[sticker.textColor], wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false });
+      group.add(background, text);
+      group.on('click tap', (event) => { event.cancelBubble = true; setSelectedSticker(sticker.id); });
+      group.on('dragend', () => void runCommand('sticker:update', { id: sticker.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }));
+      group.on('transformend', () => { const changes = { x: clampWorld(group.x()), y: clampWorld(group.y()), width: Math.max(100, Math.round(group.width() * group.scaleX())), height: Math.max(64, Math.round(group.height() * group.scaleY())) }; group.scale({ x: 1, y: 1 }); void runCommand('sticker:update', { id: sticker.id, changes }); });
+      boardLayer.add(group); renderedStickers.set(sticker.id, { group, background, text });
+    }
+    for (const marker of (roomState.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
+      const group = new Konva.Group({ x: marker.x, y: marker.y, width: 38, height: 38, draggable: identity?.role === 'gm' && !layer.locked, name: `note-marker ${marker.id}` });
+      group.add(new Konva.Circle({ radius: 19, fill: '#426c59', stroke: '#fff', strokeWidth: 2 }));
+      group.add(new Konva.Text({ x: 0, y: 7, width: 38, text: 'N', fontSize: 19, fontStyle: 'bold', fill: '#fff', align: 'center', listening: false }));
+      group.on('click tap', (event) => { event.cancelBubble = true; setSelectedMarker(marker.id); void openNote(marker.noteId); });
+      group.on('dragend', () => void runCommand('note-marker:update', { id: marker.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }));
+      boardLayer.add(group); renderedMarkers.set(marker.id, { group });
     }
   }
-  if (selectedObjectId) updateSelectionControls();
+  updateSelectionControls();
   boardLayer.batchDraw();
 }
 
 function clampWorld(value: number) { return Math.max(-MAX_WORLD_COORDINATE, Math.min(MAX_WORLD_COORDINATE, value)); }
 
 function setSelectedObject(id: string | undefined) {
-  selectedObjectId = id;
+  const changed = id !== selectedObjectId;
+  selectedObjectId = id; selectedStickerId = undefined; selectedMarkerId = undefined;
   updateSelectionControls();
-  if (cropMode && id) cropMode = false;
+  if (cropMode && changed) cropMode = false;
   drawObjects();
 }
 
+function setSelectedSticker(id: string | undefined) { selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; updateSelectionControls(); drawObjects(); }
+function setSelectedMarker(id: string | undefined) { selectedObjectId = undefined; selectedStickerId = undefined; selectedMarkerId = id; cropMode = false; updateSelectionControls(); drawObjects(); }
+
 function updateSelectionControls() {
+  const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
+  const stickerLayer = sticker && roomState?.layers.find((entry) => entry.id === sticker.layerId);
+  const stickerRendered = sticker && renderedStickers.get(sticker.id);
+  const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
+  const markerLayer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+  const markerRendered = marker && renderedMarkers.get(marker.id);
+  const canEditSticker = !!sticker && !!stickerLayer && !stickerLayer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId);
+  objectTools.hidden = true;
+  stickerTools.hidden = !sticker || !stickerRendered || !canEditSticker;
+  markerTools.hidden = !marker || !markerRendered || identity?.role !== 'gm' || markerLayer?.locked === true;
+  select<HTMLElement>('#lock-indicator').hidden = !(sticker && stickerLayer?.locked || marker && markerLayer?.locked);
+  if (sticker && stickerRendered) {
+    transformer?.nodes(canEditSticker ? [stickerRendered.group] : []); cropTransformer?.nodes([]);
+    select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor;
+    return;
+  }
+  if (marker && markerRendered) { transformer?.nodes([]); cropTransformer?.nodes([]); return; }
   const item = roomState?.objects.find((object) => object.id === selectedObjectId);
   const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
   const rendered = item && renderedObjects.get(item.id);
@@ -389,82 +530,72 @@ function updateSelectionControls() {
   if (!item || !layer || !rendered) {
     select<HTMLElement>('#lock-indicator').hidden = true;
     transformer?.nodes([]);
+    cropTransformer?.nodes([]);
     return;
   }
   select<HTMLElement>('#selection-name').textContent = roomState?.assets?.find((asset) => asset.id === item.assetId)?.originalName || 'Изображение';
   rendered.border.strokeEnabled(true);
   select<HTMLElement>('#lock-indicator').hidden = !layer.locked;
+  if (identity?.role === 'gm' && !layer.locked && !item.freeStretch && !cropMode) {
+    const asset = roomState?.assets?.find((entry) => entry.id === item.assetId);
+    if (asset) {
+      const naturalHeight = Math.max(1, Math.round(item.width / (asset.width / asset.height)));
+      if (Math.abs(naturalHeight - item.height) > 1) {
+        item.height = naturalHeight;
+        drawObjects();
+        void runCommand('object:update', { id: item.id, changes: { height: naturalHeight } });
+        return;
+      }
+    }
+  }
   selectedLayer.replaceChildren(...(roomState?.layers || []).map((entry) => {
     const option = document.createElement('option'); option.value = entry.id; option.textContent = entry.name; option.disabled = entry.locked && entry.id !== item.layerId; return option;
   }));
   selectedLayer.value = item.layerId;
   allowPlayerMoveControl.checked = item.allowPlayerMove;
+  stretchControl.checked = item.freeStretch;
   const isGm = identity?.role === 'gm';
   const editable = isGm && !layer.locked;
   transformer?.nodes(editable && !cropMode ? [rendered.group] : []);
-  if (transformer) transformer.keepRatio(!stretchControl.checked);
+  cropTransformer?.nodes(editable && cropMode ? [rendered.border] : []);
+  if (transformer) {
+    transformer.keepRatio(!item.freeStretch);
+    transformer.enabledAnchors(item.freeStretch
+      ? ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']
+      : ['top-left', 'top-right', 'bottom-left', 'bottom-right']);
+  }
   select<HTMLButtonElement>('#crop-toggle').classList.toggle('active', cropMode);
-  select<HTMLButtonElement>('#crop-reset').hidden = !item.crop;
+  select<HTMLButtonElement>('#crop-toggle').textContent = cropMode ? 'Редактирование обрезки' : 'Обрезать';
+  select<HTMLButtonElement>('#crop-reset').hidden = !item.crop || cropMode;
   select<HTMLButtonElement>('#crop-cancel').hidden = !cropMode;
+  select<HTMLButtonElement>('#crop-confirm').hidden = !cropMode;
   for (const element of objectTools.querySelectorAll<HTMLElement>('.gm-only')) element.hidden = !isGm;
   for (const button of objectTools.querySelectorAll<HTMLButtonElement>('button')) {
+    if (cropMode) { button.disabled = button.id !== 'crop-confirm' && button.id !== 'crop-cancel'; continue; }
     if (button.id === 'crop-toggle') { button.disabled = !editable; continue; }
     if (button.id === 'crop-cancel') continue;
     if (button.id === 'crop-reset') button.disabled = !editable || !item.crop;
     else button.disabled = identity?.role === 'gm' ? !editable : button.id !== 'crop-toggle';
   }
-  allowPlayerMoveControl.disabled = !editable;
-  stretchControl.disabled = !editable;
-  selectedLayer.disabled = !editable;
+  allowPlayerMoveControl.disabled = !editable || cropMode;
+  stretchControl.disabled = !editable || cropMode;
+  selectedLayer.disabled = !editable || cropMode;
 }
 
-function startCropGesture(id: string, group: Konva.Group) {
-  const start = group.getRelativePointerPosition();
-  if (!start) return;
-  cropGesture?.selection.destroy();
-  const selection = new Konva.Rect({ x: start.x, y: start.y, width: 1, height: 1, stroke: '#426c59', strokeWidth: 2, dash: [5, 3], fill: '#426c5920', listening: false });
-  group.add(selection);
-  cropGesture = { id, group, selection, start };
-}
-
-function updateCropGesture() {
-  if (!cropGesture) return;
-  const pointer = cropGesture.group.getRelativePointerPosition();
-  if (!pointer) return;
-  const x = Math.max(0, Math.min(cropGesture.group.width(), Math.min(cropGesture.start.x, pointer.x)));
-  const y = Math.max(0, Math.min(cropGesture.group.height(), Math.min(cropGesture.start.y, pointer.y)));
-  const right = Math.max(0, Math.min(cropGesture.group.width(), Math.max(cropGesture.start.x, pointer.x)));
-  const bottom = Math.max(0, Math.min(cropGesture.group.height(), Math.max(cropGesture.start.y, pointer.y)));
-  cropGesture.selection.setAttrs({ x, y, width: right - x, height: bottom - y });
-  boardLayer?.batchDraw();
-}
-
-function commitCropGesture() {
-  const gesture = cropGesture;
-  cropGesture = undefined;
-  if (!gesture) return;
-  const { selection, group, id } = gesture;
-  const selectionRect = { x: selection.x(), y: selection.y(), width: selection.width(), height: selection.height() };
-  selection.destroy();
-  const width = group.width(); const height = group.height();
-  if (selectionRect.width < 8 || selectionRect.height < 8 || width < 1 || height < 1) { boardLayer?.batchDraw(); return; }
-  const item = roomState?.objects.find((object) => object.id === id);
-  if (!item) return;
-  const current = item.crop ?? { x: 0, y: 0, width: 1, height: 1 };
-  let relativeX = selectionRect.x / width; let relativeY = selectionRect.y / height;
-  const relativeWidth = selectionRect.width / width; const relativeHeight = selectionRect.height / height;
-  if (item.flipX) relativeX = 1 - relativeX - relativeWidth;
-  if (item.flipY) relativeY = 1 - relativeY - relativeHeight;
-  const next: CropRect = {
-    x: current.x + relativeX * current.width,
-    y: current.y + relativeY * current.height,
-    width: relativeWidth * current.width,
-    height: relativeHeight * current.height,
-  };
+function confirmCrop() {
+  if (!roomState || !selectedObjectId || identity?.role !== 'gm') return;
+  const item = roomState.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && roomState.layers.find((entry) => entry.id === item.layerId);
+  const rendered = renderedObjects.get(selectedObjectId);
+  if (!item || !layer || layer.locked || !rendered) return;
+  const box = cropBox(rendered.border, item.width, item.height);
+  if (box.width < 8 || box.height < 8) { showCanvasMessage('Область обрезки слишком мала.', true); return; }
+  const next: CropRect = displayRectToCrop(box, item.width, item.height, item.flipX, item.flipY);
   cropMode = false;
-  void runCommand('object:update', { id, changes: { crop: next } });
-  updateSelectionControls();
-  boardLayer?.batchDraw();
+  item.crop = next;
+  cropTransformer?.nodes([]);
+  drawObjects();
+  void runCommand('object:update', { id: item.id, changes: { crop: next } });
 }
 
 function updateBoard(state: RoomMessage) {
@@ -477,9 +608,134 @@ function updateBoard(state: RoomMessage) {
     }
   }
   if (!state.objects.some((item) => item.id === selectedObjectId)) selectedObjectId = undefined;
+  if (!state.stickers?.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
+  if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
+  select<HTMLButtonElement>('#sticker-create').hidden = identity?.role !== 'gm' && !state.allowPlayerStickers;
+  select<HTMLInputElement>('#allow-player-stickers').checked = !!state.allowPlayerStickers;
   renderLayers();
   renderAssets();
   drawObjects();
+  if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
+  if (openNoteId && noteDialog.open && noteDialogMode === 'view') void openNote(openNoteId, false);
+}
+
+function setNoteMessage(message: string) { select<HTMLElement>('#note-message').textContent = message; }
+function clearNoteContent() { select<HTMLElement>('#note-view-body').textContent = ''; select<HTMLElement>('#note-view-images').replaceChildren(); }
+function closeNoteDialog() { noteRequestSequence += 1; noteDialog.close(); openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); }
+
+async function openNote(id: string, show = true) {
+  const requestSequence = ++noteRequestSequence;
+  try {
+    const response = await fetch(`/api/notes/${encodeURIComponent(id)}`, { cache: 'no-store' });
+    if (requestSequence !== noteRequestSequence) return;
+    if (!response.ok) {
+      if (openNoteId === id) closeNoteDialog();
+      else showCanvasMessage('У вас больше нет доступа к этой заметке.', true);
+      return;
+    }
+    const note = (await response.json() as { note: NoteRecord }).note;
+    if (requestSequence !== noteRequestSequence) return;
+    openNoteId = id; editingNoteId = id; noteDialogMode = 'view';
+    select<HTMLElement>('#note-dialog-heading').textContent = note.title;
+    select<HTMLElement>('#note-privacy').textContent = note.access === 'gm-only' ? 'Только ведущий' : note.access === 'selected-players' ? 'Выбранные игроки' : 'Все игроки';
+    select<HTMLTextAreaElement>('#note-body').hidden = true;
+    select<HTMLInputElement>('#note-title').hidden = true;
+    select<HTMLLabelElement>('label[for="note-title"]').hidden = true;
+    select<HTMLLabelElement>('label[for="note-access"]').hidden = true;
+    select<HTMLSelectElement>('#note-access').hidden = true;
+    select<HTMLLabelElement>('label[for="note-body"]').hidden = true;
+    select<HTMLElement>('#note-participants').hidden = true;
+    select<HTMLElement>('.note-assets').hidden = true;
+    const body = select<HTMLElement>('#note-view-body'); body.textContent = note.body; body.hidden = false;
+    const images = select<HTMLElement>('#note-view-images'); images.replaceChildren(); images.hidden = note.images.length === 0;
+    for (const asset of note.images) { const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
+    select<HTMLButtonElement>('#note-save').hidden = true;
+    select<HTMLButtonElement>('#note-place-marker').hidden = false;
+    const edit = select<HTMLButtonElement>('#note-edit'); edit.hidden = identity?.role !== 'gm';
+    setNoteMessage('');
+    if (show && !noteDialog.open) noteDialog.showModal();
+  } catch { setNoteMessage('Не удалось загрузить заметку. Проверьте соединение.'); }
+}
+
+function openNoteEditor(note?: NoteRecord) {
+  if (identity?.role !== 'gm') return;
+  noteRequestSequence += 1;
+  editingNoteId = note?.id; openNoteId = note?.id; noteDialogMode = 'edit';
+  select<HTMLElement>('#note-dialog-heading').textContent = note ? 'Редактирование заметки' : 'Новая заметка';
+  select<HTMLElement>('#note-privacy').textContent = note ? 'Настройки доступа' : 'Черновик';
+  select<HTMLInputElement>('#note-title').value = note?.title || '';
+  select<HTMLTextAreaElement>('#note-body').value = note?.body || '';
+  select<HTMLSelectElement>('#note-access').value = note?.access || 'gm-only';
+  select<HTMLInputElement>('#note-title').hidden = false;
+  select<HTMLTextAreaElement>('#note-body').hidden = false;
+  select<HTMLLabelElement>('label[for="note-title"]').hidden = false;
+  select<HTMLLabelElement>('label[for="note-access"]').hidden = false;
+  select<HTMLSelectElement>('#note-access').hidden = false;
+  select<HTMLLabelElement>('label[for="note-body"]').hidden = false;
+  select<HTMLElement>('#note-view-body').hidden = true; select<HTMLElement>('#note-view-images').hidden = true;
+  select<HTMLElement>('.note-assets').hidden = false;
+  const participantWrap = select<HTMLElement>('#note-participants'); participantWrap.hidden = true;
+  const participantList = select<HTMLElement>('#note-participant-list'); participantList.replaceChildren();
+  const participants = roomState?.participants.filter((person) => person.role === 'player') || [];
+  for (const person of participants) {
+    const label = document.createElement('label'); label.className = 'note-participant-row'; const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = person.participantId; checkbox.checked = note?.selectedParticipantIds.includes(person.participantId) || false;
+    label.append(checkbox, document.createTextNode(person.name)); participantList.append(label);
+  }
+  const onlineIds = new Set(participants.map((person) => person.participantId));
+  for (const participantId of note?.selectedParticipantIds || []) {
+    if (onlineIds.has(participantId)) continue;
+    const label = document.createElement('label'); label.className = 'note-participant-row';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = participantId; checkbox.checked = true;
+    label.append(checkbox, document.createTextNode(`Отключённый участник · ${participantId.slice(0, 8)}`)); participantList.append(label);
+  }
+  participantWrap.hidden = select<HTMLSelectElement>('#note-access').value !== 'selected-players';
+  const assetList = select<HTMLElement>('#note-asset-list'); assetList.replaceChildren();
+  for (const asset of roomState?.assets || []) {
+    const label = document.createElement('label'); label.className = 'note-asset-row'; const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = asset.id; checkbox.checked = note?.assetIds.includes(asset.id) || false;
+    const thumb = document.createElement('img'); thumb.src = `/api/assets/${encodeURIComponent(asset.id)}`; thumb.alt = '';
+    label.append(checkbox, thumb, document.createTextNode(asset.originalName)); assetList.append(label);
+  }
+  select<HTMLButtonElement>('#note-save').hidden = false;
+  select<HTMLButtonElement>('#note-place-marker').hidden = true;
+  select<HTMLButtonElement>('#note-edit').hidden = true;
+  setNoteMessage(''); if (!noteDialog.open) noteDialog.showModal();
+}
+
+async function saveNote() {
+  if (identity?.role !== 'gm') return;
+  const selectedParticipantIds = Array.from(select<HTMLElement>('#note-participant-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
+  const assetIds = Array.from(select<HTMLElement>('#note-asset-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
+  const id = editingNoteId;
+  try {
+    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds }) });
+    const result = await response.json() as { note?: NoteRecord; error?: string };
+    if (!response.ok) throw new Error(result.error || 'Не удалось сохранить заметку.');
+    closeNoteDialog(); await refreshNotesList();
+    if (!id && result.note) startNotePlacement(result.note.id);
+  } catch (error) { setNoteMessage(error instanceof Error ? error.message : 'Ошибка сервера.'); }
+}
+
+function startNotePlacement(id: string) {
+  if (identity?.role !== 'gm') return;
+  if (!activeLayerId || !roomState?.layers.some((layer) => layer.id === activeLayerId && !layer.locked)) { showCanvasMessage('Выберите открытый слой для метки.', true); return; }
+  notePlacementId = id; notePlacementHint.hidden = false; canvasContainer.style.cursor = 'crosshair';
+}
+
+async function refreshNotesList() {
+  try {
+    const response = await fetch('/api/notes', { cache: 'no-store' }); if (!response.ok) return;
+    const notes = (await response.json() as { notes: NoteListItem[] }).notes; notesList.replaceChildren();
+    for (const note of notes) {
+      const item = document.createElement('li'); item.className = 'note-entry';
+      const title = document.createElement('span'); title.className = 'note-entry-title'; title.textContent = `${note.title} · ${note.access === 'gm-only' ? 'ведущий' : note.access === 'selected-players' ? 'выбранные' : 'игроки'}`;
+      const actions = document.createElement('div'); actions.className = 'note-entry-actions';
+      const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Открыть'; open.addEventListener('click', () => void openNote(note.id));
+      const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Править'; edit.addEventListener('click', async () => { try { const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { cache: 'no-store' }); if (res.ok) openNoteEditor((await res.json() as { note: NoteRecord }).note); } catch { showCanvasMessage('Не удалось загрузить заметку.', true); } });
+      const place = document.createElement('button'); place.type = 'button'; place.textContent = note.markerId ? 'Переместить метку' : 'Поставить метку'; place.addEventListener('click', () => startNotePlacement(note.id));
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Удалить'; remove.addEventListener('click', async () => { if (!window.confirm(`Удалить заметку «${note.title}»?`)) return; const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' }); if (res.ok) void refreshNotesList(); });
+      actions.append(open, edit, place, remove); item.append(title, actions); notesList.append(item);
+    }
+  } catch { /* Keep the current list during a brief network failure. */ }
 }
 
 function renderLayers() {
@@ -530,14 +786,15 @@ function renderLayers() {
     });
     const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'layer-action'; remove.textContent = '×'; remove.title = 'Удалить слой';
     remove.addEventListener('click', () => {
-      const objectCount = roomState?.objects.filter((object) => object.layerId === layer.id).length || 0;
+      const objectCount = (roomState?.objects.filter((object) => object.layerId === layer.id).length || 0) + (roomState?.stickers.filter((object) => object.layerId === layer.id).length || 0) + (roomState?.noteMarkers.filter((object) => object.layerId === layer.id).length || 0);
       const deleteObjects = objectCount > 0 && window.confirm(`В слое ${objectCount} объектов. Удалить слой вместе с объектами?`);
       if (objectCount > 0 && !deleteObjects) return;
       void runCommand('layer:delete', { id: layer.id, deleteObjects });
     });
     meta.append(access, rename, remove);
     const state = document.createElement('div'); state.className = 'layer-state';
-    state.textContent = `${roomState.objects.filter((object) => object.layerId === layer.id).length} изображ.`;
+    const layerCount = roomState.objects.filter((object) => object.layerId === layer.id).length + roomState.stickers.filter((object) => object.layerId === layer.id).length + roomState.noteMarkers.filter((object) => object.layerId === layer.id).length;
+    state.textContent = `${layerCount} объектов`;
     item.append(main, meta, state);
     layersList.append(item);
   }
@@ -576,7 +833,7 @@ function formatSize(bytes: number) {
 
 function closeWorkspace(message: string) {
   resizeObserver?.disconnect();
-  stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined;
+  stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined; cropTransformer = undefined;
   selectedObjectId = undefined; roomState = undefined; imageCache.clear(); renderedObjects.clear();
   workspace.hidden = true; loginShell.hidden = false;
   form.reset();
@@ -616,6 +873,30 @@ select<HTMLButtonElement>('#leave').addEventListener('click', async () => {
 
 select<HTMLButtonElement>('#library-toggle').addEventListener('click', () => { libraryPanel.hidden = !libraryPanel.hidden; });
 select<HTMLButtonElement>('#library-close').addEventListener('click', () => { libraryPanel.hidden = true; });
+select<HTMLButtonElement>('#notes-toggle').addEventListener('click', () => { notesPanel.hidden = !notesPanel.hidden; if (!notesPanel.hidden) void refreshNotesList(); });
+select<HTMLButtonElement>('#notes-close').addEventListener('click', () => { notesPanel.hidden = true; });
+select<HTMLButtonElement>('#note-create').addEventListener('click', () => openNoteEditor());
+select<HTMLButtonElement>('#note-close').addEventListener('click', closeNoteDialog);
+noteDialog.addEventListener('close', () => { noteRequestSequence += 1; openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); });
+select<HTMLButtonElement>('#note-save').addEventListener('click', () => void saveNote());
+select<HTMLButtonElement>('#note-edit').addEventListener('click', async () => { if (!openNoteId) return; try { const response = await fetch(`/api/notes/${encodeURIComponent(openNoteId)}`, { cache: 'no-store' }); if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note); } catch { setNoteMessage('Не удалось загрузить заметку.'); } });
+select<HTMLButtonElement>('#note-place-marker').addEventListener('click', () => { if (openNoteId) { const id = openNoteId; closeNoteDialog(); startNotePlacement(id); } });
+select<HTMLSelectElement>('#note-access').addEventListener('change', (event) => { select<HTMLElement>('#note-participants').hidden = (event.currentTarget as HTMLSelectElement).value !== 'selected-players'; });
+select<HTMLInputElement>('#allow-player-stickers').addEventListener('change', (event) => void runCommand('settings:update', { changes: { allowPlayerStickers: (event.currentTarget as HTMLInputElement).checked } }));
+select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
+select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => selectedMarkerId && void runCommand('note-marker:delete', { id: selectedMarkerId }));
+select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => {
+  const text = window.prompt('Текст стикера', 'Новая заметка'); if (!text?.trim() || !roomState) return;
+  const layer = identity?.role === 'gm' ? roomState.layers.find((entry) => entry.id === activeLayerId) : roomState.layers.find((entry) => entry.visible && !entry.locked && entry.audience === 'all-players');
+  if (!layer || layer.locked || !layer.visible) { showCanvasMessage('Нет доступного открытого слоя для стикера.', true); return; }
+  const x = stage ? clampWorld((stage.width() / 2 - stage.x()) / stage.scaleX()) : 0; const y = stage ? clampWorld((stage.height() / 2 - stage.y()) / stage.scaleY()) : 0;
+  void runCommand('sticker:create', { layerId: layer.id, text: text.trim(), x, y });
+});
+select<HTMLButtonElement>('#sticker-edit').addEventListener('click', () => { const sticker = roomState?.stickers.find((entry) => entry.id === selectedStickerId); if (!sticker) return; const text = window.prompt('Текст стикера', sticker.text); if (text?.trim()) void runCommand('sticker:update', { id: sticker.id, changes: { text: text.trim() } }); });
+select<HTMLSelectElement>('#sticker-bg').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { bgColor: (event.currentTarget as HTMLSelectElement).value } }));
+select<HTMLSelectElement>('#sticker-text-color').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { textColor: (event.currentTarget as HTMLSelectElement).value } }));
+select<HTMLButtonElement>('#sticker-duplicate').addEventListener('click', () => selectedStickerId && void runCommand('sticker:duplicate', { id: selectedStickerId }));
+select<HTMLButtonElement>('#sticker-delete').addEventListener('click', () => selectedStickerId && void runCommand('sticker:delete', { id: selectedStickerId }));
 select<HTMLButtonElement>('#layer-create').addEventListener('click', () => {
   const name = window.prompt('Название слоя');
   if (name?.trim()) void runCommand('layer:create', { name: name.trim(), audience: 'all-players' });
@@ -633,17 +914,30 @@ select<HTMLButtonElement>('#flip-y').addEventListener('click', () => {
   if (item) void runCommand('object:update', { id: item.id, changes: { flipY: !item.flipY } });
 });
 select<HTMLButtonElement>('#crop-toggle').addEventListener('click', () => {
+  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+  if (identity?.role !== 'gm' || !item || !layer || layer.locked) return;
   cropMode = !cropMode;
-  canvasContainer.style.cursor = cropMode ? 'crosshair' : '';
-  updateSelectionControls();
   drawObjects();
 });
 select<HTMLButtonElement>('#crop-cancel').addEventListener('click', () => {
-  cropMode = false; cropGesture?.selection.destroy(); cropGesture = undefined;
-  canvasContainer.style.cursor = ''; updateSelectionControls(); drawObjects();
+  cropMode = false; cropTransformer?.nodes([]); drawObjects();
 });
+select<HTMLButtonElement>('#crop-confirm').addEventListener('click', confirmCrop);
 select<HTMLButtonElement>('#crop-reset').addEventListener('click', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { crop: null } }));
-stretchControl.addEventListener('change', () => { if (transformer) transformer.keepRatio(!stretchControl.checked); });
+stretchControl.addEventListener('change', () => {
+  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+  if (!item || identity?.role !== 'gm' || layer?.locked) return;
+  item.freeStretch = stretchControl.checked;
+  const changes: Record<string, unknown> = { freeStretch: item.freeStretch };
+  if (!item.freeStretch) {
+    const asset = roomState?.assets?.find((entry) => entry.id === item.assetId);
+    if (asset) { item.height = Math.max(1, Math.round(item.width / (asset.width / asset.height))); changes.height = item.height; }
+  }
+  drawObjects();
+  void runCommand('object:update', { id: item.id, changes });
+});
 allowPlayerMoveControl.addEventListener('change', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { allowPlayerMove: allowPlayerMoveControl.checked } }));
 selectedLayer.addEventListener('change', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { layerId: selectedLayer.value } }));
 
