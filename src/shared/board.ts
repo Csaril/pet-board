@@ -111,7 +111,33 @@ export interface BoardSnapshot {
   stickers: BoardSticker[];
   noteMarkers: NoteMarker[];
   assets?: BoardAsset[];
+  activeSystem: { id: string; version: string } | null;
+  diceRolls: DiceRollEntry[];
 }
+
+export type DiceRollEntry = {
+  id: string;
+  authorId: string;
+  authorName: string;
+  actorId: string;
+  actorName: string;
+  createdAt: string;
+  kind: 'pbta' | 'free';
+  dice: number[];
+  keptDice: number[];
+  discardedDie: number | null;
+  characteristicName: string | null;
+  characterId: string | null;
+  characterOwnerId: string | null;
+  characteristicBonus: number | null;
+  situationalModifier: -1 | 0 | 1;
+  disadvantage: boolean;
+  sides: number | null;
+  total: number;
+  category: 'failure' | 'success' | 'triumph' | null;
+  critical: 'critical-failure' | 'critical-success' | null;
+  rerollOf: string | null;
+};
 
 export interface BoardStateMessage extends BoardSnapshot {
   type: 'room:state';
@@ -119,4 +145,6 @@ export interface BoardStateMessage extends BoardSnapshot {
   identity: { participantId: string; name: string; role: 'gm' | 'player' };
   participants?: RoomParticipant[];
   maxUploadBytes?: number;
+  diceRolls: DiceRollEntry[];
+  activeSystem: { id: string; version: string } | null;
 }

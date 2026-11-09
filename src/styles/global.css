@@ -168,6 +168,29 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .note-upload-row.success .note-upload-result { color: #386a43; }
 .note-upload-row.error { border-color: #e7cbc7; background: #fff9f8; }
 .note-upload-row.error .note-upload-result { color: #a13d36; }
+.dice-new-count { display: inline-grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; border-radius: 9px; background: #b45748; color: #fff; font-size: 10px; }
+.dice-panel { position: absolute; z-index: 4; right: 16px; bottom: 16px; display: flex; flex-direction: column; width: min(350px, calc(100% - 32px)); max-height: min(78vh, 700px); overflow: hidden; border: 1px solid #d5ddd5; border-radius: 12px; background: #fffffffa; box-shadow: 0 10px 35px #23372b20; }
+.dice-panel-heading { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 8px; border-bottom: 1px solid #e7ebe6; }
+.dice-panel-heading .eyebrow { margin: 0 0 3px; }
+.dice-panel-heading h2 { font-size: 16px; }
+.dice-room-system, .dice-roll-controls { display: grid; gap: 6px; padding: 10px 13px; border-bottom: 1px solid #e7ebe6; }
+.dice-room-system { grid-template-columns: 1fr 1fr auto; align-items: center; }
+.dice-room-system label { grid-column: 1 / -1; }
+.dice-room-system select, .dice-roll-controls input, .dice-roll-controls select { height: 32px; padding: 0 8px; font-size: 11px; }
+.dice-room-system button, .dice-roll-controls button { height: 32px; margin: 0; padding: 0 10px; font-size: 11px; }
+.dice-roll-controls h3 { margin: 0; color: #3e4c42; }
+.dice-room-system label, .dice-roll-controls label { margin: 0; color: #59635c; font-size: 10px; }
+.dice-roll-controls .dice-checkbox { display: flex; align-items: center; gap: 7px; }
+.dice-roll-controls .dice-checkbox input { width: 15px; height: 15px; margin: 0; }
+.free-dice-fields { display: grid; grid-template-columns: auto 1fr auto 1fr; align-items: center; gap: 8px; }
+.dice-history { display: grid; gap: 6px; overflow-y: auto; min-height: 35px; margin: 0; padding: 9px; list-style: none; }
+.dice-entry { display: grid; gap: 3px; padding: 8px; border: 1px solid #e3e8e2; border-radius: 8px; background: #fff; }
+.dice-entry-top { display: flex; justify-content: space-between; gap: 8px; color: #354239; font-size: 11px; font-weight: 700; }
+.dice-entry-time { color: #89918a; font-size: 9px; font-weight: 400; }
+.dice-entry-detail { color: #5d685f; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.dice-entry-critical { color: #a33f35; font-weight: 700; }
+.dice-entry button { justify-self: end; height: 25px; margin: 2px 0 0; padding: 0 8px; font-size: 10px; }
+.dice-history-empty { padding: 12px; color: #7c867e; text-align: center; font-size: 11px; }
 .note-marker { cursor: pointer; }
 .sticker-background-butter { fill: #f2e6b8; }
 .sticker-background-rose { fill: #f1d8d4; }

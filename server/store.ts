@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CropRect, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -78,6 +78,30 @@ export class RoomStore {
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+      CREATE TABLE IF NOT EXISTS dice_rolls (
+        id TEXT PRIMARY KEY,
+        author_id TEXT NOT NULL,
+        author_name TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free')),
+        dice_json TEXT NOT NULL,
+        kept_dice_json TEXT NOT NULL,
+        discarded_die INTEGER,
+        characteristic_name TEXT,
+        character_id TEXT,
+        character_owner_id TEXT,
+        characteristic_bonus INTEGER,
+        situational_modifier INTEGER NOT NULL DEFAULT 0 CHECK (situational_modifier IN (-1, 0, 1)),
+        disadvantage INTEGER NOT NULL DEFAULT 0 CHECK (disadvantage IN (0, 1)),
+        sides INTEGER,
+        total INTEGER NOT NULL,
+        category TEXT CHECK (category IN ('failure', 'success', 'triumph')),
+        critical TEXT CHECK (critical IN ('critical-failure', 'critical-success')),
+        reroll_of TEXT
+      );
+      CREATE INDEX IF NOT EXISTS dice_rolls_created ON dice_rolls(created_at DESC, id DESC);
       CREATE TABLE IF NOT EXISTS board_layers (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -185,10 +209,15 @@ export class RoomStore {
     if (!roomColumns.some((column) => column.name === 'allow_player_stickers')) {
       this.db.exec('ALTER TABLE room ADD COLUMN allow_player_stickers INTEGER NOT NULL DEFAULT 0 CHECK (allow_player_stickers IN (0, 1))');
     }
+    if (!roomColumns.some((column) => column.name === 'active_system_id')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_id TEXT');
+    if (!roomColumns.some((column) => column.name === 'active_system_version')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_version TEXT');
     const noteColumns = this.db.pragma('table_info(notes)') as Array<{ name: string }>;
     if (!noteColumns.some((column) => column.name === 'marker_type')) this.db.exec("ALTER TABLE notes ADD COLUMN marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image'))");
     if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
     if (!noteColumns.some((column) => column.name === 'marker_asset_id')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT');
+    const diceColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
+    if (!diceColumns.some((column) => column.name === 'character_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_id TEXT');
+    if (!diceColumns.some((column) => column.name === 'character_owner_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_owner_id TEXT');
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
     const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers').get() as { count: number }).count;
     if (layerCount === 0) this.createLayer('Основной слой', 'all-players');
@@ -196,6 +225,47 @@ export class RoomStore {
 
   get roomName(): string {
     return (this.db.prepare('SELECT name FROM room WHERE id = 1').get() as { name: string }).name;
+  }
+
+  get activeSystem(): { id: string; version: string } | null {
+    const row = this.db.prepare('SELECT active_system_id, active_system_version FROM room WHERE id = 1').get() as { active_system_id: string | null; active_system_version: string | null };
+    return row.active_system_id && row.active_system_version ? { id: row.active_system_id, version: row.active_system_version } : null;
+  }
+  setActiveSystem(id: string | null, version: string | null): void {
+    if ((id === null) !== (version === null)) throw new Error('System id and version must both be set or cleared.');
+    this.db.prepare('UPDATE room SET active_system_id = ?, active_system_version = ? WHERE id = 1').run(id, version);
+  }
+  saveDiceRoll(entry: DiceRollEntry): void {
+    const insert = this.db.prepare(`INSERT INTO dice_rolls
+      (id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
+       characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage, sides, total, category, critical, reroll_of)
+      VALUES (@id, @authorId, @authorName, @actorId, @actorName, @createdAt, @kind, @dice, @keptDice, @discardedDie,
+       @characteristicName, @characterId, @characterOwnerId, @characteristicBonus, @situationalModifier, @disadvantage, @sides, @total, @category, @critical, @rerollOf)`);
+    this.db.transaction(() => {
+      insert.run({
+        id: entry.id, authorId: entry.authorId, authorName: entry.authorName, actorId: entry.actorId, actorName: entry.actorName,
+        createdAt: entry.createdAt, kind: entry.kind, dice: JSON.stringify(entry.dice), keptDice: JSON.stringify(entry.keptDice),
+        discardedDie: entry.discardedDie, characteristicName: entry.characteristicName, characterId: entry.characterId, characterOwnerId: entry.characterOwnerId, characteristicBonus: entry.characteristicBonus,
+        situationalModifier: entry.situationalModifier, disadvantage: Number(entry.disadvantage), sides: entry.sides,
+        total: entry.total, category: entry.category, critical: entry.critical, rerollOf: entry.rerollOf,
+      });
+      this.db.exec('DELETE FROM dice_rolls WHERE id NOT IN (SELECT id FROM dice_rolls ORDER BY created_at DESC, rowid DESC LIMIT 10)');
+    })();
+  }
+  getDiceRolls(): DiceRollEntry[] {
+    const rows = this.db.prepare('SELECT * FROM dice_rolls ORDER BY created_at DESC, rowid DESC LIMIT 10').all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), authorId: String(row.author_id), authorName: String(row.author_name), actorId: String(row.actor_id), actorName: String(row.actor_name),
+      createdAt: String(row.created_at), kind: row.kind as DiceRollEntry['kind'], dice: JSON.parse(String(row.dice_json)) as number[],
+      keptDice: JSON.parse(String(row.kept_dice_json)) as number[], discardedDie: row.discarded_die === null ? null : Number(row.discarded_die),
+      characteristicName: row.characteristic_name === null ? null : String(row.characteristic_name),
+      characterId: row.character_id === null ? null : String(row.character_id), characterOwnerId: row.character_owner_id === null ? null : String(row.character_owner_id),
+      characteristicBonus: row.characteristic_bonus === null ? null : Number(row.characteristic_bonus),
+      situationalModifier: Number(row.situational_modifier) as -1 | 0 | 1, disadvantage: Number(row.disadvantage) === 1,
+      sides: row.sides === null ? null : Number(row.sides), total: Number(row.total),
+      category: row.category as DiceRollEntry['category'], critical: row.critical as DiceRollEntry['critical'],
+      rerollOf: row.reroll_of === null ? null : String(row.reroll_of),
+    }));
   }
 
   createSession(sessionId: string, identity: NewIdentity, expiresAt: number): boolean {
@@ -448,12 +518,13 @@ export class RoomStore {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
     const allLayers = this.getLayers();
-    if (role === 'gm') return { layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
+    const common = { activeSystem: this.activeSystem, diceRolls: this.getDiceRolls() };
+    if (role === 'gm') return { ...common, layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
     const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
     const visibleIds = new Set(layers.map((layer) => layer.id));
     const stickers = this.getStickers().filter((sticker) => visibleIds.has(sticker.layerId));
     const noteMarkers = this.getNoteMarkers().filter((marker) => visibleIds.has(marker.layerId) && this.canReadNote(marker.noteId, identity));
-    return { layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers };
+    return { ...common, layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers };
   }
 
   backup(path: string): Promise<Database.BackupMetadata> { return this.db.backup(path); }

@@ -12,7 +12,7 @@
     "start": "node dist-server/server/index.js",
     "backup": "node dist-server/server/backup.js",
     "typecheck": "astro check && tsc -p tsconfig.server.json --noEmit",
-    "test": "node --import tsx --test server/*.test.ts"
+    "test": "node --import tsx --test server/*.test.ts src/modules/system/pbta-2d6/*.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

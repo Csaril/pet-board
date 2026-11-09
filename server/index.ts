@@ -7,7 +7,7 @@ import websocket from '@fastify/websocket';
 import { createReadStream, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
 import type { NoteAccess } from '../src/shared/board.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
@@ -15,6 +15,9 @@ import { executeBoardCommand, BoardCommandError } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
+import type { DiceRollEntry } from '../src/shared/board.js';
+import { systemModuleRegistry } from '../src/modules/registry.js';
+import { calculatePbtARoll, rollFreeDice, type SituationalModifier } from '../src/modules/system/pbta-2d6/roll.js';
 
 const COOKIE_PATH = '/';
 
@@ -57,11 +60,12 @@ function isSameOrigin(origin: string | undefined, host: string | undefined): boo
   } catch { return false; }
 }
 
-export async function buildServer(options?: { config?: AppConfig; store?: RoomStore; logger?: boolean }): Promise<FastifyInstance> {
+export async function buildServer(options?: { config?: AppConfig; store?: RoomStore; logger?: boolean; randomInt?: (min: number, max: number) => number }): Promise<FastifyInstance> {
   const config = options?.config ?? loadConfig();
   const store = options?.store ?? new RoomStore(config.dataDir, config.roomName);
   const app = Fastify({ logger: options?.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024 });
   const sockets = new Map<string, Set<WebSocket>>();
+  const secureRandomInt = options?.randomInt ?? randomInt;
   const distDir = resolve(process.cwd(), 'dist');
   mkdirSync(distDir, { recursive: true });
 
@@ -90,6 +94,67 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       const payload = JSON.stringify({ type: 'room:state', roomName: store.roomName, identity, participants, maxUploadBytes: config.maxUploadBytes, ...snapshot });
       for (const socket of connections) if (socket.readyState === 1) socket.send(payload);
     }
+  };
+
+  const createDiceRoll = (identity: Identity, command: Record<string, unknown>): DiceRollEntry => {
+    if (command.type === 'dice:free') {
+      if (Object.keys(command).some((key) => !['type', 'requestId', 'count', 'sides'].includes(key))) throw new BoardCommandError('Некорректная команда броска.');
+      const count = command.count;
+      const sides = command.sides;
+      if (!Number.isInteger(count) || !Number.isInteger(sides)) throw new BoardCommandError('Укажите количество кубиков и граней.');
+      let result: ReturnType<typeof rollFreeDice>;
+      try { result = rollFreeDice(count as number, sides as number, secureRandomInt); }
+      catch (error) { throw new BoardCommandError(error instanceof Error ? error.message : 'Некорректный бросок.'); }
+      return {
+        id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: identity.participantId, actorName: identity.name,
+        createdAt: new Date().toISOString(), kind: 'free', dice: result.dice, keptDice: result.dice, discardedDie: null,
+        characteristicName: null, characterId: null, characterOwnerId: null, characteristicBonus: null, situationalModifier: 0, disadvantage: false,
+        sides: sides as number, total: result.total, category: null, critical: null, rerollOf: null,
+      };
+    }
+
+    let original: DiceRollEntry | undefined;
+    if (command.type === 'dice:reroll') {
+      if (Object.keys(command).some((key) => !['type', 'requestId', 'rollId'].includes(key)) || typeof command.rollId !== 'string') throw new BoardCommandError('Некорректная команда повторного броска.');
+      original = store.getDiceRolls().find((roll) => roll.id === command.rollId);
+      if (!original || original.kind !== 'pbta' || original.actorId !== identity.participantId && identity.role !== 'gm') throw new BoardCommandError('Этот бросок нельзя повторить.');
+    } else if (command.type !== 'dice:pbta') throw new BoardCommandError('Неизвестная команда броска.');
+
+    const bonus = original?.characteristicBonus ?? command.characteristicBonus;
+    const modifier = original?.situationalModifier ?? command.situationalModifier;
+    const disadvantage = original?.disadvantage ?? command.disadvantage;
+    const characteristicName = original?.characteristicName ?? (typeof command.characteristicName === 'string' ? command.characteristicName.trim().slice(0, 80) || null : null);
+    const characterId = original?.characterId ?? (typeof command.characterId === 'string' ? command.characterId : null);
+    const characterOwnerId = original?.characterOwnerId ?? (typeof command.characterOwnerId === 'string' ? command.characterOwnerId : null);
+    if (original && Object.keys(command).some((key) => !['type', 'requestId', 'rollId'].includes(key))) throw new BoardCommandError('Повторный бросок сохраняет условия исходного.');
+    if (!Number.isSafeInteger(bonus) || typeof bonus !== 'number' || Math.abs(bonus) > 1000) throw new BoardCommandError('Некорректный бонус характеристики.');
+    if (modifier !== -1 && modifier !== 0 && modifier !== 1) throw new BoardCommandError('Некорректный ситуационный модификатор.');
+    if (typeof disadvantage !== 'boolean') throw new BoardCommandError('Некорректное состояние Помехи.');
+    if (command.characteristicName !== undefined && (typeof command.characteristicName !== 'string' || command.characteristicName.length > 80)) throw new BoardCommandError('Некорректное название характеристики.');
+    if (!original && Object.keys(command).some((key) => !['type', 'requestId', 'characteristicBonus', 'situationalModifier', 'disadvantage', 'characteristicName', 'characterId', 'characterOwnerId', 'actorId'].includes(key))) throw new BoardCommandError('Некорректная команда броска.');
+    if ((command.characterId !== undefined && (typeof command.characterId !== 'string' || !command.characterId || command.characterId.length > 128)) ||
+        (command.characterOwnerId !== undefined && (typeof command.characterOwnerId !== 'string' || command.characterOwnerId.length > 128))) throw new BoardCommandError('Некорректная ссылка на персонажа.');
+    if ((characterId === null) !== (characterOwnerId === null)) throw new BoardCommandError('Нужны и ID персонажа, и ID владельца.');
+    const activeSystem = store.activeSystem;
+    if (!activeSystem || activeSystem.id !== 'pbta-2d6' || systemModuleRegistry.get(activeSystem.id)?.version !== activeSystem.version) throw new BoardCommandError('В комнате не выбрана доступная система PbtA.');
+    let actor: Identity;
+    if (original) {
+      actor = { participantId: original.actorId, name: original.actorName, role: 'player' };
+    } else if (identity.role === 'gm') {
+      if (typeof command.actorId !== 'string' || !store.isPlayerParticipant(command.actorId)) throw new BoardCommandError('Выберите игрока, за которого выполняется бросок.');
+      actor = store.getSession(command.actorId)!;
+    } else {
+      if (command.actorId !== undefined && command.actorId !== identity.participantId) throw new BoardCommandError('Игрок может совершать бросок только за себя.');
+      actor = identity;
+    }
+    if (characterOwnerId && characterOwnerId !== actor.participantId) throw new BoardCommandError('Владелец характеристики не совпадает с участником броска.');
+    if (original && identity.role !== 'gm' && original.authorId !== identity.participantId) throw new BoardCommandError('Повторный бросок может выполнить его автор.');
+    const result = calculatePbtARoll({ characteristicBonus: bonus as number, situationalModifier: modifier as SituationalModifier, disadvantage }, secureRandomInt);
+    return {
+      id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: actor.participantId, actorName: actor.name,
+      createdAt: new Date().toISOString(), kind: 'pbta', ...result, characteristicName, characterId, characterOwnerId,
+      sides: 6, disadvantage, rerollOf: original?.id ?? null,
+    };
   };
 
   app.get('/api/board', async (request, reply) => {
@@ -272,7 +337,20 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       const requestId = command && typeof command === 'object' && typeof (command as { requestId?: unknown }).requestId === 'string'
         ? (command as { requestId: string }).requestId.slice(0, 64) : undefined;
       try {
-        executeBoardCommand(store, liveSession.identity, command);
+        if (!command || typeof command !== 'object' || Array.isArray(command)) throw new BoardCommandError('Некорректная команда.');
+        const input = command as Record<string, unknown>;
+        if (input.type === 'dice:pbta' || input.type === 'dice:free' || input.type === 'dice:reroll') {
+          const entry = createDiceRoll(liveSession.identity, input);
+          store.saveDiceRoll(entry);
+        } else if (input.type === 'room:system:set') {
+          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.');
+          if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version'].includes(key))) throw new BoardCommandError('Некорректные настройки системы.');
+          if (input.systemId === null && input.version === null) store.setActiveSystem(null, null);
+          else if (typeof input.systemId === 'string' && typeof input.version === 'string' && systemModuleRegistry.get(input.systemId)?.version === input.version) store.setActiveSystem(input.systemId, input.version);
+          else throw new BoardCommandError('Выберите зарегистрированную системную версию.');
+        } else {
+          executeBoardCommand(store, liveSession.identity, command);
+        }
         socket.send(JSON.stringify({ type: 'command:result', requestId, ok: true }));
         sendState();
       } catch (error) {

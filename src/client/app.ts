@@ -1,5 +1,5 @@
 import Konva from 'konva';
-import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CropRect, NoteListItem, NoteRecord, RoomParticipant } from '../shared/board.js';
+import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 
@@ -39,6 +39,14 @@ const stickerCreateDialog = select<HTMLDialogElement>('#sticker-create-dialog');
 const noteImageDropZone = select<HTMLElement>('#note-image-drop-zone');
 const noteImageUploadStatus = select<HTMLUListElement>('#note-image-upload-status');
 const notePlacementHint = select<HTMLElement>('#note-place-hint');
+const dicePanel = select<HTMLElement>('#dice-panel');
+const diceHistory = select<HTMLUListElement>('#dice-history');
+const diceNewCount = select<HTMLElement>('#dice-new-count');
+const systemSelect = select<HTMLSelectElement>('#room-system');
+const systemSave = select<HTMLButtonElement>('#room-system-save');
+const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
+const pbtaActorRow = select<HTMLElement>('#pbta-actor-row');
+const pbtaActor = select<HTMLSelectElement>('#pbta-actor');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
@@ -90,6 +98,9 @@ let editingAssetIds: string[] = [];
 let selectedMarkerAssetId: string | undefined;
 let assetPickerMode: 'attachments' | 'marker' = 'attachments';
 let noteDropDepth = 0;
+let knownDiceRollIds: Set<string> | undefined;
+let unseenDiceRolls = 0;
+let dicePanelInitialized = false;
 let pendingNoteUploads = 0;
 let cropMode = false;
 let camera = { x: 0, y: 0, scale: 1 };
@@ -621,6 +632,16 @@ function confirmCrop() {
 }
 
 function updateBoard(state: RoomMessage) {
+  const previousIds = knownDiceRollIds;
+  const nextIds = new Set((state.diceRolls || []).map((roll) => roll.id));
+  if (previousIds) {
+    const added = [...nextIds].filter((id) => !previousIds.has(id)).length;
+    if (added && dicePanel.hidden) { unseenDiceRolls += added; updateDiceBadge(); }
+  } else if (!dicePanelInitialized) {
+    dicePanel.hidden = localStorage.getItem(`tabletop-dice-panel:${location.host}`) !== 'open';
+    dicePanelInitialized = true;
+  }
+  knownDiceRollIds = nextIds;
   roomState = state;
   if (identity) {
     const key = `tabletop-active-layer:${location.host}`;
@@ -635,9 +656,64 @@ function updateBoard(state: RoomMessage) {
   select<HTMLButtonElement>('#sticker-create').hidden = false;
   renderLayers();
   renderAssets();
+  renderDicePanel();
   drawObjects();
   if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
   if (openNoteId && noteDialog.open && noteDialogMode === 'view') void openNote(openNoteId, false);
+}
+
+function updateDiceBadge() {
+  diceNewCount.hidden = unseenDiceRolls === 0;
+  diceNewCount.textContent = unseenDiceRolls > 9 ? '9+' : String(unseenDiceRolls);
+}
+
+function renderDicePanel() {
+  if (!roomState || !identity) return;
+  const active = roomState.activeSystem;
+  const nextSystem = active?.id ?? 'none';
+  if (document.activeElement !== systemSelect) systemSelect.value = nextSystem;
+  systemSelect.disabled = identity.role !== 'gm';
+  systemSave.hidden = identity.role !== 'gm' || systemSelect.value === nextSystem;
+  pbtaControls.hidden = nextSystem !== 'pbta-2d6';
+  pbtaActorRow.hidden = identity.role !== 'gm';
+  pbtaActor.hidden = identity.role !== 'gm';
+  const actorValue = pbtaActor.value;
+  pbtaActor.replaceChildren(...roomState.participants.filter((participant) => participant.role === 'player').map((participant) => {
+    const option = document.createElement('option'); option.value = participant.participantId; option.textContent = participant.name; return option;
+  }));
+  if (roomState.participants.some((participant) => participant.participantId === actorValue && participant.role === 'player')) pbtaActor.value = actorValue;
+  diceHistory.replaceChildren();
+  if (!roomState.diceRolls.length) {
+    const empty = document.createElement('li'); empty.className = 'dice-history-empty'; empty.textContent = 'Пока нет бросков.'; diceHistory.append(empty); return;
+  }
+  for (const roll of roomState.diceRolls) diceHistory.append(renderDiceEntry(roll));
+}
+
+function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
+  const item = document.createElement('li'); item.className = 'dice-entry';
+  const title = document.createElement('div'); title.className = 'dice-entry-top';
+  const label = roll.kind === 'free' ? `${roll.actorName} · свободный бросок` : roll.authorId === roll.actorId ? `${roll.actorName} · PbtA` : `${roll.authorName} за ${roll.actorName} · PbtA`;
+  const heading = document.createElement('span'); heading.textContent = label;
+  const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt; time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  title.append(heading, time);
+  const detail = document.createElement('div'); detail.className = 'dice-entry-detail';
+  if (roll.kind === 'free') detail.textContent = `${roll.dice.length}d${roll.sides}: ${roll.dice.join(' + ')} = ${roll.total}`;
+  else {
+    const modifier = roll.situationalModifier > 0 ? ' + Превосходство 1' : roll.situationalModifier < 0 ? ' − Угнетение 1' : '';
+    const discarded = roll.discardedDie === null ? '' : ` · отброшен ${roll.discardedDie}`;
+    const category = roll.category === 'failure' ? 'Неудача' : roll.category === 'success' ? 'Обычный успех' : 'Триумфальный успех';
+    const critical = roll.critical === 'critical-failure' ? ' · Критический провал' : roll.critical === 'critical-success' ? ' · Критический успех' : '';
+    const reroll = roll.rerollOf ? ' · Сила Судьбы' : '';
+    const characteristic = roll.characteristicName ? `${roll.characteristicName}: ` : '';
+    detail.textContent = `${roll.disadvantage ? '3d6' : '2d6'} [${roll.dice.join(', ')}]${discarded} + ${characteristic}бонус ${roll.characteristicBonus}${modifier} = ${roll.total} · ${category}${critical}${reroll}`;
+    if (roll.critical) detail.classList.add('dice-entry-critical');
+  }
+  item.append(title, detail);
+  if (roll.kind === 'pbta' && (roll.authorId === identity?.participantId || identity?.role === 'gm')) {
+    const reroll = document.createElement('button'); reroll.type = 'button'; reroll.className = 'secondary'; reroll.textContent = 'Повторить · Сила Судьбы';
+    reroll.addEventListener('click', () => void runCommand('dice:reroll', { rollId: roll.id })); item.append(reroll);
+  }
+  return item;
 }
 
 function setNoteMessage(message: string) { select<HTMLElement>('#note-message').textContent = message; }
@@ -1074,6 +1150,36 @@ select<HTMLButtonElement>('#leave').addEventListener('click', async () => {
   socket?.close();
   await fetch('/api/session', { method: 'DELETE' });
   closeWorkspace('Вы вышли из комнаты.');
+});
+
+select<HTMLButtonElement>('#dice-toggle').addEventListener('click', () => {
+  dicePanel.hidden = !dicePanel.hidden;
+  localStorage.setItem(`tabletop-dice-panel:${location.host}`, dicePanel.hidden ? 'closed' : 'open');
+  if (!dicePanel.hidden) { unseenDiceRolls = 0; updateDiceBadge(); }
+});
+select<HTMLButtonElement>('#dice-close').addEventListener('click', () => {
+  dicePanel.hidden = true;
+  localStorage.setItem(`tabletop-dice-panel:${location.host}`, 'closed');
+});
+systemSelect.addEventListener('change', () => { systemSave.hidden = systemSelect.value === (roomState?.activeSystem?.id ?? 'none'); });
+systemSave.addEventListener('click', () => {
+  if (identity?.role !== 'gm') return;
+  const systemId = systemSelect.value;
+  const message = 'При смене основной системы сохранённые результаты бросков останутся в истории. Данные персонажей не преобразуются автоматически. Продолжить?';
+  if (!window.confirm(message)) { systemSelect.value = roomState?.activeSystem?.id ?? 'none'; systemSave.hidden = true; return; }
+  void runCommand('room:system:set', { systemId: systemId === 'none' ? null : systemId, version: systemId === 'none' ? null : '1.0.0' });
+});
+select<HTMLButtonElement>('#pbta-roll').addEventListener('click', () => {
+  const characteristicBonus = Number(select<HTMLInputElement>('#pbta-bonus').value);
+  const situationalModifier = Number(select<HTMLSelectElement>('#pbta-modifier').value);
+  const disadvantage = select<HTMLInputElement>('#pbta-disadvantage').checked;
+  const actorId = identity?.role === 'gm' ? pbtaActor.value : undefined;
+  void runCommand('dice:pbta', { characteristicBonus, situationalModifier, disadvantage, ...(actorId ? { actorId } : {}) });
+});
+select<HTMLButtonElement>('#free-roll').addEventListener('click', () => {
+  const count = Number(select<HTMLInputElement>('#free-count').value);
+  const sides = Number(select<HTMLSelectElement>('#free-sides').value);
+  void runCommand('dice:free', { count, sides });
 });
 
 select<HTMLButtonElement>('#library-toggle').addEventListener('click', () => { libraryPanel.hidden = !libraryPanel.hidden; });
