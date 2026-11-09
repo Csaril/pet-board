@@ -18,10 +18,10 @@ import { RoomStore, type Identity } from './store.js';
 
 const COOKIE_PATH = '/';
 
-function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[] } | undefined {
+function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
   const body = input as Record<string, unknown>;
-  if (Object.keys(body).some((key) => !['title', 'body', 'access', 'selectedParticipantIds', 'assetIds'].includes(key))) return undefined;
+  if (Object.keys(body).some((key) => !['title', 'body', 'access', 'selectedParticipantIds', 'assetIds', 'markerType', 'markerText', 'markerAssetId'].includes(key))) return undefined;
   if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return undefined;
   if (typeof body.body !== 'string' || body.body.length > 20_000) return undefined;
   if (body.access !== 'gm-only' && body.access !== 'all-players' && body.access !== 'selected-players') return undefined;
@@ -33,7 +33,15 @@ function parseNotePayload(input: unknown, store: RoomStore): { title: string; bo
   if (!Array.isArray(body.assetIds) || body.assetIds.length > 20 || body.assetIds.some((id) => typeof id !== 'string' || !store.getAsset(id))) return undefined;
   const assetIds = [...new Set(body.assetIds as string[])];
   if (assetIds.length !== body.assetIds.length) return undefined;
-  return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds };
+  const markerType = body.markerType === undefined ? 'text' : body.markerType;
+  if (markerType !== 'text' && markerType !== 'image') return undefined;
+  const markerText = body.markerText === undefined ? '' : body.markerText;
+  if (typeof markerText !== 'string' || markerText.length > 60) return undefined;
+  if (body.markerAssetId !== undefined && typeof body.markerAssetId !== 'string') return undefined;
+  const markerAssetId = typeof body.markerAssetId === 'string' && body.markerAssetId ? body.markerAssetId : undefined;
+  if (markerType === 'image' && (!markerAssetId || !store.getAsset(markerAssetId))) return undefined;
+  if (markerType === 'text' && markerAssetId !== undefined) return undefined;
+  return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds, markerType, markerText: markerText.trim(), ...(markerAssetId ? { markerAssetId } : {}) };
 }
 
 function isSameOrigin(origin: string | undefined, host: string | undefined): boolean {

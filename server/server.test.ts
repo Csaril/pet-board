@@ -57,7 +57,8 @@ test('HTTP session endpoints enforce origin, set a protected cookie, and restore
     roomCode: 'room-code-with-enough-length', gmPassword: 'gm-password-with-enough-length',
     sessionDays: 30, cookieSecure: false, maxUploadBytes: 25 * 1024 * 1024,
   };
-  const app = await buildServer({ config, store: new RoomStore(dataDir, config.roomName), logger: false });
+  const store = new RoomStore(dataDir, config.roomName);
+  const app = await buildServer({ config, store, logger: false });
   try {
     const rejectedOrigin = await app.inject({
       method: 'POST', url: '/api/session', headers: { origin: 'https://attacker.invalid' },
@@ -99,7 +100,8 @@ test('note HTTP endpoints keep bodies out of board state and enforce audience ac
     roomCode: 'room-code-with-enough-length', gmPassword: 'gm-password-with-enough-length',
     sessionDays: 30, cookieSecure: false, maxUploadBytes: 25 * 1024 * 1024,
   };
-  const app = await buildServer({ config, store: new RoomStore(dataDir, config.roomName), logger: false });
+  const store = new RoomStore(dataDir, config.roomName);
+  const app = await buildServer({ config, store, logger: false });
   try {
     const login = async (name: string, role: 'gm' | 'player') => {
       const response = await app.inject({ method: 'POST', url: '/api/session', headers: { origin: 'http://localhost:80' }, payload: { name, role, roomCode: config.roomCode, gmPassword: role === 'gm' ? config.gmPassword : undefined } });
@@ -107,27 +109,40 @@ test('note HTTP endpoints keep bodies out of board state and enforce audience ac
       return { cookie: (response.headers['set-cookie'] as string).split(';')[0]!, identity: response.json().identity as { participantId: string } };
     };
     const gm = await login('Keeper', 'gm'); const ari = await login('Ari', 'player'); const bea = await login('Bea', 'player');
-    const create = async (access: string, selectedParticipantIds: string[] = []) => app.inject({
+    const boundary = 'note-image-boundary';
+    const uploaded = await app.inject({ method: 'POST', url: '/api/assets', headers: { origin: 'http://localhost:80', cookie: gm.cookie, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: multipart(boundary, 'note.png', 'image/png', pngBytes) });
+    assert.equal(uploaded.statusCode, 200);
+    const assetId = uploaded.json().asset.id as string;
+    const create = async (access: string, selectedParticipantIds: string[] = [], extra: Record<string, unknown> = {}) => app.inject({
       method: 'POST', url: '/api/notes', headers: { origin: 'http://localhost:80', cookie: gm.cookie },
-      payload: { title: `Note ${access}`, body: 'private-body-marker', access, selectedParticipantIds, assetIds: [] },
+      payload: { title: `Note ${access}`, body: 'private-body-marker', access, selectedParticipantIds, assetIds: [], ...extra },
     });
-    const all = await create('all-players'); assert.equal(all.statusCode, 200);
+    const all = await create('all-players', [], { markerType: 'image', markerAssetId: assetId, assetIds: [assetId] }); assert.equal(all.statusCode, 200);
     const selected = await create('selected-players', [ari.identity.participantId]); assert.equal(selected.statusCode, 200);
-    const privateNote = await create('gm-only'); assert.equal(privateNote.statusCode, 200);
+    const privateNote = await create('gm-only', [], { markerType: 'image', markerAssetId: assetId }); assert.equal(privateNote.statusCode, 200);
     const ids = [all.json().note.id, selected.json().note.id, privateNote.json().note.id] as string[];
+    const publicLayer = store.getLayers()[0]!;
+    store.createNoteMarker({ id: 'public-note-marker', noteId: ids[0]!, layerId: publicLayer.id, x: 30, y: 40 });
+    store.createNoteMarker({ id: 'private-note-marker', noteId: ids[2]!, layerId: publicLayer.id, x: 50, y: 60 });
     const gmBoard = await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: gm.cookie } });
     assert.equal(gmBoard.body.includes('private-body-marker'), false);
-    assert.equal(gmBoard.json().noteMarkers.length, 0);
+    assert.equal(gmBoard.json().noteMarkers.length, 2);
     const ariBoard = await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: ari.cookie } });
     assert.equal(ariBoard.body.includes('private-body-marker'), false);
-    assert.equal(ariBoard.json().noteMarkers.length, 0);
+    assert.deepEqual(ariBoard.json().noteMarkers.map((marker: { id: string }) => marker.id), ['public-note-marker']);
+    assert.equal(ariBoard.json().noteMarkers[0].type, 'image');
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[0]}`, headers: { cookie: bea.cookie } })).statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: ari.cookie } })).statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[1]}`, headers: { cookie: bea.cookie } })).statusCode, 404);
     assert.equal((await app.inject({ method: 'GET', url: `/api/notes/${ids[2]}`, headers: { cookie: ari.cookie } })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: ari.cookie } })).statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: '/api/notes', headers: { cookie: ari.cookie } })).statusCode, 403);
     const noOrigin = await app.inject({ method: 'PUT', url: `/api/notes/${ids[0]}`, headers: { cookie: gm.cookie }, payload: { title: 'changed', body: '', access: 'gm-only', selectedParticipantIds: [], assetIds: [] } });
     assert.equal(noOrigin.statusCode, 403);
+    const removeAttachment = await app.inject({ method: 'PUT', url: `/api/notes/${ids[0]}`, headers: { origin: 'http://localhost:80', cookie: gm.cookie }, payload: { title: 'Changed', body: '', access: 'gm-only', selectedParticipantIds: [], assetIds: [], markerType: 'text', markerText: '' } });
+    assert.equal(removeAttachment.statusCode, 200);
+    assert.ok(store.getAsset(assetId));
+    assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${assetId}`, headers: { cookie: ari.cookie } })).statusCode, 404);
   } finally { await app.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 

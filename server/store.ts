@@ -15,8 +15,8 @@ export interface ObjectPatch {
 }
 export interface StickerInput extends Omit<BoardSticker, 'orderIndex'> { orderIndex?: number }
 export interface StickerPatch { text?: string; x?: number; y?: number; width?: number; height?: number; bgColor?: StickerBackground; textColor?: StickerTextColor; fontSize?: number; layerId?: string }
-export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[] }
-export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[] }
+export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string }
+export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string }
 export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number }
 
 type LayerRow = { id: string; name: string; order_index: number; visible: number; locked: number; audience: LayerAudience };
@@ -26,8 +26,8 @@ type ObjectRow = {
 };
 type AssetRow = { id: string; sha256: string; mime_type: BoardAsset['mimeType']; original_name: string; size: number; width: number; height: number; created_at: string };
 type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; order_index: number };
-type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string };
-type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; order_index: number };
+type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null };
+type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
 
 function toLayer(row: LayerRow): BoardLayer {
   return { id: row.id, name: row.name, orderIndex: row.order_index, visible: row.visible === 1, locked: row.locked === 1, audience: row.audience };
@@ -49,7 +49,7 @@ function toSticker(row: StickerRow): BoardSticker {
   return { id: row.id, creatorId: row.creator_id, layerId: row.layer_id, text: row.text, x: row.x, y: row.y, width: row.width, height: row.height, bgColor: row.bg_color, textColor: row.text_color, fontSize: row.font_size, orderIndex: row.order_index };
 }
 function toNoteMarker(row: NoteMarkerRow): NoteMarker {
-  return { id: row.id, noteId: row.note_id, layerId: row.layer_id, x: row.x, y: row.y, orderIndex: row.order_index };
+  return { id: row.id, noteId: row.note_id, layerId: row.layer_id, x: row.x, y: row.y, orderIndex: row.order_index, type: row.marker_type, text: row.marker_text || row.title, ...(row.marker_asset_id ? { assetId: row.marker_asset_id, assetWidth: row.asset_width || 1, assetHeight: row.asset_height || 1 } : {}) };
 }
 
 export class RoomStore {
@@ -120,6 +120,9 @@ export class RoomStore {
         body TEXT NOT NULL,
         access TEXT NOT NULL CHECK (access IN ('gm-only', 'all-players', 'selected-players')),
         selected_participant_ids TEXT NOT NULL DEFAULT '[]',
+        marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image')),
+        marker_text TEXT,
+        marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
         created_by TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -150,12 +153,30 @@ export class RoomStore {
         width REAL NOT NULL,
         height REAL NOT NULL,
         bg_color TEXT NOT NULL CHECK (bg_color IN ('butter', 'rose', 'sky', 'sage')),
-        text_color TEXT NOT NULL CHECK (text_color IN ('ink', 'plum')),
+        text_color TEXT NOT NULL CHECK (text_color IN ('black', 'white')),
         font_size INTEGER NOT NULL,
         order_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS stickers_layer_order ON stickers(layer_id, order_index);
     `);
+    const stickerSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stickers'").get() as { sql: string } | undefined;
+    if (stickerSchema && !stickerSchema.sql.includes("'black'")) {
+      const migrateStickerColors = this.db.transaction(() => {
+        this.db.exec('DROP INDEX IF EXISTS stickers_layer_order');
+        this.db.exec('ALTER TABLE stickers RENAME TO stickers_legacy_colors');
+        this.db.exec(`CREATE TABLE stickers (
+          id TEXT PRIMARY KEY, creator_id TEXT NOT NULL, layer_id TEXT NOT NULL REFERENCES board_layers(id) ON DELETE RESTRICT,
+          text TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL,
+          bg_color TEXT NOT NULL CHECK (bg_color IN ('butter', 'rose', 'sky', 'sage')),
+          text_color TEXT NOT NULL CHECK (text_color IN ('black', 'white')), font_size INTEGER NOT NULL, order_index INTEGER NOT NULL
+        )`);
+        this.db.exec(`INSERT INTO stickers (id, creator_id, layer_id, text, x, y, width, height, bg_color, text_color, font_size, order_index)
+          SELECT id, creator_id, layer_id, text, x, y, width, height, bg_color, CASE text_color WHEN 'plum' THEN 'white' ELSE 'black' END, font_size, order_index FROM stickers_legacy_colors`);
+        this.db.exec('DROP TABLE stickers_legacy_colors');
+        this.db.exec('CREATE INDEX stickers_layer_order ON stickers(layer_id, order_index)');
+      });
+      migrateStickerColors();
+    }
     const objectColumns = this.db.pragma('table_info(board_objects)') as Array<{ name: string }>;
     if (!objectColumns.some((column) => column.name === 'free_stretch')) {
       this.db.exec('ALTER TABLE board_objects ADD COLUMN free_stretch INTEGER NOT NULL DEFAULT 0 CHECK (free_stretch IN (0, 1))');
@@ -164,6 +185,10 @@ export class RoomStore {
     if (!roomColumns.some((column) => column.name === 'allow_player_stickers')) {
       this.db.exec('ALTER TABLE room ADD COLUMN allow_player_stickers INTEGER NOT NULL DEFAULT 0 CHECK (allow_player_stickers IN (0, 1))');
     }
+    const noteColumns = this.db.pragma('table_info(notes)') as Array<{ name: string }>;
+    if (!noteColumns.some((column) => column.name === 'marker_type')) this.db.exec("ALTER TABLE notes ADD COLUMN marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image'))");
+    if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
+    if (!noteColumns.some((column) => column.name === 'marker_asset_id')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT');
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
     const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers').get() as { count: number }).count;
     if (layerCount === 0) this.createLayer('Основной слой', 'all-players');
@@ -309,17 +334,10 @@ export class RoomStore {
     this.updateObject(id, { orderIndex: next });
   }
 
-  get allowPlayerStickers(): boolean {
-    return (this.db.prepare('SELECT allow_player_stickers FROM room WHERE id = 1').get() as { allow_player_stickers: number }).allow_player_stickers === 1;
-  }
-  setAllowPlayerStickers(enabled: boolean): void {
-    this.db.prepare('UPDATE room SET allow_player_stickers = ? WHERE id = 1').run(Number(enabled));
-  }
-
   createNote(note: NoteInput): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId);
+      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by, marker_type, marker_text, marker_asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId, note.markerType || 'text', note.markerText || null, note.markerAssetId || null);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       note.assetIds.forEach((assetId, index) => insertAsset.run(note.id, assetId, index));
     });
@@ -327,8 +345,8 @@ export class RoomStore {
   }
   updateNote(id: string, patch: NotePatch): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare(`UPDATE notes SET title = ?, body = ?, access = ?, selected_participant_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-        .run(patch.title, patch.body, patch.access, JSON.stringify(patch.selectedParticipantIds), id);
+      this.db.prepare(`UPDATE notes SET title = ?, body = ?, access = ?, selected_participant_ids = ?, marker_type = ?, marker_text = ?, marker_asset_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(patch.title, patch.body, patch.access, JSON.stringify(patch.selectedParticipantIds), patch.markerType, patch.markerText || null, patch.markerAssetId || null, id);
       this.db.prepare('DELETE FROM note_assets WHERE note_id = ?').run(id);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       patch.assetIds.forEach((assetId, index) => insertAsset.run(id, assetId, index));
@@ -352,6 +370,8 @@ export class RoomStore {
       id: row.id, title: row.title, body: row.body, access: row.access,
       selectedParticipantIds, assetIds: assetIds.map((asset) => asset.asset_id),
       createdAt: row.created_at, updatedAt: row.updated_at, images,
+      markerType: row.marker_type || 'text', markerText: row.marker_text || row.title,
+      ...(row.marker_asset_id ? { markerAssetId: row.marker_asset_id } : {}),
     };
   }
   listNotes(): NoteListItem[] {
@@ -378,14 +398,15 @@ export class RoomStore {
     if (identity.role === 'gm') return true;
     if (this.isAssetUsedByPublicObject(assetId)) return true;
     const noteIds = this.db.prepare('SELECT note_id FROM note_assets WHERE asset_id = ?').all(assetId) as Array<{ note_id: string }>;
-    return noteIds.some(({ note_id }) => this.canReadNote(note_id, identity));
+    const markerNoteIds = this.db.prepare("SELECT id AS note_id FROM notes WHERE marker_asset_id = ? AND marker_type = 'image'").all(assetId) as Array<{ note_id: string }>;
+    return [...noteIds, ...markerNoteIds].some(({ note_id }) => this.canReadNote(note_id, identity));
   }
   getNoteMarker(id: string): NoteMarker | undefined {
-    const row = this.db.prepare('SELECT * FROM note_markers WHERE id = ?').get(id) as NoteMarkerRow | undefined;
+    const row = this.db.prepare(`SELECT marker.*, note.title, note.marker_type, note.marker_text, note.marker_asset_id, asset.width AS asset_width, asset.height AS asset_height FROM note_markers AS marker JOIN notes AS note ON note.id = marker.note_id LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id WHERE marker.id = ?`).get(id) as NoteMarkerRow | undefined;
     return row ? toNoteMarker(row) : undefined;
   }
   getNoteMarkers(): NoteMarker[] {
-    return (this.db.prepare('SELECT * FROM note_markers ORDER BY order_index').all() as NoteMarkerRow[]).map(toNoteMarker);
+    return (this.db.prepare(`SELECT marker.*, note.title, note.marker_type, note.marker_text, note.marker_asset_id, asset.width AS asset_width, asset.height AS asset_height FROM note_markers AS marker JOIN notes AS note ON note.id = marker.note_id LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id ORDER BY marker.order_index`).all() as NoteMarkerRow[]).map(toNoteMarker);
   }
   createNoteMarker(marker: NoteMarkerInput): void {
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM note_markers WHERE layer_id = ?').get(marker.layerId) as { next: number }).next;
@@ -427,12 +448,12 @@ export class RoomStore {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
     const allLayers = this.getLayers();
-    if (role === 'gm') return { layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets(), allowPlayerStickers: this.allowPlayerStickers };
+    if (role === 'gm') return { layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
     const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
     const visibleIds = new Set(layers.map((layer) => layer.id));
     const stickers = this.getStickers().filter((sticker) => visibleIds.has(sticker.layerId));
     const noteMarkers = this.getNoteMarkers().filter((marker) => visibleIds.has(marker.layerId) && this.canReadNote(marker.noteId, identity));
-    return { layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers, allowPlayerStickers: this.allowPlayerStickers };
+    return { layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers };
   }
 
   backup(path: string): Promise<Database.BackupMetadata> { return this.db.backup(path); }

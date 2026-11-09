@@ -79,7 +79,8 @@ import '../styles/global.css';
             <span class="selection-name">Стикер</span>
             <button id="sticker-edit" type="button">Текст</button>
             <label class="sticker-color-control">Фон <select id="sticker-bg"><option value="butter">Светлый</option><option value="rose">Розовый</option><option value="sky">Голубой</option><option value="sage">Зелёный</option></select></label>
-            <label class="sticker-color-control">Текст <select id="sticker-text-color"><option value="ink">Тёмный</option><option value="plum">Сливовый</option></select></label>
+            <label class="sticker-color-control">Размер <select id="sticker-font-size"><option>12</option><option>14</option><option>16</option><option>18</option><option>24</option><option>32</option><option>40</option></select></label>
+            <label class="sticker-color-control">Цвет <select id="sticker-text-color"><option value="black">Чёрный</option><option value="white">Белый</option></select></label>
             <button id="sticker-duplicate" type="button">Дублировать</button>
             <button id="sticker-delete" class="danger" type="button">Удалить</button>
           </div>
@@ -112,10 +113,16 @@ import '../styles/global.css';
 
       <aside id="notes-panel" class="library-panel notes-panel gm-only" hidden>
         <div class="panel-heading"><div><p class="eyebrow">Подготовка игры</p><h2>Заметки</h2></div><button id="notes-close" class="icon-button" type="button" aria-label="Закрыть заметки">×</button></div>
-        <label class="player-sticker-setting"><input id="allow-player-stickers" type="checkbox" /> Разрешить игрокам создавать стикеры</label>
         <ul id="notes-list" class="assets-list"></ul>
       </aside>
     </main>
+    <dialog id="sticker-create-dialog" class="compact-dialog">
+      <h2>Новый стикер</h2>
+      <label for="sticker-new-text">Текст</label><textarea id="sticker-new-text" rows="4" maxlength="1000"></textarea>
+      <label for="sticker-new-size">Размер текста</label><select id="sticker-new-size"><option>12</option><option>14</option><option>16</option><option selected>18</option><option>24</option><option>32</option><option>40</option></select>
+      <label for="sticker-new-color">Цвет текста</label><select id="sticker-new-color"><option value="black">Чёрный</option><option value="white">Белый</option></select>
+      <div class="note-dialog-actions"><button id="sticker-create-cancel" class="secondary" type="button">Отмена</button><button id="sticker-create-confirm" type="button">Создать</button></div>
+    </dialog>
     <dialog id="note-dialog" class="note-dialog">
       <div class="note-dialog-heading"><div><p id="note-privacy" class="privacy-indicator">Личная заметка</p><h2 id="note-dialog-heading">Заметка</h2></div><button id="note-close" class="icon-button" type="button" aria-label="Закрыть заметку">×</button></div>
       <div class="note-editor-fields">
@@ -123,13 +130,23 @@ import '../styles/global.css';
         <label for="note-access">Доступ</label>
         <select id="note-access"><option value="gm-only">Только ведущий</option><option value="all-players">Все игроки</option><option value="selected-players">Выбранные игроки</option></select>
         <fieldset id="note-participants" class="note-participants" hidden><legend>Кому доступна заметка</legend><div id="note-participant-list"></div></fieldset>
+        <label for="note-marker-type">Вид метки</label><select id="note-marker-type"><option value="text">Текстовая</option><option value="image">Изображение</option></select>
+        <div id="note-marker-text-row"><label for="note-marker-text">Подпись метки (необязательно)</label><input id="note-marker-text" maxlength="60" placeholder="По умолчанию — название заметки" /></div>
+        <div id="note-marker-image-row" hidden><button id="note-marker-image-pick" class="secondary" type="button">Выбрать изображение метки</button><span id="note-marker-image-name"></span></div>
         <label for="note-body">Текст</label><textarea id="note-body" rows="8" maxlength="20000"></textarea>
-        <fieldset class="note-assets"><legend>Изображения из библиотеки</legend><div id="note-asset-list"></div></fieldset>
+        <fieldset class="note-assets"><legend>Изображения заметки</legend><div id="note-selected-assets" class="note-selected-assets"></div><button id="note-add-image" class="secondary" type="button">Добавить изображение</button></fieldset>
       </div>
       <div id="note-view-images" class="note-view-images" hidden></div>
       <div id="note-view-body" class="note-view-body" hidden></div>
       <div class="note-dialog-actions"><button id="note-edit" type="button" hidden>Редактировать</button><button id="note-place-marker" type="button" hidden>Поставить метку</button><button id="note-save" type="button">Сохранить</button></div>
       <p id="note-message" class="message" role="status" aria-live="polite"></p>
+    </dialog>
+    <dialog id="asset-picker-dialog" class="asset-picker-dialog">
+      <div class="note-dialog-heading"><div><p class="eyebrow">Общие ресурсы</p><h2>Изображения</h2></div><button id="asset-picker-close" class="icon-button" type="button" aria-label="Закрыть окно выбора">×</button></div>
+      <div class="asset-picker-modes"><button id="asset-picker-library-mode" type="button" class="active">Библиотека</button><button id="asset-picker-upload-mode" type="button">Загрузить новое</button></div>
+      <section id="asset-picker-library"><div id="asset-picker-grid" class="asset-picker-grid"></div></section>
+      <section id="asset-picker-upload" hidden><label class="upload-button" for="note-image-upload">Выбрать изображения</label><input id="note-image-upload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden /><p id="asset-picker-upload-message" class="message" role="status"></p></section>
+      <div class="note-dialog-actions"><button id="asset-picker-cancel" class="secondary" type="button">Отмена</button><button id="asset-picker-add" type="button">Добавить выбранные</button></div>
     </dialog>
     <script>
       import '../client/app.ts';

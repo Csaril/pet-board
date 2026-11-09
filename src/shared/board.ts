@@ -45,7 +45,7 @@ export interface BoardAsset {
 
 export type NoteAccess = 'gm-only' | 'all-players' | 'selected-players';
 export type StickerBackground = 'butter' | 'rose' | 'sky' | 'sage';
-export type StickerTextColor = 'ink' | 'plum';
+export type StickerTextColor = 'black' | 'white';
 
 export interface BoardSticker {
   id: string;
@@ -69,6 +69,11 @@ export interface NoteMarker {
   x: number;
   y: number;
   orderIndex: number;
+  type: 'text' | 'image';
+  text: string;
+  assetId?: string;
+  assetWidth?: number;
+  assetHeight?: number;
 }
 
 export interface RoomParticipant {
@@ -87,6 +92,9 @@ export interface NoteRecord {
   createdAt: string;
   updatedAt: string;
   images: Array<Pick<BoardAsset, 'id' | 'originalName' | 'width' | 'height'>>;
+  markerType: 'text' | 'image';
+  markerText: string;
+  markerAssetId?: string;
 }
 
 export interface NoteListItem {
@@ -102,7 +110,6 @@ export interface BoardSnapshot {
   objects: BoardImage[];
   stickers: BoardSticker[];
   noteMarkers: NoteMarker[];
-  allowPlayerStickers: boolean;
   assets?: BoardAsset[];
 }
 

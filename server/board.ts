@@ -40,8 +40,12 @@ function stickerBackground(value: unknown): StickerBackground {
   return value;
 }
 function stickerTextColor(value: unknown): StickerTextColor {
-  if (value !== 'ink' && value !== 'plum') throw new BoardCommandError('Недопустимый цвет текста.');
+  if (value !== 'black' && value !== 'white') throw new BoardCommandError('Недопустимый цвет текста.');
   return value;
+}
+function stickerFontSize(value: unknown): number {
+  if (![12, 14, 16, 18, 24, 32, 40].includes(value as number)) throw new BoardCommandError('Недопустимый размер текста стикера.');
+  return value as number;
 }
 function crop(value: unknown): CropRect | null {
   if (value === null) return null;
@@ -62,13 +66,6 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     case 'layer:create': {
       gmOnly(identity);
       store.createLayer(text(command.name, 'Название слоя', 80), command.audience === undefined ? 'all-players' : audience(command.audience));
-      return;
-    }
-    case 'settings:update': {
-      gmOnly(identity);
-      const changes = objectValue(command.changes, 'Настройки комнаты');
-      if (Object.keys(changes).length !== 1 || !owns(changes, 'allowPlayerStickers')) throw new BoardCommandError('Недопустимые настройки комнаты.');
-      store.setAllowPlayerStickers(boolean(changes.allowPlayerStickers, 'allowPlayerStickers'));
       return;
     }
     case 'layer:update': {
@@ -262,20 +259,21 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       return;
     }
     case 'sticker:create': {
-      const layerId = text(command.layerId, 'ID слоя', 64);
-      const layer = store.getLayer(layerId);
+      let layer = identity.role === 'gm'
+        ? store.getLayer(text(command.layerId, 'ID слоя', 64))
+        : store.getLayers().find((candidate) => candidate.audience === 'all-players' && candidate.visible && !candidate.locked);
+      if (!layer && identity.role === 'player') layer = store.createLayer('Стикеры игроков', 'all-players');
       if (!layer) throw new BoardCommandError('Слой не найден.');
-      if (layer.locked) throw new BoardCommandError('Слой заблокирован.');
-      if (identity.role === 'player' && (!store.allowPlayerStickers || layer.audience !== 'all-players' || !layer.visible)) throw new BoardCommandError('Создание стикеров игроками сейчас недоступно.');
+      if (layer.locked || (identity.role === 'player' && (layer.audience !== 'all-players' || !layer.visible))) throw new BoardCommandError('Слой недоступен для создания стикера.');
       store.createSticker({
-        id: randomUUID(), creatorId: identity.participantId, layerId,
+        id: randomUUID(), creatorId: identity.participantId, layerId: layer.id,
         text: text(command.text, 'Текст стикера', 1000),
         x: number(command.x, 'x', -10_000_000, 10_000_000), y: number(command.y, 'y', -10_000_000, 10_000_000),
         width: command.width === undefined ? 240 : number(command.width, 'width', 120, 600),
         height: command.height === undefined ? 140 : number(command.height, 'height', 80, 800),
         bgColor: command.bgColor === undefined ? 'butter' : stickerBackground(command.bgColor),
-        textColor: command.textColor === undefined ? 'ink' : stickerTextColor(command.textColor),
-        fontSize: command.fontSize === undefined ? 18 : number(command.fontSize, 'fontSize', 12, 40),
+        textColor: command.textColor === undefined ? 'black' : stickerTextColor(command.textColor),
+        fontSize: command.fontSize === undefined ? 18 : stickerFontSize(command.fontSize),
       });
       return;
     }
@@ -298,7 +296,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
         ...(owns(changes, 'height') ? { height: number(changes.height, 'height', 80, 800) } : {}),
         ...(owns(changes, 'bgColor') ? { bgColor: stickerBackground(changes.bgColor) } : {}),
         ...(owns(changes, 'textColor') ? { textColor: stickerTextColor(changes.textColor) } : {}),
-        ...(owns(changes, 'fontSize') ? { fontSize: number(changes.fontSize, 'fontSize', 12, 40) } : {}),
+        ...(owns(changes, 'fontSize') ? { fontSize: stickerFontSize(changes.fontSize) } : {}),
         ...(owns(changes, 'layerId') ? (() => {
           const target = store.getLayer(text(changes.layerId, 'Целевой слой', 64));
           if (!target) throw new BoardCommandError('Целевой слой не найден.');
@@ -323,7 +321,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       if (!source) throw new BoardCommandError('Стикер не найден.');
       const layer = store.getLayer(source.layerId);
       if (!layer || layer.locked) throw new BoardCommandError('Слой заблокирован.');
-      if (identity.role !== 'gm' && (source.creatorId !== identity.participantId || !store.allowPlayerStickers)) throw new BoardCommandError('Нельзя дублировать этот стикер.');
+      if (identity.role !== 'gm' && source.creatorId !== identity.participantId) throw new BoardCommandError('Нельзя дублировать чужой стикер.');
       store.createSticker({ ...source, id: randomUUID(), x: source.x + 24, y: source.y + 24 });
       return;
     }

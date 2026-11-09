@@ -34,6 +34,8 @@ const markerTools = select<HTMLElement>('#marker-tools');
 const notesPanel = select<HTMLElement>('#notes-panel');
 const notesList = select<HTMLUListElement>('#notes-list');
 const noteDialog = select<HTMLDialogElement>('#note-dialog');
+const assetPickerDialog = select<HTMLDialogElement>('#asset-picker-dialog');
+const stickerCreateDialog = select<HTMLDialogElement>('#sticker-create-dialog');
 const notePlacementHint = select<HTMLElement>('#note-place-hint');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
@@ -81,6 +83,9 @@ let openNoteId: string | undefined;
 let editingNoteId: string | undefined;
 let noteDialogMode: 'view' | 'edit' = 'view';
 let noteRequestSequence = 0;
+let editingAssetIds: string[] = [];
+let selectedMarkerAssetId: string | undefined;
+let assetPickerMode: 'attachments' | 'marker' = 'attachments';
 let cropMode = false;
 let camera = { x: 0, y: 0, scale: 1 };
 let hasRestoredCamera = false;
@@ -339,7 +344,7 @@ function fitAllObjects() {
     return { x: item.x + rect.x, y: item.y + rect.y, width: rect.width, height: rect.height };
   });
   for (const sticker of roomState.stickers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height });
-  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: 38, height: 38 });
+  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: marker.type === 'image' ? 84 : Math.min(200, Math.max(64, marker.text.length * 8 + 18)), height: marker.type === 'image' ? 60 : 34 });
   const bounds = boundsRects.length ? {
     minX: Math.min(...boundsRects.map((rect) => rect.x)), minY: Math.min(...boundsRects.map((rect) => rect.y)),
     maxX: Math.max(...boundsRects.map((rect) => rect.x + rect.width)), maxY: Math.max(...boundsRects.map((rect) => rect.y + rect.height)),
@@ -469,7 +474,7 @@ function drawObjects() {
     }
     for (const sticker of (roomState.stickers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
       const colors: Record<BoardSticker['bgColor'], string> = { butter: '#fff1b8', rose: '#ffd6df', sky: '#d7efff', sage: '#d9efdc' };
-      const textColors: Record<BoardSticker['textColor'], string> = { ink: '#28302b', plum: '#663a58' };
+      const textColors: Record<BoardSticker['textColor'], string> = { black: '#000000', white: '#FFFFFF' };
       const group = new Konva.Group({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height, draggable: !layer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId), name: `board-sticker ${sticker.id}` });
       const background = new Konva.Rect({ width: sticker.width, height: sticker.height, fill: colors[sticker.bgColor], cornerRadius: 8, stroke: '#0002', strokeWidth: 1 });
       const text = new Konva.Text({ x: 10, y: 8, width: sticker.width - 20, height: sticker.height - 16, text: sticker.text, fontFamily: 'system-ui, sans-serif', fontSize: sticker.fontSize, fill: textColors[sticker.textColor], wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false });
@@ -480,9 +485,21 @@ function drawObjects() {
       boardLayer.add(group); renderedStickers.set(sticker.id, { group, background, text });
     }
     for (const marker of (roomState.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
-      const group = new Konva.Group({ x: marker.x, y: marker.y, width: 38, height: 38, draggable: identity?.role === 'gm' && !layer.locked, name: `note-marker ${marker.id}` });
-      group.add(new Konva.Circle({ radius: 19, fill: '#426c59', stroke: '#fff', strokeWidth: 2 }));
-      group.add(new Konva.Text({ x: 0, y: 7, width: 38, text: 'N', fontSize: 19, fontStyle: 'bold', fill: '#fff', align: 'center', listening: false }));
+      const assetWidth = marker.assetWidth || 84; const assetHeight = marker.assetHeight || 60;
+      const markerWidth = marker.type === 'image' ? Math.min(84, assetWidth) : Math.min(200, Math.max(64, marker.text.length * 8 + 18));
+      const markerHeight = marker.type === 'image' ? Math.min(60, assetHeight) : 34;
+      const group = new Konva.Group({ x: marker.x, y: marker.y, width: markerWidth, height: markerHeight, draggable: identity?.role === 'gm' && !layer.locked, name: `note-marker ${marker.id}` });
+      if (marker.type === 'image' && marker.assetId) {
+        const image = cachedImage(marker.assetId);
+        const ratio = Math.min(84 / assetWidth, 60 / assetHeight);
+        const width = assetWidth * ratio; const height = assetHeight * ratio;
+        group.setAttrs({ width, height });
+        group.add(new Konva.Rect({ width, height, fill: '#fff', cornerRadius: 5, stroke: '#426c59', strokeWidth: 2 }));
+        group.add(new Konva.Image({ x: 2, y: 2, width: width - 4, height: height - 4, image, listening: false }));
+      } else {
+        group.add(new Konva.Rect({ width: markerWidth, height: markerHeight, fill: '#fffdf4', stroke: '#52645a', strokeWidth: 1.5, cornerRadius: 5, shadowColor: '#17231a', shadowBlur: 4, shadowOpacity: .15, shadowOffsetY: 2 }));
+        group.add(new Konva.Text({ x: 8, y: 0, width: markerWidth - 16, height: markerHeight, text: marker.text.slice(0, 60), fontSize: 13, fontFamily: 'system-ui, sans-serif', fill: '#202722', wrap: 'none', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false }));
+      }
       group.on('click tap', (event) => { event.cancelBubble = true; setSelectedMarker(marker.id); void openNote(marker.noteId); });
       group.on('dragend', () => void runCommand('note-marker:update', { id: marker.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }));
       boardLayer.add(group); renderedMarkers.set(marker.id, { group });
@@ -519,7 +536,7 @@ function updateSelectionControls() {
   select<HTMLElement>('#lock-indicator').hidden = !(sticker && stickerLayer?.locked || marker && markerLayer?.locked);
   if (sticker && stickerRendered) {
     transformer?.nodes(canEditSticker ? [stickerRendered.group] : []); cropTransformer?.nodes([]);
-    select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor;
+    select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor; select<HTMLSelectElement>('#sticker-font-size').value = String(sticker.fontSize);
     return;
   }
   if (marker && markerRendered) { transformer?.nodes([]); cropTransformer?.nodes([]); return; }
@@ -610,8 +627,7 @@ function updateBoard(state: RoomMessage) {
   if (!state.objects.some((item) => item.id === selectedObjectId)) selectedObjectId = undefined;
   if (!state.stickers?.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
   if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
-  select<HTMLButtonElement>('#sticker-create').hidden = identity?.role !== 'gm' && !state.allowPlayerStickers;
-  select<HTMLInputElement>('#allow-player-stickers').checked = !!state.allowPlayerStickers;
+  select<HTMLButtonElement>('#sticker-create').hidden = false;
   renderLayers();
   renderAssets();
   drawObjects();
@@ -643,9 +659,12 @@ async function openNote(id: string, show = true) {
     select<HTMLLabelElement>('label[for="note-title"]').hidden = true;
     select<HTMLLabelElement>('label[for="note-access"]').hidden = true;
     select<HTMLSelectElement>('#note-access').hidden = true;
+    select<HTMLLabelElement>('label[for="note-marker-type"]').hidden = true;
+    select<HTMLSelectElement>('#note-marker-type').hidden = true;
     select<HTMLLabelElement>('label[for="note-body"]').hidden = true;
     select<HTMLElement>('#note-participants').hidden = true;
     select<HTMLElement>('.note-assets').hidden = true;
+    select<HTMLElement>('#note-marker-text-row').hidden = true; select<HTMLElement>('#note-marker-image-row').hidden = true;
     const body = select<HTMLElement>('#note-view-body'); body.textContent = note.body; body.hidden = false;
     const images = select<HTMLElement>('#note-view-images'); images.replaceChildren(); images.hidden = note.images.length === 0;
     for (const asset of note.images) { const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
@@ -666,11 +685,17 @@ function openNoteEditor(note?: NoteRecord) {
   select<HTMLInputElement>('#note-title').value = note?.title || '';
   select<HTMLTextAreaElement>('#note-body').value = note?.body || '';
   select<HTMLSelectElement>('#note-access').value = note?.access || 'gm-only';
+  select<HTMLSelectElement>('#note-marker-type').value = note?.markerType || 'text';
+  select<HTMLInputElement>('#note-marker-text').value = note?.markerText === note?.title ? '' : note?.markerText || '';
+  selectedMarkerAssetId = note?.markerAssetId;
+  updateMarkerEditorFields();
   select<HTMLInputElement>('#note-title').hidden = false;
   select<HTMLTextAreaElement>('#note-body').hidden = false;
   select<HTMLLabelElement>('label[for="note-title"]').hidden = false;
   select<HTMLLabelElement>('label[for="note-access"]').hidden = false;
   select<HTMLSelectElement>('#note-access').hidden = false;
+  select<HTMLLabelElement>('label[for="note-marker-type"]').hidden = false;
+  select<HTMLSelectElement>('#note-marker-type').hidden = false;
   select<HTMLLabelElement>('label[for="note-body"]').hidden = false;
   select<HTMLElement>('#note-view-body').hidden = true; select<HTMLElement>('#note-view-images').hidden = true;
   select<HTMLElement>('.note-assets').hidden = false;
@@ -689,25 +714,82 @@ function openNoteEditor(note?: NoteRecord) {
     label.append(checkbox, document.createTextNode(`Отключённый участник · ${participantId.slice(0, 8)}`)); participantList.append(label);
   }
   participantWrap.hidden = select<HTMLSelectElement>('#note-access').value !== 'selected-players';
-  const assetList = select<HTMLElement>('#note-asset-list'); assetList.replaceChildren();
-  for (const asset of roomState?.assets || []) {
-    const label = document.createElement('label'); label.className = 'note-asset-row'; const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = asset.id; checkbox.checked = note?.assetIds.includes(asset.id) || false;
-    const thumb = document.createElement('img'); thumb.src = `/api/assets/${encodeURIComponent(asset.id)}`; thumb.alt = '';
-    label.append(checkbox, thumb, document.createTextNode(asset.originalName)); assetList.append(label);
-  }
+  editingAssetIds = [...(note?.assetIds || [])]; renderNoteAttachments();
   select<HTMLButtonElement>('#note-save').hidden = false;
   select<HTMLButtonElement>('#note-place-marker').hidden = true;
   select<HTMLButtonElement>('#note-edit').hidden = true;
   setNoteMessage(''); if (!noteDialog.open) noteDialog.showModal();
 }
 
+function updateMarkerEditorFields() {
+  const imageMode = select<HTMLSelectElement>('#note-marker-type').value === 'image';
+  select<HTMLElement>('#note-marker-text-row').hidden = imageMode;
+  select<HTMLElement>('#note-marker-image-row').hidden = !imageMode;
+  const asset = roomState?.assets?.find((entry) => entry.id === selectedMarkerAssetId);
+  select<HTMLElement>('#note-marker-image-name').textContent = asset?.originalName || (selectedMarkerAssetId ? 'Выбранное изображение' : 'Изображение не выбрано');
+}
+
+function renderNoteAttachments() {
+  const selected = select<HTMLElement>('#note-selected-assets'); selected.replaceChildren();
+  for (const id of editingAssetIds) {
+    const asset = roomState?.assets?.find((entry) => entry.id === id); if (!asset) continue;
+    const item = document.createElement('div'); item.className = 'note-attachment-thumb';
+    const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(id)}`; image.alt = asset.originalName; image.title = asset.originalName;
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Убрать из заметки'; remove.addEventListener('click', () => { editingAssetIds = editingAssetIds.filter((entry) => entry !== id); renderNoteAttachments(); });
+    item.append(image, remove); selected.append(item);
+  }
+}
+
+function renderAssetPicker() {
+  const grid = select<HTMLElement>('#asset-picker-grid'); grid.replaceChildren();
+  for (const asset of roomState?.assets || []) {
+    const label = document.createElement('label'); label.className = 'asset-picker-item';
+    const input = document.createElement('input'); input.type = assetPickerMode === 'marker' ? 'radio' : 'checkbox'; input.name = 'asset-picker-selection'; input.value = asset.id;
+    input.checked = assetPickerMode === 'marker' ? asset.id === selectedMarkerAssetId : editingAssetIds.includes(asset.id);
+    const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = ''; image.loading = 'lazy';
+    const name = document.createElement('span'); name.textContent = asset.originalName; name.title = asset.originalName;
+    label.append(input, image, name); grid.append(label);
+  }
+  select<HTMLElement>('#asset-picker-library').hidden = false;
+}
+
+function openAssetPicker(mode: 'attachments' | 'marker') {
+  assetPickerMode = mode; renderAssetPicker();
+  select<HTMLElement>('#asset-picker-upload').hidden = true;
+  select<HTMLButtonElement>('#asset-picker-library-mode').classList.add('active');
+  select<HTMLButtonElement>('#asset-picker-upload-mode').classList.remove('active');
+  select<HTMLButtonElement>('#asset-picker-add').hidden = false;
+  select<HTMLElement>('#asset-picker-upload-message').textContent = '';
+  if (!assetPickerDialog.open) assetPickerDialog.showModal();
+}
+
+async function uploadNoteImageFiles(files: File[]) {
+  const message = select<HTMLElement>('#asset-picker-upload-message');
+  const limit = roomState?.maxUploadBytes ?? 25 * 1024 * 1024;
+  for (const file of files) {
+    if (file.size > limit) { message.textContent = `${file.name}: превышен лимит ${formatSize(limit)}.`; continue; }
+    const formData = new FormData(); formData.append('image', file);
+    try {
+      const response = await fetch('/api/assets', { method: 'POST', body: formData });
+      const result = await response.json() as { asset?: NonNullable<BoardSnapshot['assets']>[number]; error?: string };
+      if (!response.ok || !result.asset) throw new Error(result.error || 'Не удалось загрузить изображение.');
+      if (roomState) roomState.assets = [...(roomState.assets || []).filter((entry) => entry.id !== result.asset!.id), result.asset];
+      if (assetPickerMode === 'marker') selectedMarkerAssetId = result.asset.id;
+      else if (!editingAssetIds.includes(result.asset.id)) editingAssetIds.push(result.asset.id);
+      message.textContent = `${file.name}: загружено${result.asset.id !== undefined ? ' и добавлено в выбор' : ''}.`;
+      renderAssets(); renderAssetPicker(); renderNoteAttachments(); updateMarkerEditorFields();
+    } catch (error) { message.textContent = `${file.name}: ${error instanceof Error ? error.message : 'ошибка загрузки.'}`; }
+  }
+}
+
 async function saveNote() {
   if (identity?.role !== 'gm') return;
   const selectedParticipantIds = Array.from(select<HTMLElement>('#note-participant-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
-  const assetIds = Array.from(select<HTMLElement>('#note-asset-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
+  const markerType = select<HTMLSelectElement>('#note-marker-type').value;
+  if (markerType === 'image' && !selectedMarkerAssetId) { setNoteMessage('Выберите изображение для графической метки.'); return; }
   const id = editingNoteId;
   try {
-    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds }) });
+    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds: editingAssetIds, markerType, markerText: select<HTMLInputElement>('#note-marker-text').value, ...(markerType === 'image' && selectedMarkerAssetId ? { markerAssetId: selectedMarkerAssetId } : {}) }) });
     const result = await response.json() as { note?: NoteRecord; error?: string };
     if (!response.ok) throw new Error(result.error || 'Не удалось сохранить заметку.');
     closeNoteDialog(); await refreshNotesList();
@@ -727,9 +809,9 @@ async function refreshNotesList() {
     const notes = (await response.json() as { notes: NoteListItem[] }).notes; notesList.replaceChildren();
     for (const note of notes) {
       const item = document.createElement('li'); item.className = 'note-entry';
-      const title = document.createElement('span'); title.className = 'note-entry-title'; title.textContent = `${note.title} · ${note.access === 'gm-only' ? 'ведущий' : note.access === 'selected-players' ? 'выбранные' : 'игроки'}`;
+      const title = document.createElement('span'); title.className = 'note-entry-title'; title.textContent = `${note.title} · ${note.access === 'gm-only' ? 'только ведущий' : note.access === 'selected-players' ? 'выбранные игроки' : 'все игроки'}`; title.title = note.title;
       const actions = document.createElement('div'); actions.className = 'note-entry-actions';
-      const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Открыть'; open.addEventListener('click', () => void openNote(note.id));
+      const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Просмотр'; open.addEventListener('click', () => void openNote(note.id));
       const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Править'; edit.addEventListener('click', async () => { try { const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { cache: 'no-store' }); if (res.ok) openNoteEditor((await res.json() as { note: NoteRecord }).note); } catch { showCanvasMessage('Не удалось загрузить заметку.', true); } });
       const place = document.createElement('button'); place.type = 'button'; place.textContent = note.markerId ? 'Переместить метку' : 'Поставить метку'; place.addEventListener('click', () => startNotePlacement(note.id));
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Удалить'; remove.addEventListener('click', async () => { if (!window.confirm(`Удалить заметку «${note.title}»?`)) return; const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' }); if (res.ok) void refreshNotesList(); });
@@ -882,19 +964,36 @@ select<HTMLButtonElement>('#note-save').addEventListener('click', () => void sav
 select<HTMLButtonElement>('#note-edit').addEventListener('click', async () => { if (!openNoteId) return; try { const response = await fetch(`/api/notes/${encodeURIComponent(openNoteId)}`, { cache: 'no-store' }); if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note); } catch { setNoteMessage('Не удалось загрузить заметку.'); } });
 select<HTMLButtonElement>('#note-place-marker').addEventListener('click', () => { if (openNoteId) { const id = openNoteId; closeNoteDialog(); startNotePlacement(id); } });
 select<HTMLSelectElement>('#note-access').addEventListener('change', (event) => { select<HTMLElement>('#note-participants').hidden = (event.currentTarget as HTMLSelectElement).value !== 'selected-players'; });
-select<HTMLInputElement>('#allow-player-stickers').addEventListener('change', (event) => void runCommand('settings:update', { changes: { allowPlayerStickers: (event.currentTarget as HTMLInputElement).checked } }));
+select<HTMLSelectElement>('#note-marker-type').addEventListener('change', updateMarkerEditorFields);
+select<HTMLButtonElement>('#note-add-image').addEventListener('click', () => openAssetPicker('attachments'));
+select<HTMLButtonElement>('#note-marker-image-pick').addEventListener('click', () => openAssetPicker('marker'));
+select<HTMLInputElement>('#note-image-upload').addEventListener('change', (event) => { void uploadNoteImageFiles(Array.from((event.currentTarget as HTMLInputElement).files || [])); (event.currentTarget as HTMLInputElement).value = ''; });
+select<HTMLButtonElement>('#asset-picker-close').addEventListener('click', () => assetPickerDialog.close());
+select<HTMLButtonElement>('#asset-picker-cancel').addEventListener('click', () => assetPickerDialog.close());
+select<HTMLButtonElement>('#asset-picker-library-mode').addEventListener('click', () => { select<HTMLElement>('#asset-picker-library').hidden = false; select<HTMLElement>('#asset-picker-upload').hidden = true; select<HTMLButtonElement>('#asset-picker-add').hidden = false; select<HTMLButtonElement>('#asset-picker-library-mode').classList.add('active'); select<HTMLButtonElement>('#asset-picker-upload-mode').classList.remove('active'); });
+select<HTMLButtonElement>('#asset-picker-upload-mode').addEventListener('click', () => { select<HTMLElement>('#asset-picker-library').hidden = true; select<HTMLElement>('#asset-picker-upload').hidden = false; select<HTMLButtonElement>('#asset-picker-add').hidden = true; select<HTMLButtonElement>('#asset-picker-library-mode').classList.remove('active'); select<HTMLButtonElement>('#asset-picker-upload-mode').classList.add('active'); });
+select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
+  const values = Array.from(select<HTMLElement>('#asset-picker-grid').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
+  if (assetPickerMode === 'marker') { if (values[0]) selectedMarkerAssetId = values[0]; updateMarkerEditorFields(); }
+  else editingAssetIds = [...new Set([...editingAssetIds, ...values])];
+  renderNoteAttachments(); assetPickerDialog.close();
+});
 select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
 select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => selectedMarkerId && void runCommand('note-marker:delete', { id: selectedMarkerId }));
-select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => {
-  const text = window.prompt('Текст стикера', 'Новая заметка'); if (!text?.trim() || !roomState) return;
-  const layer = identity?.role === 'gm' ? roomState.layers.find((entry) => entry.id === activeLayerId) : roomState.layers.find((entry) => entry.visible && !entry.locked && entry.audience === 'all-players');
-  if (!layer || layer.locked || !layer.visible) { showCanvasMessage('Нет доступного открытого слоя для стикера.', true); return; }
+select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => { select<HTMLTextAreaElement>('#sticker-new-text').value = ''; stickerCreateDialog.showModal(); });
+select<HTMLButtonElement>('#sticker-create-cancel').addEventListener('click', () => stickerCreateDialog.close());
+select<HTMLButtonElement>('#sticker-create-confirm').addEventListener('click', () => {
+  const text = select<HTMLTextAreaElement>('#sticker-new-text').value.trim(); if (!text || !roomState) return;
+  const layer = identity?.role === 'gm' ? roomState.layers.find((entry) => entry.id === activeLayerId && !entry.locked) : undefined;
+  if (identity?.role === 'gm' && !layer) { showCanvasMessage('Выберите незаблокированный слой для стикера.', true); return; }
   const x = stage ? clampWorld((stage.width() / 2 - stage.x()) / stage.scaleX()) : 0; const y = stage ? clampWorld((stage.height() / 2 - stage.y()) / stage.scaleY()) : 0;
-  void runCommand('sticker:create', { layerId: layer.id, text: text.trim(), x, y });
+  void runCommand('sticker:create', { ...(layer ? { layerId: layer.id } : {}), text, x, y, fontSize: Number(select<HTMLSelectElement>('#sticker-new-size').value), textColor: select<HTMLSelectElement>('#sticker-new-color').value });
+  stickerCreateDialog.close();
 });
 select<HTMLButtonElement>('#sticker-edit').addEventListener('click', () => { const sticker = roomState?.stickers.find((entry) => entry.id === selectedStickerId); if (!sticker) return; const text = window.prompt('Текст стикера', sticker.text); if (text?.trim()) void runCommand('sticker:update', { id: sticker.id, changes: { text: text.trim() } }); });
 select<HTMLSelectElement>('#sticker-bg').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { bgColor: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLSelectElement>('#sticker-text-color').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { textColor: (event.currentTarget as HTMLSelectElement).value } }));
+select<HTMLSelectElement>('#sticker-font-size').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { fontSize: Number((event.currentTarget as HTMLSelectElement).value) } }));
 select<HTMLButtonElement>('#sticker-duplicate').addEventListener('click', () => selectedStickerId && void runCommand('sticker:duplicate', { id: selectedStickerId }));
 select<HTMLButtonElement>('#sticker-delete').addEventListener('click', () => selectedStickerId && void runCommand('sticker:delete', { id: selectedStickerId }));
 select<HTMLButtonElement>('#layer-create').addEventListener('click', () => {
