@@ -43,7 +43,8 @@ import '../styles/global.css';
         <div class="topbar-center">
           <button id="zoom-reset" class="tool-button" type="button" title="Вернуть масштаб к 100%">100%</button>
           <button id="fit-board" class="tool-button" type="button">Показать всё</button>
-          <button id="dice-toggle" class="tool-button" type="button">Броски <span id="dice-new-count" class="dice-new-count" hidden></span></button>
+          <button id="dice-tools-toggle" class="tool-button" type="button" aria-controls="dice-tools-panel" aria-expanded="false">Инструменты бросков</button>
+          <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
           <span id="connection" class="status"><i></i><span>Подключение…</span></span>
         </div>
         <div class="topbar-actions">
@@ -91,8 +92,8 @@ import '../styles/global.css';
             <button id="marker-delete" class="danger" type="button">Удалить метку</button>
           </div>
           <div id="note-place-hint" class="canvas-message" role="status" hidden>Нажмите на доске, чтобы поставить метку заметки · Esc — отмена</div>
-          <aside id="dice-panel" class="dice-panel" aria-label="Броски кубиков" hidden>
-            <div class="dice-panel-heading"><div><p class="eyebrow">Общая история</p><h2>Броски</h2></div><button id="dice-close" class="icon-button" type="button" aria-label="Свернуть ленту бросков">−</button></div>
+          <aside id="dice-tools-panel" class="floating-dice-panel dice-tools-panel" aria-label="Инструменты бросков" hidden>
+            <div class="dice-panel-heading" data-panel-drag-handle><span class="panel-grip" aria-hidden="true">⠿</span><div class="panel-title"><p class="eyebrow">Игровые броски</p><h2>Инструменты</h2></div><button id="dice-tools-reset" class="icon-button panel-reset" type="button" title="Вернуть панель на место" aria-label="Вернуть панель инструментов на место">⌖</button><button id="dice-tools-close" class="icon-button" type="button" aria-label="Закрыть инструменты бросков">×</button></div>
             <div class="dice-room-system"><label for="room-system">Система комнаты</label><select id="room-system" disabled><option value="none">Без системы</option><option value="pbta-2d6">PbtA</option></select><button id="room-system-save" type="button" hidden>Применить</button></div>
             <section id="pbta-roll-controls" class="dice-roll-controls" hidden aria-label="Проверка PbtA">
               <h3>Проверка PbtA</h3>
@@ -107,15 +108,21 @@ import '../styles/global.css';
               <div class="free-dice-fields"><label for="free-count">Кубиков</label><input id="free-count" type="number" min="1" max="20" value="1" /><label for="free-sides">Тип</label><select id="free-sides"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>12</option><option>20</option><option>100</option></select></div>
               <button id="free-roll" class="secondary" type="button">Бросить</button>
             </section>
+          </aside>
+          <aside id="dice-history-panel" class="floating-dice-panel dice-history-panel" aria-label="История бросков" hidden>
+            <div class="dice-panel-heading" data-panel-drag-handle><span class="panel-grip" aria-hidden="true">⠿</span><div class="panel-title"><p class="eyebrow">Общая лента</p><h2>История бросков</h2></div><button id="dice-history-reset" class="icon-button panel-reset" type="button" title="Вернуть панель на место" aria-label="Вернуть историю бросков на место">⌖</button><button id="dice-history-close" class="icon-button" type="button" aria-label="Закрыть историю бросков">×</button></div>
             <ul id="dice-history" class="dice-history" aria-live="polite"></ul>
           </aside>
         </section>
 
-        <aside id="layers-panel" class="side-panel layers-panel gm-only" hidden>
-          <div class="panel-heading"><div><p class="eyebrow">Рабочее пространство</p><h2>Слои</h2></div><button id="layer-create" class="icon-button" type="button" aria-label="Создать слой">＋</button></div>
-          <p class="panel-note">Слои сверху списка отображаются поверх остальных.</p>
-          <ul id="layers-list" class="layers-list"></ul>
-        </aside>
+        <div id="layers-dock" class="layers-dock gm-only" hidden>
+          <aside id="layers-panel" class="side-panel layers-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Рабочее пространство</p><h2>Слои</h2></div><div class="layers-heading-actions"><button id="layer-create" class="icon-button" type="button" aria-label="Создать слой">＋</button><button id="layers-collapse" class="icon-button" type="button" aria-label="Свернуть панель слоёв" title="Свернуть панель">‹</button></div></div>
+            <p class="panel-note">Слои сверху списка отображаются поверх остальных.</p>
+            <ul id="layers-list" class="layers-list"></ul>
+          </aside>
+          <button id="layers-expand" class="layers-expand" type="button" aria-label="Развернуть панель слоёв" title="Развернуть слои" hidden>▤</button>
+        </div>
       </div>
 
       <aside id="library-panel" class="library-panel" hidden>

@@ -39,9 +39,12 @@ const stickerCreateDialog = select<HTMLDialogElement>('#sticker-create-dialog');
 const noteImageDropZone = select<HTMLElement>('#note-image-drop-zone');
 const noteImageUploadStatus = select<HTMLUListElement>('#note-image-upload-status');
 const notePlacementHint = select<HTMLElement>('#note-place-hint');
-const dicePanel = select<HTMLElement>('#dice-panel');
+const diceToolsPanel = select<HTMLElement>('#dice-tools-panel');
+const diceHistoryPanel = select<HTMLElement>('#dice-history-panel');
 const diceHistory = select<HTMLUListElement>('#dice-history');
 const diceNewCount = select<HTMLElement>('#dice-new-count');
+const layersPanel = select<HTMLElement>('#layers-panel');
+const layersExpandButton = select<HTMLButtonElement>('#layers-expand');
 const systemSelect = select<HTMLSelectElement>('#room-system');
 const systemSave = select<HTMLButtonElement>('#room-system-save');
 const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
@@ -100,7 +103,8 @@ let assetPickerMode: 'attachments' | 'marker' = 'attachments';
 let noteDropDepth = 0;
 let knownDiceRollIds: Set<string> | undefined;
 let unseenDiceRolls = 0;
-let dicePanelInitialized = false;
+let uiPreferencesParticipantId: string | undefined;
+let floatingPanelZ = 10;
 let pendingNoteUploads = 0;
 let cropMode = false;
 let camera = { x: 0, y: 0, scale: 1 };
@@ -631,15 +635,173 @@ function confirmCrop() {
   void runCommand('object:update', { id: item.id, changes: { crop: next } });
 }
 
+interface PanelPreference { version: 1; open: boolean; x: number | null; y: number | null }
+
+function uiStorageKey(participantId: string, panel: 'dice-tools' | 'dice-history' | 'layers'): string {
+  return `tabletop:ui:v1:${participantId}:${panel}`;
+}
+
+function readPanelPreference(participantId: string, panel: 'dice-tools' | 'dice-history'): PanelPreference | undefined {
+  try {
+    const value = JSON.parse(localStorage.getItem(uiStorageKey(participantId, panel)) || 'null') as Partial<PanelPreference> | null;
+    if (!value || value.version !== 1 || typeof value.open !== 'boolean') return undefined;
+    if ((value.x !== null && (typeof value.x !== 'number' || !Number.isFinite(value.x))) ||
+        (value.y !== null && (typeof value.y !== 'number' || !Number.isFinite(value.y)))) return undefined;
+    return { version: 1, open: value.open, x: value.x ?? null, y: value.y ?? null };
+  } catch { return undefined; }
+}
+
+function measureFloatingPanel(panel: HTMLElement): DOMRect {
+  const wasHidden = panel.hidden;
+  const oldVisibility = panel.style.visibility;
+  panel.hidden = false;
+  panel.style.visibility = 'hidden';
+  const rect = panel.getBoundingClientRect();
+  panel.hidden = wasHidden;
+  panel.style.visibility = oldVisibility;
+  return rect;
+}
+
+function clampFloatingPanel(panel: HTMLElement): void {
+  const rect = measureFloatingPanel(panel);
+  const width = rect.width || Math.min(350, Math.max(0, window.innerWidth - 24));
+  const height = rect.height || Math.min(420, Math.max(0, window.innerHeight - 24));
+  const currentX = Number.parseFloat(panel.style.left);
+  const currentY = Number.parseFloat(panel.style.top);
+  const x = Number.isFinite(currentX) ? currentX : 16;
+  const y = Number.isFinite(currentY) ? currentY : Math.max(16, window.innerHeight - height - 16);
+  panel.style.left = `${Math.max(0, Math.min(x, Math.max(0, window.innerWidth - width)))}px`;
+  panel.style.top = `${Math.max(0, Math.min(y, Math.max(0, window.innerHeight - height)))}px`;
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+}
+
+function saveFloatingPanel(panel: HTMLElement, participantId: string, key: 'dice-tools' | 'dice-history'): void {
+  const rect = panel.getBoundingClientRect();
+  const storedX = Number.parseFloat(panel.style.left);
+  const storedY = Number.parseFloat(panel.style.top);
+  const preference: PanelPreference = {
+    version: 1, open: !panel.hidden,
+    x: panel.hidden && Number.isFinite(storedX) ? storedX : rect.left,
+    y: panel.hidden && Number.isFinite(storedY) ? storedY : rect.top,
+  };
+  try { localStorage.setItem(uiStorageKey(participantId, key), JSON.stringify(preference)); } catch { /* Local UI preferences are optional. */ }
+}
+
+function setFloatingPanelOpen(panel: HTMLElement, key: 'dice-tools' | 'dice-history', open: boolean, persist = true): void {
+  panel.hidden = !open;
+  select<HTMLButtonElement>(key === 'dice-tools' ? '#dice-tools-toggle' : '#dice-history-toggle').setAttribute('aria-expanded', String(open));
+  if (open) {
+    panel.style.zIndex = String(++floatingPanelZ);
+    clampFloatingPanel(panel);
+  }
+  if (persist && identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
+  if (key === 'dice-history' && open) { unseenDiceRolls = 0; updateDiceBadge(); }
+}
+
+function resetFloatingPanelPosition(panel: HTMLElement, key: 'dice-tools' | 'dice-history', side: 'left' | 'right'): void {
+  const rect = measureFloatingPanel(panel);
+  const width = rect.width || Math.min(350, Math.max(0, window.innerWidth - 24));
+  const height = rect.height || Math.min(420, Math.max(0, window.innerHeight - 24));
+  panel.style.left = `${side === 'left' ? 16 : window.innerWidth - width - 16}px`;
+  panel.style.top = `${window.innerHeight - height - 16}px`;
+  panel.style.right = 'auto'; panel.style.bottom = 'auto';
+  clampFloatingPanel(panel);
+  if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
+}
+
+function restoreFloatingPanel(panel: HTMLElement, key: 'dice-tools' | 'dice-history', side: 'left' | 'right', participantId: string): void {
+  const preference = readPanelPreference(participantId, key);
+  const oldVisibility = panel.style.visibility;
+  panel.hidden = false;
+  panel.style.visibility = 'hidden';
+  const rect = panel.getBoundingClientRect();
+  const width = rect.width || Math.min(350, Math.max(0, window.innerWidth - 24));
+  const height = rect.height || Math.min(420, Math.max(0, window.innerHeight - 24));
+  const x = preference?.x ?? (side === 'left' ? 16 : window.innerWidth - width - 16);
+  const y = preference?.y ?? window.innerHeight - height - 16;
+  panel.style.left = `${x}px`;
+  panel.style.top = `${y}px`;
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+  panel.style.visibility = oldVisibility;
+  panel.hidden = !preference?.open;
+  select<HTMLButtonElement>(key === 'dice-tools' ? '#dice-tools-toggle' : '#dice-history-toggle').setAttribute('aria-expanded', String(!panel.hidden));
+  clampFloatingPanel(panel);
+}
+
+function saveLayerPanelPreference(collapsed: boolean): void {
+  if (!identity || identity.role !== 'gm') return;
+  try { localStorage.setItem(uiStorageKey(identity.participantId, 'layers'), JSON.stringify({ version: 1, collapsed })); } catch { /* Local UI preferences are optional. */ }
+}
+
+function setLayersCollapsed(collapsed: boolean, persist = true): void {
+  layersPanel.classList.toggle('is-collapsed', collapsed);
+  layersPanel.inert = collapsed;
+  layersExpandButton.hidden = !collapsed;
+  select<HTMLButtonElement>('#layers-collapse').setAttribute('aria-expanded', String(!collapsed));
+  if (persist) saveLayerPanelPreference(collapsed);
+}
+
+function setupParticipantUi(participantId: string): void {
+  if (!participantId || uiPreferencesParticipantId === participantId) return;
+  uiPreferencesParticipantId = participantId;
+  knownDiceRollIds = undefined;
+  unseenDiceRolls = 0;
+  restoreFloatingPanel(diceToolsPanel, 'dice-tools', 'left', participantId);
+  restoreFloatingPanel(diceHistoryPanel, 'dice-history', 'right', participantId);
+  updateDiceBadge();
+  if (identity?.role === 'gm') {
+    let collapsed = false;
+    try {
+      const stored = JSON.parse(localStorage.getItem(uiStorageKey(participantId, 'layers')) || 'null') as { version?: unknown; collapsed?: unknown } | null;
+      if (stored?.version === 1 && typeof stored.collapsed === 'boolean') collapsed = stored.collapsed;
+    } catch { /* Invalid preferences fall back to the expanded panel. */ }
+    setLayersCollapsed(collapsed, false);
+  }
+}
+
+function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dice-history'): void {
+  panel.addEventListener('pointerdown', () => { panel.style.zIndex = String(++floatingPanelZ); });
+  const handle = panel.querySelector<HTMLElement>('[data-panel-drag-handle]');
+  if (!handle) return;
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, input, select, textarea, a, [role="button"]'))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.style.zIndex = String(++floatingPanelZ);
+    clampFloatingPanel(panel);
+    const initial = panel.getBoundingClientRect();
+    const pointerX = event.clientX;
+    const pointerY = event.clientY;
+    handle.setPointerCapture(event.pointerId);
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      panel.style.left = `${initial.left + moveEvent.clientX - pointerX}px`;
+      panel.style.top = `${initial.top + moveEvent.clientY - pointerY}px`;
+      clampFloatingPanel(panel);
+    };
+    const finish = (finishEvent: PointerEvent) => {
+      if (finishEvent.pointerId !== event.pointerId) return;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', finish);
+      handle.removeEventListener('pointercancel', finish);
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+  });
+}
+
 function updateBoard(state: RoomMessage) {
+  if (identity) setupParticipantUi(identity.participantId);
   const previousIds = knownDiceRollIds;
   const nextIds = new Set((state.diceRolls || []).map((roll) => roll.id));
   if (previousIds) {
     const added = [...nextIds].filter((id) => !previousIds.has(id)).length;
-    if (added && dicePanel.hidden) { unseenDiceRolls += added; updateDiceBadge(); }
-  } else if (!dicePanelInitialized) {
-    dicePanel.hidden = localStorage.getItem(`tabletop-dice-panel:${location.host}`) !== 'open';
-    dicePanelInitialized = true;
+    if (added && diceHistoryPanel.hidden) { unseenDiceRolls += added; updateDiceBadge(); }
   }
   knownDiceRollIds = nextIds;
   roomState = state;
@@ -1152,15 +1314,22 @@ select<HTMLButtonElement>('#leave').addEventListener('click', async () => {
   closeWorkspace('Вы вышли из комнаты.');
 });
 
-select<HTMLButtonElement>('#dice-toggle').addEventListener('click', () => {
-  dicePanel.hidden = !dicePanel.hidden;
-  localStorage.setItem(`tabletop-dice-panel:${location.host}`, dicePanel.hidden ? 'closed' : 'open');
-  if (!dicePanel.hidden) { unseenDiceRolls = 0; updateDiceBadge(); }
+select<HTMLButtonElement>('#dice-tools-toggle').addEventListener('click', () => setFloatingPanelOpen(diceToolsPanel, 'dice-tools', diceToolsPanel.hidden));
+select<HTMLButtonElement>('#dice-history-toggle').addEventListener('click', () => setFloatingPanelOpen(diceHistoryPanel, 'dice-history', diceHistoryPanel.hidden));
+select<HTMLButtonElement>('#dice-tools-close').addEventListener('click', () => setFloatingPanelOpen(diceToolsPanel, 'dice-tools', false));
+select<HTMLButtonElement>('#dice-history-close').addEventListener('click', () => setFloatingPanelOpen(diceHistoryPanel, 'dice-history', false));
+select<HTMLButtonElement>('#dice-tools-reset').addEventListener('click', () => resetFloatingPanelPosition(diceToolsPanel, 'dice-tools', 'left'));
+select<HTMLButtonElement>('#dice-history-reset').addEventListener('click', () => resetFloatingPanelPosition(diceHistoryPanel, 'dice-history', 'right'));
+makeFloatingPanelDraggable(diceToolsPanel, 'dice-tools');
+makeFloatingPanelDraggable(diceHistoryPanel, 'dice-history');
+window.addEventListener('resize', () => {
+  for (const [panel, key] of [[diceToolsPanel, 'dice-tools'], [diceHistoryPanel, 'dice-history']] as const) {
+    clampFloatingPanel(panel);
+    if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
+  }
 });
-select<HTMLButtonElement>('#dice-close').addEventListener('click', () => {
-  dicePanel.hidden = true;
-  localStorage.setItem(`tabletop-dice-panel:${location.host}`, 'closed');
-});
+select<HTMLButtonElement>('#layers-collapse').addEventListener('click', () => setLayersCollapsed(true));
+layersExpandButton.addEventListener('click', () => setLayersCollapsed(false));
 systemSelect.addEventListener('change', () => { systemSave.hidden = systemSelect.value === (roomState?.activeSystem?.id ?? 'none'); });
 systemSave.addEventListener('click', () => {
   if (identity?.role !== 'gm') return;
