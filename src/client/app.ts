@@ -4,6 +4,7 @@ import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint }
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
+import { shouldHideGmOnlyElement } from '../shared/role-ui.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -158,11 +159,20 @@ function showCanvasMessage(message: string, error = false) {
   messageTimer = window.setTimeout(() => canvasMessage.classList.remove('visible'), 3600);
 }
 
+function applyGmOnlyVisibility(role: AppIdentity['role']): void {
+  for (const element of document.querySelectorAll<HTMLElement>('.gm-only')) {
+    element.hidden = shouldHideGmOnlyElement(role, {
+      manual: element.dataset.manualVisibility === 'true',
+      hidden: element.hidden,
+    });
+  }
+}
+
 function login(role: AppIdentity['role'], name: string) {
   identity = { participantId: '', role, name };
   loginShell.hidden = true;
   workspace.hidden = false;
-  for (const element of document.querySelectorAll<HTMLElement>('.gm-only')) element.hidden = role !== 'gm';
+  applyGmOnlyVisibility(role);
   if (!stage) setupStage();
   connect();
 }
@@ -205,7 +215,7 @@ function connect() {
     identity = message.identity;
     roomName.textContent = typeof message.roomName === 'string' ? message.roomName : 'Игровая комната';
     identityLabel.textContent = `${identity.name} · ${identity.role === 'gm' ? 'Ведущий' : 'Игрок'}`;
-    for (const element of document.querySelectorAll<HTMLElement>('.gm-only')) element.hidden = identity.role !== 'gm';
+    applyGmOnlyVisibility(identity.role);
     updateBoard(message as unknown as RoomMessage);
   });
   connection.addEventListener('close', (event) => {
@@ -335,8 +345,8 @@ function setupStage() {
       notePlacementId = undefined;
       notePlacementHint.hidden = true;
       const existingMarker = roomState?.noteMarkers.find((marker) => marker.noteId === noteId);
-      if (existingMarker) void runCommand('note-marker:update', { id: existingMarker.id, changes: { layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) } });
-      else void runCommand('note-marker:create', { noteId, layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) });
+      if (existingMarker) void runCommand('note-marker:update', { id: existingMarker.id, changes: { layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) } }).then(refreshNotesListIfVisible);
+      else void runCommand('note-marker:create', { noteId, layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) }).then(refreshNotesListIfVisible);
       canvasContainer.style.cursor = '';
       return;
     }
@@ -984,8 +994,6 @@ function updateBoard(state: RoomMessage) {
     }
   }
   drawObjects();
-  if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
-  if (openNoteId && noteDialog.open && noteDialogMode === 'view') void openNote(openNoteId, false);
 }
 
 function updateDiceBadge() {
@@ -1606,7 +1614,7 @@ function setNoteMessage(message: string) { select<HTMLElement>('#note-message').
 function clearNoteContent() { select<HTMLElement>('#note-view-body').textContent = ''; select<HTMLElement>('#note-view-images').replaceChildren(); }
 function closeNoteDialog() { noteRequestSequence += 1; noteDialog.close(); openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); }
 
-async function openNote(id: string, show = true) {
+async function openNote(id: string) {
   const requestSequence = ++noteRequestSequence;
   try {
     const response = await fetch(`/api/notes/${encodeURIComponent(id)}`, { cache: 'no-store' });
@@ -1639,7 +1647,7 @@ async function openNote(id: string, show = true) {
     select<HTMLButtonElement>('#note-place-marker').hidden = false;
     const edit = select<HTMLButtonElement>('#note-edit'); edit.hidden = identity?.role !== 'gm';
     setNoteMessage('');
-    if (show && !noteDialog.open) noteDialog.showModal();
+    if (!noteDialog.open) noteDialog.showModal();
   } catch { setNoteMessage('Не удалось загрузить заметку. Проверьте соединение.'); }
 }
 
@@ -1910,6 +1918,10 @@ function startNotePlacement(id: string) {
   notePlacementId = id; notePlacementHint.hidden = false; canvasContainer.style.cursor = 'crosshair';
 }
 
+function refreshNotesListIfVisible(): void {
+  if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
+}
+
 async function refreshNotesList() {
   try {
     const response = await fetch('/api/notes', { cache: 'no-store' }); if (!response.ok) return;
@@ -2175,7 +2187,7 @@ select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
   renderNoteAttachments(); assetPickerDialog.close();
 });
 select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
-select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => selectedMarkerId && void runCommand('note-marker:delete', { id: selectedMarkerId }));
+select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => { if (selectedMarkerId) void runCommand('note-marker:delete', { id: selectedMarkerId }).then(refreshNotesListIfVisible); });
 select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => { select<HTMLTextAreaElement>('#sticker-new-text').value = ''; stickerCreateDialog.showModal(); });
 select<HTMLButtonElement>('#sticker-create-cancel').addEventListener('click', () => stickerCreateDialog.close());
 select<HTMLButtonElement>('#sticker-create-confirm').addEventListener('click', () => {

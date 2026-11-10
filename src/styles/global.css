@@ -26,9 +26,6 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #
 button { height: 45px; margin-top: 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
 button:hover { background: #355744; }
 .message { min-height: 18px; margin: 4px 0 0; color: #a13d36; font-size: 13px; }
-.room { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 2px; }
-.room-heading { display: flex; justify-content: space-between; align-items: end; gap: 12px; }
-.room-heading .eyebrow { margin-top: 22px; }
 h2 { margin-bottom: 0; font-size: 21px; }
 .status { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 2px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .status i { width: 8px; height: 8px; border-radius: 50%; background: #d39a42; }
@@ -36,9 +33,6 @@ h2 { margin-bottom: 0; font-size: 21px; }
 .status.offline i { background: #b8564c; }
 .identity { margin: 8px 0 22px; color: var(--muted); font-size: 13px; }
 h3 { margin-bottom: 8px; font-size: 13px; }
-.participants { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
-.participants li { display: flex; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.role-badge { color: var(--muted); font-size: 12px; }
 button.secondary { width: 100%; background: #f0f2ee; color: #39443d; }
 button.secondary:hover { background: #e7ebe5; }
 footer { position: fixed; bottom: 20px; color: #8a928c; font-size: 11px; }
@@ -119,14 +113,13 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .note-dialog-heading { display: flex; justify-content: space-between; align-items: start; gap: 14px; margin-bottom: 14px; }
 .note-dialog-heading h2 { font-size: 20px; }
 .privacy-indicator { display: inline-block; margin: 0 0 5px; padding: 3px 7px; border-radius: 5px; background: #f1f2ee; color: #5c665e; font-size: 10px; }
-.privacy-indicator.private { background: #fff1d8; color: #855719; }
 .note-editor-fields { display: grid; gap: 7px; }
 .note-editor-fields > label { margin: 6px 0 0; }
 .note-editor-fields textarea { width: 100%; min-height: 140px; padding: 10px; border: 1px solid #d8ded7; border-radius: 8px; color: inherit; font: inherit; line-height: 1.5; resize: vertical; }
 .note-participants, .note-assets { margin: 8px 0 0; padding: 10px; border: 1px solid #e2e6df; border-radius: 8px; }
 .note-participants legend, .note-assets legend { padding: 0 4px; color: #667168; font-size: 11px; }
-.note-participant-row, .note-asset-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; color: #4d5750; font-size: 12px; }
-.note-participant-row input, .note-asset-row input { width: 15px; height: 15px; margin: 0; }
+.note-participant-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; color: #4d5750; font-size: 12px; }
+.note-participant-row input { width: 15px; height: 15px; margin: 0; }
 .note-view-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 9px; }
 .note-view-images img { width: 100%; max-height: 300px; object-fit: contain; border: 1px solid #e3e7e1; border-radius: 7px; background: #f7f8f5; }
 .note-view-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #343c36; font-size: 14px; line-height: 1.65; }
@@ -137,7 +130,6 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .note-entry-title { min-width: 0; overflow: hidden; color: #404941; font-size: 12px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 .note-entry-actions { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
 .note-entry-actions button { min-width: 0; height: 27px; margin: 0; padding: 0 7px; font-size: 10px; white-space: nowrap; }
-.note-asset-row img { width: 44px; height: 34px; object-fit: contain; border-radius: 4px; background: #f2f4f0; }
 .note-selected-assets { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 7px; }
 .note-attachment-thumb { position: relative; width: 76px; height: 58px; }
 .note-attachment-thumb img { width: 100%; height: 100%; object-fit: contain; border: 1px solid #e2e6df; border-radius: 6px; background: #f5f6f3; }
@@ -219,7 +211,6 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .sheet-catalog-character { overflow: hidden; color: #354239; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-catalog-action { width: auto; height: 28px; margin: 0; padding: 0 8px; font-size: 10px; white-space: nowrap; }
 .sheet-catalog-action:disabled { background: #eef0ec; color: #8b938d; cursor: default; }
-.sheet-catalog-empty { align-self: center; color: #a4aba5; font-size: 14px; }
 .sheet-catalog-assign { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding-top: 5px; border-top: 1px dashed #e7ebe6; }
 .sheet-catalog-assign select { min-width: 96px; flex: 1; height: 28px; padding: 0 6px; font-size: 10px; }
 .floating-sheet-panel { position: fixed; z-index: 10; display: flex; flex-direction: column; width: min(470px, calc(100vw - 24px)); max-height: min(84vh, 900px); overflow: hidden; border: 1px solid #d5ddd5; border-radius: 12px; background: #fffffff8; box-shadow: 0 12px 40px #23372b26; }
@@ -305,9 +296,4 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .sheet-ability-editor { display: grid; gap: 7px; margin-top: 9px; padding: 10px; border: 1px solid #e4e8e2; border-radius: 7px; background: #fafbf9; }
 .sheet-portrait-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .sheet-portrait-actions button { width: fit-content; height: 31px; margin: 0; padding: 0 10px; font-size: 11px; }
-.note-marker { cursor: pointer; }
-.sticker-background-butter { fill: #f2e6b8; }
-.sticker-background-rose { fill: #f1d8d4; }
-.sticker-background-sky { fill: #d9e8ed; }
-.sticker-background-sage { fill: #dce8d9; }
 @media (max-width: 900px) { .topbar { padding: 0 10px; gap: 6px; } .topbar-brand, .topbar-actions { min-width: unset; } .topbar-center { gap: 5px; } .topbar-center .status { display: none; } .side-panel { width: 235px; flex-basis: 235px; } .sheet-characteristics { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); } }
