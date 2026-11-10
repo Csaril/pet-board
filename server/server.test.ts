@@ -265,6 +265,47 @@ test('GM and two player sessions connect over WebSocket and a player session can
   }
 });
 
+test('WebSocket requires an allowed Origin and an authenticated session', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-board-ws-origin-'));
+  const baseConfig: AppConfig = {
+    host: '127.0.0.1', port: 0, dataDir, roomName: 'Campaign',
+    roomCode: 'K7M2R9TX', gmPassword: 'quiet-forest', sessionDays: 30,
+    cookieSecure: false, maxUploadBytes: 25 * 1024 * 1024,
+  };
+  const publicOrigin = 'https://demo.ngrok-free.app';
+  const store = new RoomStore(dataDir, baseConfig.roomName);
+  const app = await buildServer({ config: { ...baseConfig, publicOrigins: [publicOrigin] }, store, logger: false });
+  const sockets: WebSocket[] = [];
+  try {
+    const baseUrl = await app.listen({ host: '127.0.0.1', port: 0 });
+    const host = new URL(baseUrl).host;
+    const login = await app.inject({
+      method: 'POST', url: '/api/session', headers: { origin: publicOrigin, host },
+      payload: { name: 'Keeper', role: 'gm', roomCode: baseConfig.roomCode, gmPassword: baseConfig.gmPassword },
+    });
+    assert.equal(login.statusCode, 200);
+    const cookie = (login.headers['set-cookie'] as string).split(';')[0];
+
+    const rejected = (origin: string | undefined, headers: Record<string, string> = {}): Promise<{ code: number; reason: string }> => new Promise((resolve, reject) => {
+      const socket = new WebSocket(`ws://${host}/ws`, { headers: { ...(origin ? { origin } : {}), ...headers } });
+      sockets.push(socket);
+      socket.once('error', reject);
+      socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+
+    assert.deepEqual(await rejected('https://attacker.invalid', { cookie }), { code: 1008, reason: 'Origin not allowed' });
+    assert.deepEqual(await rejected(publicOrigin), { code: 1008, reason: 'Authentication required' });
+  } finally {
+    await Promise.all(sockets.map((socket) => new Promise<void>((resolve) => {
+      if (socket.readyState === WebSocket.CLOSED) return resolve();
+      socket.once('close', () => resolve());
+      socket.close();
+    })));
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('image upload deduplicates content and asset reads follow the current board projection', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-board-upload-'));
   const config: AppConfig = {
@@ -336,6 +377,64 @@ test('image upload deduplicates content and asset reads follow the current board
     const playerAssetId = playerUpload.json().asset.id as string;
     assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${playerAssetId}`, headers: { cookie: playerCookie } })).statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: `/api/assets/${playerAssetId}`, headers: { cookie: gmCookie } })).statusCode, 200);
+  } finally {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('configured public origin works through ngrok while spoofed forwarded headers are ignored by default', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-board-origin-'));
+  const baseConfig: AppConfig = {
+    host: '127.0.0.1', port: 0, dataDir, roomName: 'Campaign',
+    roomCode: 'K7M2R9TX', gmPassword: 'quiet-forest', sessionDays: 30,
+    cookieSecure: true, maxUploadBytes: 25 * 1024 * 1024,
+  };
+  const publicOrigin = 'https://demo.ngrok-free.app';
+  const store = new RoomStore(dataDir, baseConfig.roomName);
+  const app = await buildServer({ config: { ...baseConfig, publicOrigins: [publicOrigin] }, store, logger: false });
+  const payload = { name: 'Ari', role: 'player', roomCode: baseConfig.roomCode };
+  try {
+    const publicLogin = await app.inject({
+      method: 'POST', url: '/api/session', headers: { origin: publicOrigin, host: '127.0.0.1:4321' }, payload,
+    });
+    assert.equal(publicLogin.statusCode, 200);
+    assert.match(publicLogin.headers['set-cookie'] as string, /; Secure/);
+    const foreignOrigin = await app.inject({
+      method: 'POST', url: '/api/session', headers: { origin: 'https://attacker.invalid' }, payload,
+    });
+    assert.equal(foreignOrigin.statusCode, 403);
+
+    const spoofed = await app.inject({
+      method: 'POST', url: '/api/session',
+      headers: { origin: 'https://other.ngrok-free.app', host: '127.0.0.1:4321', 'x-forwarded-host': 'other.ngrok-free.app', 'x-forwarded-proto': 'https' },
+      payload,
+    });
+    assert.equal(spoofed.statusCode, 403);
+  } finally {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('trusted proxy uses forwarded HTTPS headers only when explicitly enabled', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-board-proxy-'));
+  const baseConfig: AppConfig = {
+    host: '127.0.0.1', port: 0, dataDir, roomName: 'Campaign',
+    roomCode: 'K7M2R9TX', gmPassword: 'quiet-forest', sessionDays: 30,
+    cookieSecure: true, maxUploadBytes: 25 * 1024 * 1024,
+  };
+  const publicOrigin = 'https://demo.ngrok-free.app';
+  const store = new RoomStore(dataDir, baseConfig.roomName);
+  const app = await buildServer({ config: { ...baseConfig, trustProxy: true }, store, logger: false });
+  try {
+    const login = await app.inject({
+      method: 'POST', url: '/api/session',
+      headers: { origin: publicOrigin, host: '127.0.0.1:4321', 'x-forwarded-host': 'demo.ngrok-free.app', 'x-forwarded-proto': 'https' },
+      payload: { name: 'Ari', role: 'player', roomCode: baseConfig.roomCode },
+    });
+    assert.equal(login.statusCode, 200);
+    assert.match(login.headers['set-cookie'] as string, /; Secure/);
   } finally {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

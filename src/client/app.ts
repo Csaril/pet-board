@@ -2,7 +2,7 @@ import Konva from 'konva';
 import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
-import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
+import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
@@ -806,7 +806,7 @@ function restoreSheetPanelPreference(participantId: string): void {
   pendingSheetRestoreId = preference?.open && preference.sheetId ? preference.sheetId : undefined;
 }
 
-function positionSheetRollPanel(): void {
+function defaultSheetRollPosition(): { x: number; y: number; width: number; height: number } {
   const anchor = sheetPanel.hidden ? undefined : sheetPanel.getBoundingClientRect();
   const rect = measureFloatingPanel(sheetRollPanel);
   const width = rect.width || Math.min(330, Math.max(0, window.innerWidth - 24));
@@ -814,11 +814,37 @@ function positionSheetRollPanel(): void {
   let x = anchor ? anchor.right + 10 : window.innerWidth - width - 20;
   if (anchor && x + width > window.innerWidth - 8) x = anchor.left - width - 10;
   const y = anchor ? anchor.top + 12 : Math.max(16, (window.innerHeight - height) / 2);
-  const position = clampFloatingPosition(x, y, width, height, window.innerWidth, window.innerHeight);
+  return { ...clampFloatingPosition(x, y, width, height, window.innerWidth, window.innerHeight), width, height };
+}
+
+function saveSheetRollPanelPreference(): void {
+  if (!identity) return;
+  const rect = sheetRollPanel.getBoundingClientRect();
+  const storedX = Number.parseFloat(sheetRollPanel.style.left);
+  const storedY = Number.parseFloat(sheetRollPanel.style.top);
+  writeSheetRollPanelPreference(localStorage, identity.participantId,
+    Number.isFinite(storedX) ? storedX : rect.left,
+    Number.isFinite(storedY) ? storedY : rect.top);
+}
+
+function positionSheetRollPanel(useStoredPosition = true): void {
+  const stored = useStoredPosition && identity
+    ? readSheetRollPanelPreference(localStorage, identity.participantId)
+    : undefined;
+  const fallback = defaultSheetRollPosition();
+  const position = stored
+    ? clampFloatingPosition(stored.x, stored.y, fallback.width, fallback.height, window.innerWidth, window.innerHeight)
+    : fallback;
   sheetRollPanel.style.left = `${position.x}px`;
   sheetRollPanel.style.top = `${position.y}px`;
   sheetRollPanel.style.right = 'auto';
   sheetRollPanel.style.bottom = 'auto';
+}
+
+function resetSheetRollPanelPosition(): void {
+  if (identity) writeSheetRollPanelPreference(localStorage, identity.participantId, null, null);
+  positionSheetRollPanel(false);
+  raiseSheetRollPanel();
 }
 
 function raiseSheetRollPanel(): void {
@@ -875,19 +901,19 @@ function setupParticipantUi(participantId: string): void {
   }
 }
 
-function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dice-history' | 'sheet'): void {
-  panel.addEventListener('pointerdown', () => {
+function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dice-history' | 'sheet' | 'sheet-roll'): void {
+  const bringToFront = () => {
     panel.style.zIndex = String(++floatingPanelZ);
-    if (key === 'sheet') raiseSheetRollPanel();
-  });
+    if (key === 'sheet' || key === 'sheet-roll') raiseSheetRollPanel();
+  };
+  panel.addEventListener('pointerdown', bringToFront);
   const handle = panel.querySelector<HTMLElement>('[data-panel-drag-handle]');
   if (!handle) return;
   handle.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, input, select, textarea, a, [role="button"]'))) return;
     event.preventDefault();
     event.stopPropagation();
-    panel.style.zIndex = String(++floatingPanelZ);
-    if (key === 'sheet') raiseSheetRollPanel();
+    bringToFront();
     clampFloatingPanel(panel);
     const initial = panel.getBoundingClientRect();
     const pointerX = event.clientX;
@@ -906,6 +932,7 @@ function makeFloatingPanelDraggable(panel: HTMLElement, key: 'dice-tools' | 'dic
       handle.removeEventListener('pointercancel', finish);
       if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
       if (key === 'sheet') saveSheetPanelPreference();
+      else if (key === 'sheet-roll') saveSheetRollPanelPreference();
       else if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
     };
     handle.addEventListener('pointermove', move);
@@ -2055,6 +2082,7 @@ select<HTMLButtonElement>('#sheets-close').addEventListener('click', () => {
 });
 select<HTMLButtonElement>('#sheet-close').addEventListener('click', closeSheetPanel);
 select<HTMLButtonElement>('#sheet-roll-close').addEventListener('click', closeSheetRollPanel);
+select<HTMLButtonElement>('#sheet-roll-reset').addEventListener('click', resetSheetRollPanelPosition);
 sheetCollapse.addEventListener('click', () => setSheetCollapsed(!sheetPanel.classList.contains('is-collapsed')));
 sheetEditToggle.addEventListener('click', () => {
   sheetDialogMode = toggleSheetMode(sheetDialogMode);
@@ -2072,6 +2100,7 @@ pbtaActor.addEventListener('change', () => {
 makeFloatingPanelDraggable(diceToolsPanel, 'dice-tools');
 makeFloatingPanelDraggable(diceHistoryPanel, 'dice-history');
 makeFloatingPanelDraggable(sheetPanel, 'sheet');
+makeFloatingPanelDraggable(sheetRollPanel, 'sheet-roll');
 window.addEventListener('resize', () => {
   for (const [panel, key] of [[diceToolsPanel, 'dice-tools'], [diceHistoryPanel, 'dice-history']] as const) {
     clampFloatingPanel(panel);
@@ -2081,7 +2110,10 @@ window.addEventListener('resize', () => {
     clampFloatingPanel(sheetPanel);
     saveSheetPanelPreference();
   }
-  if (!sheetRollPanel.hidden) positionSheetRollPanel();
+  if (!sheetRollPanel.hidden) {
+    clampFloatingPanel(sheetRollPanel);
+    saveSheetRollPanelPreference();
+  }
 });
 select<HTMLButtonElement>('#layers-collapse').addEventListener('click', () => setLayersCollapsed(true));
 layersExpandButton.addEventListener('click', () => setLayersCollapsed(false));

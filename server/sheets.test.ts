@@ -9,8 +9,8 @@ import WebSocket from 'ws';
 import type { CharacterSheet } from '../src/shared/board.js';
 import {
   buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned,
-  readCollapsedAbilities, readSheetPanelPreference, setAbilityCollapsed, sheetPanelStorageKey, toggleSheetMode,
-  writeSheetPanelPreference,
+  readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed,
+  sheetPanelStorageKey, sheetRollPanelStorageKey, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference,
 } from '../src/shared/sheet-ui.js';
 import type { AppConfig } from './config.js';
 import { buildServer } from './index.js';
@@ -282,6 +282,27 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
       assert.notEqual(sheetPanelStorageKey('participant-a'), sheetPanelStorageKey('participant-b'));
       assert.equal(readSheetPanelPreference(storage, 'participant-a')!.x, 10);
       assert.equal(readSheetPanelPreference(storage, 'participant-b')!.y, 40);
+    });
+
+    await t.test('16a. Окно броска перетаскивается, сбрасывается и хранит позицию отдельно для каждого пользователя', () => {
+      assert.match(indexSource, /class="sheet-roll-heading" data-panel-drag-handle/);
+      assert.match(indexSource, /id="sheet-roll-reset"/);
+      assert.match(clientSource, /makeFloatingPanelDraggable\(sheetRollPanel, 'sheet-roll'\)/);
+      assert.match(styleSource, /\.sheet-roll-heading\[data-panel-drag-handle\]/);
+      const values = new Map<string, string>();
+      const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+      assert.equal(readSheetRollPanelPreference(storage, 'participant-a'), undefined);
+      writeSheetRollPanelPreference(storage, 'participant-a', 210, 140);
+      assert.deepEqual(readSheetRollPanelPreference(storage, 'participant-a'), { x: 210, y: 140 });
+      writeSheetRollPanelPreference(storage, 'participant-a', null, null);
+      assert.equal(readSheetRollPanelPreference(storage, 'participant-a'), undefined);
+      assert.notEqual(sheetRollPanelStorageKey('participant-a'), sheetRollPanelStorageKey('participant-b'));
+    });
+
+    await t.test('16b. Поля характеристик имеют достаточную ширину и не сжимаются', () => {
+      assert.match(styleSource, /grid-template-columns: repeat\(auto-fit, minmax\(148px, 1fr\)\)/);
+      assert.match(styleSource, /\.sheet-stepper input \{[^}]*min-width: 56px[^}]*flex: 1 1 56px[^}]*appearance: textfield/s);
+      assert.match(styleSource, /font-variant-numeric: tabular-nums/);
     });
 
     await t.test('17. Камера доски не перемещается при перетаскивании листа', () => {

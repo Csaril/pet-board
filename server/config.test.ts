@@ -20,3 +20,15 @@ test('legacy room codes remain usable without rewriting the existing .env', () =
   const config = loadConfig(env('legacy-room1', 'quiet-forest'));
   assert.equal(config.roomCode, 'legacy-room1');
 });
+
+test('public origins and proxy trust are opt-in and validated', () => {
+  const base = env('K7M2R9TX', 'quiet-forest');
+  const config = loadConfig({ ...base, PUBLIC_ORIGIN: 'https://demo.ngrok-free.app/, http://localhost:4321', TRUST_PROXY: 'true' });
+  assert.deepEqual(config.publicOrigins, ['https://demo.ngrok-free.app', 'http://localhost:4321']);
+  assert.equal(config.trustProxy, true);
+  assert.deepEqual(loadConfig(base).publicOrigins, []);
+  assert.equal(loadConfig(base).trustProxy, false);
+  assert.throws(() => loadConfig({ ...base, PUBLIC_ORIGIN: 'https://example.test/path' }), /PUBLIC_ORIGIN/);
+  assert.throws(() => loadConfig({ ...base, PUBLIC_ORIGIN: 'javascript:alert(1)' }), /PUBLIC_ORIGIN/);
+  assert.throws(() => loadConfig({ ...base, TRUST_PROXY: 'yes' }), /TRUST_PROXY/);
+});

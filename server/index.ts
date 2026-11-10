@@ -1,10 +1,10 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { createReadStream, mkdirSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomInt, randomUUID } from 'node:crypto';
@@ -49,23 +49,57 @@ function parseNotePayload(input: unknown, store: RoomStore): { title: string; bo
   return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds, markerType, markerText: markerText.trim(), ...(markerAssetId ? { markerAssetId } : {}) };
 }
 
-function isSameOrigin(origin: string | undefined, host: string | undefined): boolean {
-  if (!origin || !host) return false;
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw?.split(',')[0]?.trim() || undefined;
+}
+
+function normalizeOrigin(value: string): string | undefined {
   try {
-    const parsed = new URL(origin);
-    const requestHost = new URL(`${parsed.protocol}//${host}`);
-    const defaultPort = parsed.protocol === 'https:' ? '443' : '80';
-    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
-      !requestHost.username && !requestHost.password &&
-      parsed.hostname.toLowerCase() === requestHost.hostname.toLowerCase() &&
-      (parsed.port || defaultPort) === (requestHost.port || defaultPort);
-  } catch { return false; }
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return undefined;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== '/' && parsed.pathname !== '')) return undefined;
+    return parsed.origin.toLowerCase();
+  } catch { return undefined; }
+}
+
+function requestOrigin(
+  headers: Record<string, string | string[] | undefined>,
+  protocol: string,
+  trustProxy: boolean,
+): string | undefined {
+  const host = trustProxy ? firstHeader(headers['x-forwarded-host']) ?? headers.host : headers.host;
+  if (!host) return undefined;
+  const rawProtocol = trustProxy ? firstHeader(headers['x-forwarded-proto']) ?? protocol : protocol;
+  if (rawProtocol !== 'https' && rawProtocol !== 'http') return undefined;
+  return normalizeOrigin(`${rawProtocol}://${host}`);
+}
+
+/**
+ * Compares the browser Origin with the direct request host and with explicitly
+ * configured public origins. X-Forwarded-* headers are ignored unless
+ * TRUST_PROXY is enabled, so a random client cannot spoof its own Origin.
+ */
+function isAllowedOrigin(
+  origin: string | string[] | undefined,
+  headers: Record<string, string | string[] | undefined>,
+  protocol: string,
+  config: AppConfig,
+): boolean {
+  const rawOrigin = firstHeader(origin);
+  const normalized = rawOrigin ? normalizeOrigin(rawOrigin) : undefined;
+  if (!normalized) return false;
+  const direct = requestOrigin(headers, protocol, config.trustProxy === true);
+  if (direct && normalized === direct) return true;
+  return (config.publicOrigins ?? []).includes(normalized);
 }
 
 export async function buildServer(options?: { config?: AppConfig; store?: RoomStore; logger?: boolean; randomInt?: (min: number, max: number) => number }): Promise<FastifyInstance> {
   const config = options?.config ?? loadConfig();
   const store = options?.store ?? new RoomStore(config.dataDir, config.roomName);
-  const app = Fastify({ logger: options?.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024 });
+  const app = Fastify({ logger: options?.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024, trustProxy: config.trustProxy === true });
+  const originAllowed = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }): boolean =>
+    isAllowedOrigin(request.headers.origin, request.headers, request.protocol, config);
   const sockets = new Map<string, Set<WebSocket>>();
   const secureRandomInt = options?.randomInt ?? randomInt;
   const distDir = resolve(process.cwd(), 'dist');
@@ -84,6 +118,16 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     return identity ? { sessionId, identity } : undefined;
   };
   const cookieOptions = { path: COOKIE_PATH, httpOnly: true, sameSite: 'strict' as const, secure: config.cookieSecure };
+  const requestIsSecure = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }): boolean => {
+    if (request.protocol === 'https') return true;
+    try { return Boolean(request.headers.origin && new URL(String(request.headers.origin)).protocol === 'https:'); }
+    catch { return false; }
+  };
+  /** Secure is added only when the current request really arrives over HTTPS (ngrok), while local HTTP verification still works. */
+  const sessionCookieOptions = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }) => ({
+    ...cookieOptions,
+    secure: config.cookieSecure && requestIsSecure(request),
+  });
   const sendState = (): void => {
     const participants = [...sockets.keys()].flatMap((sessionId) => {
       const identity = store.getSession(sessionId);
@@ -144,7 +188,9 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       actor = { participantId: original.actorId, name: original.actorName, role: 'player' };
     } else if (identity.role === 'gm') {
       if (typeof command.actorId !== 'string' || !store.isPlayerParticipant(command.actorId)) throw new BoardCommandError('Выберите игрока, за которого выполняется бросок.');
-      actor = store.getSession(command.actorId)!;
+      const target = store.getSession(command.actorId);
+      if (!target || target.role !== 'player') throw new BoardCommandError('Выбранный игрок больше не подключён.');
+      actor = target;
     } else {
       if (command.actorId !== undefined && command.actorId !== identity.participantId) throw new BoardCommandError('Игрок может совершать бросок только за себя.');
       actor = identity;
@@ -205,7 +251,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.post('/api/notes', async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может создавать только ведущий.' });
@@ -228,7 +274,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.put('/api/notes/:id', async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может редактировать только ведущий.' });
@@ -243,7 +289,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.delete('/api/notes/:id', async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять заметки может только ведущий.' });
@@ -257,13 +303,13 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   app.post('/api/session', {
     config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
   }, async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) {
+    if (!originAllowed(request)) {
       return reply.code(403).send({ error: 'Origin not allowed.' });
     }
     const result = authenticate(request.body, config, store);
     if (!result) return reply.code(401).send({ error: 'Неверный код комнаты или пароль, либо ведущий уже подключён.' });
     reply.setCookie(SESSION_COOKIE, result.sessionId, {
-      ...cookieOptions,
+      ...sessionCookieOptions(request),
       expires: new Date(Date.now() + config.sessionDays * 24 * 60 * 60 * 1000),
     });
     sendState();
@@ -277,7 +323,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.delete('/api/session', async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) {
+    if (!originAllowed(request)) {
       return reply.code(403).send({ error: 'Origin not allowed.' });
     }
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
@@ -291,7 +337,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       store.deleteSession(session.sessionId);
       sockets.delete(session.sessionId);
     }
-    reply.clearCookie(SESSION_COOKIE, cookieOptions);
+    reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(request));
     sendState();
     return reply.code(204).send();
   });
@@ -299,7 +345,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   app.post('/api/assets', {
     config: { rateLimit: { max: 12, timeWindow: '1 minute' } },
   }, async (request, reply) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     try {
@@ -334,7 +380,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.get('/ws', { websocket: true }, (socket, request) => {
-    if (!isSameOrigin(request.headers.origin, request.headers.host)) {
+    if (!originAllowed(request)) {
       socket.close(1008, 'Origin not allowed');
       return;
     }
@@ -398,8 +444,29 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     });
   });
 
+  app.addHook('onSend', async (_request, reply, payload) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Referrer-Policy', 'same-origin');
+    return payload;
+  });
+
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const statusCode = typeof error.statusCode === 'number' && error.statusCode >= 400 && error.statusCode <= 599
+      ? error.statusCode
+      : 500;
+    if (statusCode >= 500) request.log.error({ err: error }, 'request failed');
+    const message = statusCode >= 500 ? 'Внутренняя ошибка сервера.' : error.message || 'Запрос отклонён.';
+    if (request.url.startsWith('/api/')) return reply.code(statusCode).send({ error: message });
+    return reply.code(statusCode).type('text/plain; charset=utf-8').send(message);
+  });
+
   app.setNotFoundHandler(async (request, reply) => {
-    if (request.url.startsWith('/api/')) return reply.code(404).send({ error: 'Ресурс не найден.' });
+    if (request.url.startsWith('/api/') || request.url.startsWith('/ws')) {
+      return reply.code(404).send({ error: 'Ресурс не найден.' });
+    }
+    const pathname = request.url.split('?')[0] ?? '';
+    if (/\.[^/]+$/.test(pathname)) return reply.code(404).type('text/plain; charset=utf-8').send('Ресурс не найден.');
     return reply.sendFile('index.html');
   });
   app.addHook('onClose', async () => {
@@ -415,8 +482,16 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const config = loadConfig();
-  const app = await buildServer({ config });
-  await app.listen({ host: config.host, port: config.port });
-  app.log.info(`Room server listening on ${config.host}:${config.port}`);
+  try {
+    const config = loadConfig();
+    if (config.cookieSecure && !existsSync(resolve(process.cwd(), 'dist', 'index.html'))) {
+      throw new Error('Frontend build not found. Run "npm run build" before starting the production server.');
+    }
+    const app = await buildServer({ config });
+    await app.listen({ host: config.host, port: config.port });
+    app.log.info(`Room server listening on ${config.host}:${config.port}`);
+  } catch (error) {
+    console.error(`Не удалось запустить сервер: ${error instanceof Error ? error.message : 'неизвестная ошибка'}`);
+    process.exitCode = 1;
+  }
 }

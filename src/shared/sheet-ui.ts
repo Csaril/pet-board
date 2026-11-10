@@ -61,6 +61,44 @@ export function writeSheetPanelPreference(storage: KeyValueStorage, participantI
   }
 }
 
+export interface SheetRollPanelPreference {
+  version: 1;
+  x: number | null;
+  y: number | null;
+}
+
+export function sheetRollPanelStorageKey(participantId: string): string {
+  return `tabletop:ui:v1:${participantId}:sheet-roll`;
+}
+
+/**
+ * The roll window remembers only a user-moved position. Returning `undefined`
+ * means "place it next to the sheet using the current layout".
+ */
+export function readSheetRollPanelPreference(storage: KeyValueStorage, participantId: string): { x: number; y: number } | undefined {
+  try {
+    const value = JSON.parse(storage.getItem(sheetRollPanelStorageKey(participantId)) || 'null') as Partial<SheetRollPanelPreference> | null;
+    if (!value || value.version !== 1 || typeof value.x !== 'number' || typeof value.y !== 'number') return undefined;
+    if (!Number.isFinite(value.x) || !Number.isFinite(value.y)) return undefined;
+    return { x: value.x, y: value.y };
+  } catch { return undefined; }
+}
+
+/** Passing `null` coordinates forgets the stored position and restores the default anchoring. */
+export function writeSheetRollPanelPreference(
+  storage: KeyValueStorage,
+  participantId: string,
+  x: number | null,
+  y: number | null,
+): void {
+  try {
+    const preference: SheetRollPanelPreference = { version: 1, x, y };
+    storage.setItem(sheetRollPanelStorageKey(participantId), JSON.stringify(preference));
+  } catch {
+    /* Local UI preferences are optional. */
+  }
+}
+
 /** Keeps a floating panel fully inside the viewport after a move or resize. */
 export function clampFloatingPosition(
   x: number, y: number, width: number, height: number, viewportWidth: number, viewportHeight: number,

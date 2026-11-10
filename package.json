@@ -9,8 +9,10 @@
   "scripts": {
     "dev": "astro build && tsx watch server/index.ts",
     "build": "astro build && tsc -p tsconfig.server.json",
-    "start": "node dist-server/server/index.js",
-    "backup": "node dist-server/server/backup.js",
+    "start": "NODE_ENV=production node dist-server/server/index.js",
+    "backup": "node dist-server/server/backup.js create",
+    "backup:list": "node dist-server/server/backup.js list",
+    "backup:restore": "node dist-server/server/backup.js restore",
     "typecheck": "astro check && tsc -p tsconfig.server.json --noEmit",
     "test": "node --import tsx --test server/*.test.ts src/modules/system/pbta-2d6/*.test.ts"
   },

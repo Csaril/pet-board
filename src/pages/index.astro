@@ -202,11 +202,13 @@ import '../styles/global.css';
       </div>
     </aside>
     <aside id="sheet-roll-panel" class="sheet-roll-panel" aria-label="Окно броска по характеристике" hidden>
-      <div class="sheet-roll-heading">
-        <div>
+      <div class="sheet-roll-heading" data-panel-drag-handle>
+        <span class="panel-grip" aria-hidden="true">⠿</span>
+        <div class="sheet-roll-title">
           <p class="eyebrow">Проверка характеристики</p>
           <h2 id="sheet-roll-name">Характеристика</h2>
         </div>
+        <button id="sheet-roll-reset" class="icon-button panel-reset" type="button" title="Вернуть окно броска на место" aria-label="Вернуть окно броска на место">⌖</button>
         <button id="sheet-roll-close" class="icon-button" type="button" aria-label="Закрыть окно броска">×</button>
       </div>
       <div id="sheet-roll-controls" class="sheet-roll-controls"></div>
