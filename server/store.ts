@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -17,7 +17,7 @@ export interface StickerInput extends Omit<BoardSticker, 'orderIndex'> { orderIn
 export interface StickerPatch { text?: string; x?: number; y?: number; width?: number; height?: number; bgColor?: StickerBackground; textColor?: StickerTextColor; fontSize?: number; layerId?: string }
 export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string }
 export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string }
-export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number }
+export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number; width?: number; height?: number }
 export interface SheetInput {
   id: string; creatorId: string; creatorName: string; assignedPlayerId: string | null; assignedPlayerName: string | null;
   systemId: string; systemVersion: string; schemaVersion: number;
@@ -36,7 +36,7 @@ type ObjectRow = {
 type AssetRow = { id: string; sha256: string; mime_type: BoardAsset['mimeType']; original_name: string; size: number; width: number; height: number; created_at: string };
 type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; order_index: number };
 type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null };
-type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
+type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; width: number | null; height: number | null; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
 type SheetRow = {
   id: string; creator_id: string; creator_name: string; assigned_player_id: string | null; assigned_player_name: string | null;
   system_id: string; system_version: string; schema_version: number;
@@ -68,8 +68,27 @@ function toAsset(row: AssetRow): BoardAsset {
 function toSticker(row: StickerRow): BoardSticker {
   return { id: row.id, creatorId: row.creator_id, layerId: row.layer_id, text: row.text, x: row.x, y: row.y, width: row.width, height: row.height, bgColor: row.bg_color, textColor: row.text_color, fontSize: row.font_size, orderIndex: row.order_index };
 }
+function textMarkerSize(text: string): { width: number; height: number } {
+  return { width: Math.min(200, Math.max(64, text.length * 8 + 18)), height: 34 };
+}
+function imageMarkerSize(assetWidth: number | null, assetHeight: number | null): { width: number; height: number } {
+  const width = assetWidth && assetWidth > 0 ? assetWidth : 84;
+  const height = assetHeight && assetHeight > 0 ? assetHeight : 60;
+  const ratio = Math.min(84 / width, 60 / height);
+  return { width: Math.max(1, Math.round(width * ratio)), height: Math.max(1, Math.round(height * ratio)) };
+}
+function defaultMarkerSize(type: 'text' | 'image', text: string, assetWidth: number | null, assetHeight: number | null): { width: number; height: number } {
+  return type === 'image' ? imageMarkerSize(assetWidth, assetHeight) : textMarkerSize(text);
+}
 function toNoteMarker(row: NoteMarkerRow): NoteMarker {
-  return { id: row.id, noteId: row.note_id, layerId: row.layer_id, x: row.x, y: row.y, orderIndex: row.order_index, type: row.marker_type, text: row.marker_text || row.title, ...(row.marker_asset_id ? { assetId: row.marker_asset_id, assetWidth: row.asset_width || 1, assetHeight: row.asset_height || 1 } : {}) };
+  const text = row.marker_text || row.title;
+  const fallback = defaultMarkerSize(row.marker_type, text, row.asset_width, row.asset_height);
+  return {
+    id: row.id, noteId: row.note_id, layerId: row.layer_id, x: row.x, y: row.y,
+    width: row.width ?? fallback.width, height: row.height ?? fallback.height,
+    orderIndex: row.order_index, type: row.marker_type, text,
+    ...(row.marker_asset_id ? { assetId: row.marker_asset_id, assetWidth: row.asset_width || 1, assetHeight: row.asset_height || 1 } : {}),
+  };
 }
 function toCounter(row: CounterRow): CharacterSheetCounter {
   return { id: row.id, name: row.name, value: row.value, orderIndex: row.order_index };
@@ -99,6 +118,7 @@ export class RoomStore {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         name TEXT NOT NULL,
         allow_player_stickers INTEGER NOT NULL DEFAULT 0 CHECK (allow_player_stickers IN (0, 1)),
+        background TEXT NOT NULL DEFAULT 'gray' CHECK (background IN ('black', 'gray')),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS sessions (
@@ -195,6 +215,8 @@ export class RoomStore {
         layer_id TEXT NOT NULL REFERENCES board_layers(id) ON DELETE RESTRICT,
         x REAL NOT NULL,
         y REAL NOT NULL,
+        width REAL NOT NULL,
+        height REAL NOT NULL,
         order_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS note_markers_layer_order ON note_markers(layer_id, order_index);
@@ -330,10 +352,30 @@ export class RoomStore {
     }
     if (!roomColumns.some((column) => column.name === 'active_system_id')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_id TEXT');
     if (!roomColumns.some((column) => column.name === 'active_system_version')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_version TEXT');
+    if (!roomColumns.some((column) => column.name === 'background')) {
+      this.db.exec("ALTER TABLE room ADD COLUMN background TEXT NOT NULL DEFAULT 'gray' CHECK (background IN ('black', 'gray'))");
+    }
     const noteColumns = this.db.pragma('table_info(notes)') as Array<{ name: string }>;
     if (!noteColumns.some((column) => column.name === 'marker_type')) this.db.exec("ALTER TABLE notes ADD COLUMN marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image'))");
     if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
     if (!noteColumns.some((column) => column.name === 'marker_asset_id')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT');
+    const markerColumns = this.db.pragma('table_info(note_markers)') as Array<{ name: string }>;
+    if (!markerColumns.some((column) => column.name === 'width')) this.db.exec('ALTER TABLE note_markers ADD COLUMN width REAL');
+    if (!markerColumns.some((column) => column.name === 'height')) this.db.exec('ALTER TABLE note_markers ADD COLUMN height REAL');
+    const markerRows = this.db.prepare(`SELECT marker.id, marker.width, marker.height, note.marker_type, COALESCE(note.marker_text, note.title) AS marker_text,
+      asset.width AS asset_width, asset.height AS asset_height
+      FROM note_markers AS marker JOIN notes AS note ON note.id = marker.note_id
+      LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id`).all() as Array<{
+        id: string; width: number | null; height: number | null; marker_type: 'text' | 'image';
+        marker_text: string; asset_width: number | null; asset_height: number | null;
+      }>;
+    const updateMarkerSize = this.db.prepare('UPDATE note_markers SET width = ?, height = ? WHERE id = ?');
+    this.db.transaction(() => {
+      for (const row of markerRows) {
+        const fallback = defaultMarkerSize(row.marker_type, row.marker_text, row.asset_width, row.asset_height);
+        if (row.width === null || row.height === null) updateMarkerSize.run(row.width ?? fallback.width, row.height ?? fallback.height, row.id);
+      }
+    })();
     const diceColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
     if (!diceColumns.some((column) => column.name === 'character_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_id TEXT');
     if (!diceColumns.some((column) => column.name === 'character_owner_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_owner_id TEXT');
@@ -344,6 +386,14 @@ export class RoomStore {
 
   get roomName(): string {
     return (this.db.prepare('SELECT name FROM room WHERE id = 1').get() as { name: string }).name;
+  }
+
+  get boardBackground(): BoardBackground {
+    const row = this.db.prepare('SELECT background FROM room WHERE id = 1').get() as { background: string } | undefined;
+    return row?.background === 'black' ? 'black' : 'gray';
+  }
+  setBoardBackground(background: BoardBackground): void {
+    this.db.prepare('UPDATE room SET background = ? WHERE id = 1').run(background);
   }
 
   get activeSystem(): { id: string; version: string } | null {
@@ -470,6 +520,28 @@ export class RoomStore {
   }
   getAssets(): BoardAsset[] {
     return (this.db.prepare('SELECT * FROM assets ORDER BY created_at DESC, id DESC').all() as AssetRow[]).map(toAsset);
+  }
+  getAssetUsage(assetId: string): BoardAssetUsage[] {
+    const rows = this.db.prepare(`
+      SELECT 'board-object' AS kind, COUNT(*) AS count FROM board_objects WHERE asset_id = @id
+      UNION ALL SELECT 'note-attachment', COUNT(*) FROM note_assets WHERE asset_id = @id
+      UNION ALL SELECT 'note-marker', COUNT(*) FROM notes WHERE marker_asset_id = @id
+      UNION ALL SELECT 'sheet-portrait', COUNT(*) FROM character_sheets WHERE portrait_asset_id = @id
+      UNION ALL SELECT 'sheet-ability', COUNT(*) FROM character_abilities WHERE asset_id = @id
+    `).all({ id: assetId }) as Array<{ kind: BoardAssetUsageKind; count: number }>;
+    return rows.filter((row) => row.count > 0);
+  }
+  deleteAssetIfUnused(id: string): boolean {
+    return this.db.transaction(() => {
+      if (this.getAssetUsage(id).length > 0) return false;
+      this.db.prepare('DELETE FROM assets WHERE id = ?').run(id);
+      return true;
+    })();
+  }
+  restoreAsset(asset: BoardAsset): void {
+    this.db.prepare(`INSERT INTO assets (id, sha256, mime_type, original_name, size, width, height, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(asset.id, asset.sha256, asset.mimeType, asset.originalName, asset.size, asset.width, asset.height, asset.createdAt);
   }
   isAssetUsedByPublicObject(assetId: string): boolean {
     return Boolean(this.db.prepare(`
@@ -601,11 +673,16 @@ export class RoomStore {
   }
   createNoteMarker(marker: NoteMarkerInput): void {
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM note_markers WHERE layer_id = ?').get(marker.layerId) as { next: number }).next;
-    this.db.prepare('INSERT INTO note_markers (id, note_id, layer_id, x, y, order_index) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(marker.id, marker.noteId, marker.layerId, marker.x, marker.y, orderIndex);
+    const note = this.db.prepare(`SELECT note.marker_type, COALESCE(note.marker_text, note.title) AS marker_text,
+      asset.width AS asset_width, asset.height AS asset_height
+      FROM notes AS note LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id WHERE note.id = ?`)
+      .get(marker.noteId) as { marker_type: 'text' | 'image'; marker_text: string; asset_width: number | null; asset_height: number | null } | undefined;
+    const fallback = note ? defaultMarkerSize(note.marker_type, note.marker_text, note.asset_width, note.asset_height) : { width: 84, height: 34 };
+    this.db.prepare('INSERT INTO note_markers (id, note_id, layer_id, x, y, width, height, order_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(marker.id, marker.noteId, marker.layerId, marker.x, marker.y, marker.width ?? fallback.width, marker.height ?? fallback.height, orderIndex);
   }
-  updateNoteMarker(id: string, patch: Partial<Pick<NoteMarker, 'layerId' | 'x' | 'y'>>): void {
-    const columns = { layerId: 'layer_id', x: 'x', y: 'y' } as const;
+  updateNoteMarker(id: string, patch: Partial<Pick<NoteMarker, 'layerId' | 'x' | 'y' | 'width' | 'height'>>): void {
+    const columns = { layerId: 'layer_id', x: 'x', y: 'y', width: 'width', height: 'height' } as const;
     const entries = Object.entries(patch) as Array<[keyof typeof columns, string | number]>;
     if (!entries.length) return;
     this.db.prepare(`UPDATE note_markers SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')} WHERE id = @id`)
@@ -671,6 +748,14 @@ export class RoomStore {
   assignSheet(id: string, playerId: string | null, playerName: string | null): void {
     this.db.prepare('UPDATE character_sheets SET assigned_player_id = ?, assigned_player_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
       .run(playerId, playerName, id);
+  }
+  deleteUnassignedSheet(id: string): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.prepare('SELECT assigned_player_id FROM character_sheets WHERE id = ?').get(id) as { assigned_player_id: string | null } | undefined;
+      if (!row || row.assigned_player_id !== null) return false;
+      this.db.prepare('DELETE FROM character_sheets WHERE id = ? AND assigned_player_id IS NULL').run(id);
+      return true;
+    })();
   }
   private hydrateSheet(row: SheetRow): CharacterSheet {
     let characteristics: Record<SheetCharacteristicKey, number> = { might: 0, insight: 0, glory: 0, will: 0 };
@@ -783,7 +868,7 @@ export class RoomStore {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
     const allLayers = this.getLayers();
-    const common = { activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity) };
+    const common = { background: this.boardBackground, activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity) };
     if (role === 'gm') return { ...common, layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
     const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
     const visibleIds = new Set(layers.map((layer) => layer.id));

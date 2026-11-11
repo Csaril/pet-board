@@ -119,6 +119,15 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
       });
       return;
     }
+    case 'sheet:delete': {
+      if (identity.role !== 'gm') throw new BoardCommandError('Удалять листы может только ведущий.');
+      if (Object.keys(command).some((key) => !['type', 'requestId', 'id'].includes(key))) throw new BoardCommandError('Некорректная команда удаления листа.');
+      const sheet = store.getSheet(text(command.id, 'ID листа', 64));
+      if (!sheet) throw new BoardCommandError('Лист персонажа не найден.');
+      if (sheet.assignedPlayerId !== null) throw new BoardCommandError('Нельзя удалить лист, назначенный игроку. Сначала снимите назначение.');
+      if (!store.deleteUnassignedSheet(sheet.id)) throw new BoardCommandError('Лист не удалось удалить: он уже назначен или отсутствует.');
+      return;
+    }
     case 'sheet:assign': {
       if (identity.role !== 'gm') throw new BoardCommandError('Назначать листы может только ведущий.');
       if (Object.keys(command).some((key) => !['type', 'requestId', 'id', 'playerId'].includes(key))) throw new BoardCommandError('Некорректная команда назначения листа.');

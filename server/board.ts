@@ -7,6 +7,10 @@ export class BoardCommandError extends Error {}
 
 type Command = Record<string, unknown> & { type?: string; requestId?: unknown };
 const owns = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
+const MIN_TEXT_MARKER_WIDTH = 64;
+const MIN_TEXT_MARKER_HEIGHT = 34;
+const MIN_IMAGE_MARKER_SIZE = 24;
+const MAX_MARKER_SIZE = 4000;
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BoardCommandError(`${label} должен быть объектом.`);
@@ -236,11 +240,31 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       const source = store.getLayer(marker.layerId);
       if (!source || source.locked) throw new BoardCommandError('Слой заблокирован.');
       const changes = objectValue(command.changes, 'Изменения метки');
-      const allowed = new Set(['x', 'y', 'layerId']);
+      const allowed = new Set(['x', 'y', 'layerId', 'width', 'height']);
       if (!Object.keys(changes).length || Object.keys(changes).some((key) => !allowed.has(key))) throw new BoardCommandError('Недопустимые изменения метки.');
+      const requestedWidth = owns(changes, 'width') ? number(changes.width, 'width', 1, MAX_MARKER_SIZE) : marker.width;
+      const requestedHeight = owns(changes, 'height') ? number(changes.height, 'height', 1, MAX_MARKER_SIZE) : marker.height;
+      let width = requestedWidth;
+      let height = requestedHeight;
+      if (marker.type === 'image') {
+        const assetWidth = marker.assetWidth || 1;
+        const assetHeight = marker.assetHeight || 1;
+        const ratio = assetWidth / assetHeight;
+        if (owns(changes, 'width') && !owns(changes, 'height')) height = Math.round(width / ratio);
+        else if (owns(changes, 'height') && !owns(changes, 'width')) width = Math.round(height * ratio);
+        else { height = Math.round(width / ratio); width = Math.round(height * ratio); }
+        if (width < MIN_IMAGE_MARKER_SIZE) { width = MIN_IMAGE_MARKER_SIZE; height = Math.round(width / ratio); }
+        if (height < MIN_IMAGE_MARKER_SIZE) { height = MIN_IMAGE_MARKER_SIZE; width = Math.round(height * ratio); }
+        if (width > MAX_MARKER_SIZE || height > MAX_MARKER_SIZE) throw new BoardCommandError('Размер метки слишком велик.');
+      } else {
+        if (width < MIN_TEXT_MARKER_WIDTH) throw new BoardCommandError('Минимальная ширина текстовой метки — 64.');
+        if (height < MIN_TEXT_MARKER_HEIGHT) throw new BoardCommandError('Минимальная высота текстовой метки — 34.');
+      }
+      const resize = owns(changes, 'width') || owns(changes, 'height');
       store.updateNoteMarker(id, {
         ...(owns(changes, 'x') ? { x: number(changes.x, 'x', -10_000_000, 10_000_000) } : {}),
         ...(owns(changes, 'y') ? { y: number(changes.y, 'y', -10_000_000, 10_000_000) } : {}),
+        ...(resize ? { width: Math.round(width), height: Math.round(height) } : {}),
         ...(owns(changes, 'layerId') ? (() => {
           const target = store.getLayer(text(changes.layerId, 'Целевой слой', 64));
           if (!target) throw new BoardCommandError('Целевой слой не найден.');

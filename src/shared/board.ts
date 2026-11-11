@@ -1,4 +1,5 @@
 export type LayerAudience = 'gm-only' | 'all-players';
+export type BoardBackground = 'black' | 'gray';
 
 export interface BoardLayer {
   id: string;
@@ -43,6 +44,13 @@ export interface BoardAsset {
   createdAt: string;
 }
 
+export type BoardAssetUsageKind = 'board-object' | 'note-attachment' | 'note-marker' | 'sheet-portrait' | 'sheet-ability';
+
+export interface BoardAssetUsage {
+  kind: BoardAssetUsageKind;
+  count: number;
+}
+
 export type NoteAccess = 'gm-only' | 'all-players' | 'selected-players';
 export type StickerBackground = 'butter' | 'rose' | 'sky' | 'sage';
 export type StickerTextColor = 'black' | 'white';
@@ -68,6 +76,8 @@ export interface NoteMarker {
   layerId: string;
   x: number;
   y: number;
+  width: number;
+  height: number;
   orderIndex: number;
   type: 'text' | 'image';
   text: string;
@@ -148,6 +158,7 @@ export interface CharacterSheet {
 }
 
 export interface BoardSnapshot {
+  background: BoardBackground;
   layers: BoardLayer[];
   objects: BoardImage[];
   stickers: BoardSticker[];

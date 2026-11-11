@@ -1,5 +1,5 @@
 import Konva from 'konva';
-import type { BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
@@ -24,6 +24,7 @@ const roomName = select<HTMLElement>('#room-name');
 const identityLabel = select<HTMLElement>('#identity');
 const canvasContainer = select<HTMLDivElement>('#board-canvas');
 const canvasWrap = select<HTMLElement>('.canvas-wrap');
+const boardBackgroundSelect = select<HTMLSelectElement>('#board-background');
 const canvasMessage = select<HTMLElement>('#canvas-message');
 const layersList = select<HTMLUListElement>('#layers-list');
 const libraryPanel = select<HTMLElement>('#library-panel');
@@ -38,6 +39,7 @@ const notesPanel = select<HTMLElement>('#notes-panel');
 const notesList = select<HTMLUListElement>('#notes-list');
 const noteDialog = select<HTMLDialogElement>('#note-dialog');
 const assetPickerDialog = select<HTMLDialogElement>('#asset-picker-dialog');
+const assetDeleteDialog = select<HTMLDialogElement>('#asset-delete-dialog');
 const stickerCreateDialog = select<HTMLDialogElement>('#sticker-create-dialog');
 const noteImageDropZone = select<HTMLElement>('#note-image-drop-zone');
 const noteImageUploadStatus = select<HTMLUListElement>('#note-image-upload-status');
@@ -105,6 +107,9 @@ let boardLayer: Konva.Layer | undefined;
 let interactionLayer: Konva.Layer | undefined;
 let transformer: Konva.Transformer | undefined;
 let cropTransformer: Konva.Transformer | undefined;
+let markerTransformer: Konva.Transformer | undefined;
+let markerResizeMode = false;
+let markerResizeOriginal: { id: string; width: number; height: number } | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let selectedObjectId: string | undefined;
 let selectedStickerId: string | undefined;
@@ -118,6 +123,7 @@ let noteRequestSequence = 0;
 let noteEditorGeneration = 0;
 let editingAssetIds: string[] = [];
 let selectedMarkerAssetId: string | undefined;
+let pendingAssetDeleteId: string | undefined;
 type AssetPickerMode = 'attachments' | 'marker' | 'sheet-portrait' | 'ability';
 let assetPickerMode: AssetPickerMode = 'attachments';
 let selectedSheetPortraitAssetId: string | undefined;
@@ -166,6 +172,12 @@ function applyGmOnlyVisibility(role: AppIdentity['role']): void {
       hidden: element.hidden,
     });
   }
+}
+
+function applyBoardBackground(background: BoardBackground | undefined): void {
+  const selected: BoardBackground = background === 'black' ? 'black' : 'gray';
+  canvasWrap.dataset.boardBackground = selected;
+  if (boardBackgroundSelect.value !== selected) boardBackgroundSelect.value = selected;
 }
 
 function login(role: AppIdentity['role'], name: string) {
@@ -314,8 +326,31 @@ function setupStage() {
       return { ...newBox, x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y };
     },
   });
+  markerTransformer = new Konva.Transformer({
+    rotateEnabled: false,
+    flipEnabled: false,
+    keepRatio: false,
+    ignoreStroke: true,
+    borderStroke: '#426c59',
+    anchorStroke: '#426c59',
+    anchorFill: '#fff',
+    anchorSize: 8,
+    padding: 2,
+    enabledAnchors: ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right'],
+    boundBoxFunc: (oldBox, newBox) => {
+      const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+      if (!markerResizeMode || !marker) return oldBox;
+      const scale = stage?.scaleX() || 1;
+      const minimumWidth = (marker.type === 'image' ? 24 : 64) * scale;
+      const minimumHeight = (marker.type === 'image' ? 24 : 34) * scale;
+      const maximum = 4000 * scale;
+      if (newBox.width < minimumWidth || newBox.height < minimumHeight || newBox.width > maximum || newBox.height > maximum) return oldBox;
+      return newBox;
+    },
+  });
   interactionLayer.add(transformer);
   interactionLayer.add(cropTransformer);
+  interactionLayer.add(markerTransformer);
   stage.add(boardLayer, interactionLayer);
   stage.on('mousedown touchstart', (event) => {
     if (event.target !== stage || cropMode) return;
@@ -391,6 +426,7 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && notePlacementId) {
     notePlacementId = undefined; notePlacementHint.hidden = true; canvasContainer.style.cursor = '';
   }
+  if (event.key === 'Escape' && markerResizeMode) cancelMarkerResize();
 });
 
 function fitAllObjects() {
@@ -402,7 +438,7 @@ function fitAllObjects() {
     return { x: item.x + rect.x, y: item.y + rect.y, width: rect.width, height: rect.height };
   });
   for (const sticker of roomState.stickers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height });
-  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: marker.type === 'image' ? 84 : Math.min(200, Math.max(64, marker.text.length * 8 + 18)), height: marker.type === 'image' ? 60 : 34 });
+  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: marker.width, height: marker.height });
   const bounds = boundsRects.length ? {
     minX: Math.min(...boundsRects.map((rect) => rect.x)), minY: Math.min(...boundsRects.map((rect) => rect.y)),
     maxX: Math.max(...boundsRects.map((rect) => rect.x + rect.width)), maxY: Math.max(...boundsRects.map((rect) => rect.y + rect.height)),
@@ -462,6 +498,7 @@ function drawObjects() {
   boardLayer.destroyChildren();
   transformer?.nodes([]);
   cropTransformer?.nodes([]);
+  markerTransformer?.nodes([]);
   renderedObjects.clear();
   renderedStickers.clear(); renderedMarkers.clear();
   const visibleLayers = roomState.layers.filter((layer) => layer.visible).sort((a, b) => a.orderIndex - b.orderIndex);
@@ -543,23 +580,47 @@ function drawObjects() {
       boardLayer.add(group); renderedStickers.set(sticker.id, { group, background, text });
     }
     for (const marker of (roomState.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
-      const assetWidth = marker.assetWidth || 84; const assetHeight = marker.assetHeight || 60;
-      const markerWidth = marker.type === 'image' ? Math.min(84, assetWidth) : Math.min(200, Math.max(64, marker.text.length * 8 + 18));
-      const markerHeight = marker.type === 'image' ? Math.min(60, assetHeight) : 34;
-      const group = new Konva.Group({ x: marker.x, y: marker.y, width: markerWidth, height: markerHeight, draggable: identity?.role === 'gm' && !layer.locked, name: `note-marker ${marker.id}` });
+      const markerWidth = marker.width;
+      const markerHeight = marker.height;
+      const group = new Konva.Group({ x: marker.x, y: marker.y, width: markerWidth, height: markerHeight, draggable: identity?.role === 'gm' && !layer.locked && !markerResizeMode, name: `note-marker ${marker.id}` });
       if (marker.type === 'image' && marker.assetId) {
         const image = cachedImage(marker.assetId);
-        const ratio = Math.min(84 / assetWidth, 60 / assetHeight);
-        const width = assetWidth * ratio; const height = assetHeight * ratio;
-        group.setAttrs({ width, height });
-        group.add(new Konva.Rect({ width, height, fill: '#fff', cornerRadius: 5, stroke: '#426c59', strokeWidth: 2 }));
-        group.add(new Konva.Image({ x: 2, y: 2, width: width - 4, height: height - 4, image, listening: false }));
+        group.add(new Konva.Rect({ width: markerWidth, height: markerHeight, fill: '#fff', cornerRadius: 5, stroke: '#426c59', strokeWidth: 2 }));
+        group.add(new Konva.Image({ x: 2, y: 2, width: Math.max(1, markerWidth - 4), height: Math.max(1, markerHeight - 4), image, listening: false }));
       } else {
         group.add(new Konva.Rect({ width: markerWidth, height: markerHeight, fill: '#fffdf4', stroke: '#52645a', strokeWidth: 1.5, cornerRadius: 5, shadowColor: '#17231a', shadowBlur: 4, shadowOpacity: .15, shadowOffsetY: 2 }));
-        group.add(new Konva.Text({ x: 8, y: 0, width: markerWidth - 16, height: markerHeight, text: marker.text.slice(0, 60), fontSize: 13, fontFamily: 'system-ui, sans-serif', fill: '#202722', wrap: 'none', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false }));
+        group.add(new Konva.Text({ x: 8, y: 0, width: Math.max(1, markerWidth - 16), height: markerHeight, text: marker.text.slice(0, 60), fontSize: 13, fontFamily: 'system-ui, sans-serif', fill: '#202722', wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false }));
       }
-      group.on('click tap', (event) => { event.cancelBubble = true; setSelectedMarker(marker.id); void openNote(marker.noteId); });
+      group.on('click tap', (event) => {
+        event.cancelBubble = true;
+        setSelectedMarker(marker.id);
+        if (!markerResizeMode) void openNote(marker.noteId);
+      });
       group.on('dragend', () => void runCommand('note-marker:update', { id: marker.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }));
+      group.on('transform', () => {
+        if (!markerResizeMode || marker.type !== 'image') return;
+        const ratio = (marker.assetWidth || markerWidth) / (marker.assetHeight || markerHeight);
+        const scales = lockTransformScales(group.width(), group.height(), group.scaleX(), group.scaleY(), ratio);
+        group.scale({ x: scales.scaleX, y: scales.scaleY });
+      });
+      group.on('transformend', () => {
+        if (!markerResizeMode || identity?.role !== 'gm' || layer.locked) { drawObjects(); return; }
+        let width = Math.round(group.width() * Math.abs(group.scaleX()));
+        let height = Math.round(group.height() * Math.abs(group.scaleY()));
+        if (marker.type === 'image') {
+          const ratio = (marker.assetWidth || width) / (marker.assetHeight || height);
+          width = Math.max(24, width);
+          height = Math.max(24, Math.round(width / ratio));
+        } else {
+          width = Math.max(64, width);
+          height = Math.max(34, height);
+        }
+        group.scale({ x: 1, y: 1 });
+        marker.width = width; marker.height = height;
+        markerResizeOriginal = undefined;
+        drawObjects();
+        void runCommand('note-marker:update', { id: marker.id, changes: { width, height } });
+      });
       boardLayer.add(group); renderedMarkers.set(marker.id, { group });
     }
   }
@@ -572,13 +633,40 @@ function clampWorld(value: number) { return Math.max(-MAX_WORLD_COORDINATE, Math
 function setSelectedObject(id: string | undefined) {
   const changed = id !== selectedObjectId;
   selectedObjectId = id; selectedStickerId = undefined; selectedMarkerId = undefined;
+  markerResizeMode = false; markerResizeOriginal = undefined;
   updateSelectionControls();
   if (cropMode && changed) cropMode = false;
   drawObjects();
 }
 
-function setSelectedSticker(id: string | undefined) { selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; updateSelectionControls(); drawObjects(); }
-function setSelectedMarker(id: string | undefined) { selectedObjectId = undefined; selectedStickerId = undefined; selectedMarkerId = id; cropMode = false; updateSelectionControls(); drawObjects(); }
+function setSelectedSticker(id: string | undefined) { selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; markerResizeMode = false; markerResizeOriginal = undefined; updateSelectionControls(); drawObjects(); }
+function setSelectedMarker(id: string | undefined) {
+  const changed = id !== selectedMarkerId;
+  selectedObjectId = undefined; selectedStickerId = undefined; selectedMarkerId = id; cropMode = false;
+  if (changed) { markerResizeMode = false; markerResizeOriginal = undefined; }
+  updateSelectionControls(); drawObjects();
+}
+
+function setMarkerResizeMode(active: boolean): void {
+  const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+  const layer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+  if (active && (!marker || !layer || layer.locked || identity?.role !== 'gm')) return;
+  markerResizeMode = active;
+  markerResizeOriginal = active && marker ? { id: marker.id, width: marker.width, height: marker.height } : undefined;
+  updateSelectionControls();
+  boardLayer?.batchDraw();
+}
+
+function cancelMarkerResize(): void {
+  const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+  if (marker && markerResizeOriginal?.id === marker.id) {
+    marker.width = markerResizeOriginal.width;
+    marker.height = markerResizeOriginal.height;
+  }
+  markerResizeMode = false;
+  markerResizeOriginal = undefined;
+  drawObjects();
+}
 
 function updateSelectionControls() {
   const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
@@ -590,14 +678,32 @@ function updateSelectionControls() {
   const canEditSticker = !!sticker && !!stickerLayer && !stickerLayer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId);
   objectTools.hidden = true;
   stickerTools.hidden = !sticker || !stickerRendered || !canEditSticker;
-  markerTools.hidden = !marker || !markerRendered || identity?.role !== 'gm' || markerLayer?.locked === true;
+  const canResizeMarker = !!marker && !!markerRendered && !!markerLayer && !markerLayer.locked && identity?.role === 'gm';
+  markerTools.hidden = !canResizeMarker;
+  if (markerResizeMode && !canResizeMarker) { markerResizeMode = false; markerResizeOriginal = undefined; }
   select<HTMLElement>('#lock-indicator').hidden = !(sticker && stickerLayer?.locked || marker && markerLayer?.locked);
+  const markerResizeButton = select<HTMLButtonElement>('#marker-resize');
+  markerResizeButton.disabled = !canResizeMarker;
+  markerResizeButton.classList.toggle('active', markerResizeMode);
+  markerResizeButton.setAttribute('aria-pressed', String(markerResizeMode));
   if (sticker && stickerRendered) {
+    markerTransformer?.nodes([]);
     transformer?.nodes(canEditSticker ? [stickerRendered.group] : []); cropTransformer?.nodes([]);
     select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor; select<HTMLSelectElement>('#sticker-font-size').value = String(sticker.fontSize);
     return;
   }
-  if (marker && markerRendered) { transformer?.nodes([]); cropTransformer?.nodes([]); return; }
+  if (marker && markerRendered) {
+    transformer?.nodes([]); cropTransformer?.nodes([]);
+    if (markerTransformer) {
+      markerTransformer.keepRatio(marker.type === 'image');
+      markerTransformer.enabledAnchors(marker.type === 'image'
+        ? ['top-left', 'top-right', 'bottom-left', 'bottom-right']
+        : ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']);
+      markerTransformer.nodes(markerResizeMode && canResizeMarker ? [markerRendered.group] : []);
+    }
+    return;
+  }
+  markerTransformer?.nodes([]);
   const item = roomState?.objects.find((object) => object.id === selectedObjectId);
   const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
   const rendered = item && renderedObjects.get(item.id);
@@ -961,6 +1067,7 @@ function updateBoard(state: RoomMessage) {
   }
   knownDiceRollIds = nextIds;
   roomState = state;
+  applyBoardBackground(state.background);
   if (pendingSheetRestoreId) {
     const restoreId = pendingSheetRestoreId;
     pendingSheetRestoreId = undefined;
@@ -1132,12 +1239,28 @@ function renderSheetCatalogCard(sheet: CharacterSheet, assign: boolean): HTMLLIE
   character.textContent = sheet.characterName || 'Без имени';
   copy.append(owner, character);
   item.append(portrait, copy);
+  const actions = document.createElement('div');
+  actions.className = 'sheet-catalog-actions';
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'sheet-catalog-action';
   open.textContent = 'Открыть';
   open.addEventListener('click', () => openSheet(sheet));
-  item.append(open);
+  actions.append(open);
+  if (!sheet.assignedPlayerId && identity?.role === 'gm') {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'sheet-catalog-action danger-text';
+    remove.textContent = 'Удалить';
+    remove.title = 'Удалить подготовленный лист персонажа';
+    remove.addEventListener('click', () => {
+      const name = sheet.characterName || 'Без имени';
+      if (!window.confirm(`Удалить лист персонажа «${name}»? Содержимое листа будет удалено без возможности восстановления из приложения.`)) return;
+      void runCommand('sheet:delete', { id: sheet.id });
+    });
+    actions.append(remove);
+  }
+  item.append(actions);
   if (assign && identity?.role === 'gm') {
     const players = (roomState?.participants || []).filter((participant) => participant.role === 'player');
     const row = document.createElement('div');
@@ -2014,6 +2137,8 @@ function renderAssets() {
     const name = document.createElement('div'); name.className = 'asset-name'; name.textContent = asset.originalName; name.title = asset.originalName;
     const size = document.createElement('div'); size.className = 'asset-size'; size.textContent = `${asset.width} × ${asset.height} · ${formatSize(asset.size)}`;
     text.append(name, size);
+    const actions = document.createElement('div');
+    actions.className = 'asset-actions';
     const add = document.createElement('button'); add.type = 'button'; add.className = 'asset-add'; add.textContent = 'Добавить';
     add.disabled = !activeLayerId || !roomState?.layers.some((layer) => layer.id === activeLayerId && !layer.locked);
     add.addEventListener('click', () => {
@@ -2023,7 +2148,77 @@ function renderAssets() {
       void runCommand('object:create', { assetId: asset.id, layerId: activeLayerId, x: Math.round(world.x - width / 2), y: Math.round(world.y - height / 2) });
       libraryPanel.hidden = true;
     });
-    item.append(image, text, add); assetsList.append(item);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'asset-delete danger-text';
+    remove.textContent = 'Удалить';
+    remove.title = 'Удалить изображение из библиотеки';
+    remove.addEventListener('click', () => void openAssetDeleteDialog(asset));
+    actions.append(add, remove);
+    item.append(image, text, actions); assetsList.append(item);
+  }
+}
+
+const ASSET_USAGE_LABELS: Record<BoardAssetUsage['kind'], string> = {
+  'board-object': 'Объекты игровой доски',
+  'note-attachment': 'Изображения заметок',
+  'note-marker': 'Метки заметок',
+  'sheet-portrait': 'Портреты персонажей',
+  'sheet-ability': 'Изображения способностей',
+};
+
+function renderAssetUsage(usage: BoardAssetUsage[]): void {
+  const wrap = select<HTMLElement>('#asset-delete-usage-wrap');
+  const list = select<HTMLUListElement>('#asset-delete-usage');
+  list.replaceChildren();
+  wrap.hidden = usage.length === 0;
+  for (const entry of usage) {
+    const item = document.createElement('li');
+    item.textContent = `${ASSET_USAGE_LABELS[entry.kind]} — ${entry.count}`;
+    list.append(item);
+  }
+  select<HTMLButtonElement>('#asset-delete-confirm').disabled = usage.length > 0;
+}
+
+async function openAssetDeleteDialog(asset: BoardAsset): Promise<void> {
+  pendingAssetDeleteId = asset.id;
+  select<HTMLImageElement>('#asset-delete-thumb').src = `/api/assets/${encodeURIComponent(asset.id)}`;
+  select<HTMLImageElement>('#asset-delete-thumb').alt = asset.originalName;
+  select<HTMLElement>('#asset-delete-name').textContent = asset.originalName;
+  select<HTMLElement>('#asset-delete-message').textContent = '';
+  renderAssetUsage([]);
+  if (!assetDeleteDialog.open) assetDeleteDialog.showModal();
+  try {
+    const response = await fetch(`/api/assets/${encodeURIComponent(asset.id)}/usage`, { cache: 'no-store' });
+    const result = await response.json() as { usage?: BoardAssetUsage[]; error?: string };
+    if (!response.ok) throw new Error(result.error || 'Не удалось проверить использование изображения.');
+    renderAssetUsage(result.usage || []);
+  } catch (error) {
+    select<HTMLElement>('#asset-delete-message').textContent = error instanceof Error ? error.message : 'Не удалось проверить использование изображения.';
+    select<HTMLButtonElement>('#asset-delete-confirm').disabled = true;
+  }
+}
+
+async function confirmAssetDelete(): Promise<void> {
+  if (!pendingAssetDeleteId) return;
+  const id = pendingAssetDeleteId;
+  const button = select<HTMLButtonElement>('#asset-delete-confirm');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/assets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const result = response.status === 204 ? undefined : await response.json() as { usage?: BoardAssetUsage[]; error?: string };
+    if (response.status === 409 && result?.usage?.length) {
+      renderAssetUsage(result.usage);
+      select<HTMLElement>('#asset-delete-message').textContent = result.error || 'Изображение используется.';
+      return;
+    }
+    if (!response.ok) throw new Error(result?.error || `Не удалось удалить изображение (HTTP ${response.status}).`);
+    assetDeleteDialog.close();
+    await refreshBoard();
+    uploadMessage.textContent = 'Изображение удалено из библиотеки.';
+  } catch (error) {
+    select<HTMLElement>('#asset-delete-message').textContent = error instanceof Error ? error.message : 'Не удалось удалить изображение.';
+    button.disabled = false;
   }
 }
 
@@ -2034,7 +2229,8 @@ function formatSize(bytes: number) {
 
 function closeWorkspace(message: string) {
   resizeObserver?.disconnect();
-  stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined; cropTransformer = undefined;
+  stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined; cropTransformer = undefined; markerTransformer = undefined;
+  markerResizeMode = false; markerResizeOriginal = undefined;
   selectedObjectId = undefined; roomState = undefined; imageCache.clear(); renderedObjects.clear();
   closeSheetRollPanel();
   sheetPanel.hidden = true;
@@ -2157,6 +2353,12 @@ select<HTMLButtonElement>('#free-roll').addEventListener('click', () => {
   void runCommand('dice:free', { count, sides });
 });
 
+boardBackgroundSelect.addEventListener('change', () => {
+  if (identity?.role !== 'gm') { applyBoardBackground(roomState?.background); return; }
+  const background: BoardBackground = boardBackgroundSelect.value === 'black' ? 'black' : 'gray';
+  applyBoardBackground(background);
+  void runCommand('room:background:set', { background });
+});
 select<HTMLButtonElement>('#library-toggle').addEventListener('click', () => { libraryPanel.hidden = !libraryPanel.hidden; });
 select<HTMLButtonElement>('#library-close').addEventListener('click', () => { libraryPanel.hidden = true; });
 select<HTMLButtonElement>('#notes-toggle').addEventListener('click', () => { notesPanel.hidden = !notesPanel.hidden; if (!notesPanel.hidden) void refreshNotesList(); });
@@ -2174,6 +2376,10 @@ select<HTMLButtonElement>('#note-marker-image-pick').addEventListener('click', (
 select<HTMLInputElement>('#note-image-upload').addEventListener('change', (event) => { void uploadNoteImageFilesFromInput(event); });
 select<HTMLButtonElement>('#asset-picker-close').addEventListener('click', () => assetPickerDialog.close());
 select<HTMLButtonElement>('#asset-picker-cancel').addEventListener('click', () => assetPickerDialog.close());
+select<HTMLButtonElement>('#asset-delete-close').addEventListener('click', () => assetDeleteDialog.close());
+select<HTMLButtonElement>('#asset-delete-cancel').addEventListener('click', () => assetDeleteDialog.close());
+select<HTMLButtonElement>('#asset-delete-confirm').addEventListener('click', () => void confirmAssetDelete());
+assetDeleteDialog.addEventListener('close', () => { pendingAssetDeleteId = undefined; });
 select<HTMLButtonElement>('#asset-picker-library-mode').addEventListener('click', setAssetPickerLibraryMode);
 select<HTMLButtonElement>('#asset-picker-upload-mode').addEventListener('click', setAssetPickerUploadMode);
 select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
@@ -2187,6 +2393,7 @@ select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
   renderNoteAttachments(); assetPickerDialog.close();
 });
 select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
+select<HTMLButtonElement>('#marker-resize').addEventListener('click', () => setMarkerResizeMode(!markerResizeMode));
 select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => { if (selectedMarkerId) void runCommand('note-marker:delete', { id: selectedMarkerId }).then(refreshNotesListIfVisible); });
 select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => { select<HTMLTextAreaElement>('#sticker-new-text').value = ''; stickerCreateDialog.showModal(); });
 select<HTMLButtonElement>('#sticker-create-cancel').addEventListener('click', () => stickerCreateDialog.close());

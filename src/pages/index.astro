@@ -43,6 +43,7 @@ import '../styles/global.css';
         <div class="topbar-center">
           <button id="zoom-reset" class="tool-button" type="button" title="Вернуть масштаб к 100%">100%</button>
           <button id="fit-board" class="tool-button" type="button">Показать всё</button>
+          <label class="board-background-control gm-only" hidden>Фон <select id="board-background"><option value="gray">Серый</option><option value="black">Чёрный</option></select></label>
           <button id="dice-tools-toggle" class="tool-button" type="button" aria-controls="dice-tools-panel" aria-expanded="false">Инструменты бросков</button>
           <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
           <span id="connection" class="status"><i></i><span>Подключение…</span></span>
@@ -90,6 +91,7 @@ import '../styles/global.css';
           <div id="marker-tools" class="object-tools marker-tools" hidden>
             <span class="selection-name">Метка заметки</span>
             <button id="marker-edit" type="button">Редактировать заметку</button>
+            <button id="marker-resize" type="button" aria-pressed="false">Изменить размер</button>
             <button id="marker-delete" class="danger" type="button">Удалить метку</button>
           </div>
           <div id="note-place-hint" class="canvas-message" role="status" hidden>Нажмите на доске, чтобы поставить метку заметки · Esc — отмена</div>
@@ -139,6 +141,21 @@ import '../styles/global.css';
         <p id="upload-message" class="message" role="status" aria-live="polite"></p>
         <ul id="assets-list" class="assets-list"></ul>
       </aside>
+
+      <dialog id="asset-delete-dialog" class="compact-dialog asset-delete-dialog">
+        <div class="note-dialog-heading"><div><p class="eyebrow">Библиотека ресурсов</p><h2>Удалить изображение?</h2></div><button id="asset-delete-close" class="icon-button" type="button" aria-label="Закрыть подтверждение">×</button></div>
+        <div class="asset-delete-preview">
+          <img id="asset-delete-thumb" alt="" />
+          <div><strong id="asset-delete-name"></strong><p class="panel-note">Оригинальный файл будет удалён без возможности восстановления из приложения.</p></div>
+        </div>
+        <div id="asset-delete-usage-wrap" class="asset-delete-usage" hidden>
+          <p>Изображение используется:</p>
+          <ul id="asset-delete-usage"></ul>
+          <p class="panel-note">Сначала удалите или замените все ссылки, после чего ресурс можно будет удалить.</p>
+        </div>
+        <div class="note-dialog-actions"><button id="asset-delete-cancel" class="secondary" type="button">Отмена</button><button id="asset-delete-confirm" class="danger" type="button">Удалить навсегда</button></div>
+        <p id="asset-delete-message" class="message" role="status" aria-live="polite"></p>
+      </dialog>
 
       <aside id="notes-panel" class="library-panel notes-panel gm-only" data-manual-visibility="true" hidden>
         <div class="panel-heading"><div><p class="eyebrow">Подготовка игры</p><h2>Заметки</h2></div><button id="notes-close" class="icon-button" type="button" aria-label="Закрыть заметки">×</button></div>

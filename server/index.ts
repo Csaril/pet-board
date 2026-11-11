@@ -13,7 +13,7 @@ import type { NoteAccess } from '../src/shared/board.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
 import { executeBoardCommand, BoardCommandError } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
-import { saveImageAsset, UnsupportedImageError } from './assets.js';
+import { AssetInUseError, AssetNotFoundError, deleteImageAsset, saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
 import type { DiceRollEntry } from '../src/shared/board.js';
 import { systemModuleRegistry } from '../src/modules/registry.js';
@@ -22,6 +22,7 @@ import { calculatePbtARoll, rollFreeDice, type SituationalModifier } from '../sr
 import { executeSheetCommand } from './sheets.js';
 
 const COOKIE_PATH = '/';
+const ASSET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -364,11 +365,41 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     }
   });
 
+  app.get('/api/assets/:id/usage', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Информация об использовании доступна только ведущему.' });
+    const { id } = request.params as { id: string };
+    if (!ASSET_ID_PATTERN.test(id) || !store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
+    reply.header('Cache-Control', 'no-store');
+    return { usage: store.getAssetUsage(id) };
+  });
+
+  app.delete('/api/assets/:id', async (request, reply) => {
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять изображения может только ведущий.' });
+    const { id } = request.params as { id: string };
+    if (!ASSET_ID_PATTERN.test(id) || !store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
+    const usage = store.getAssetUsage(id);
+    if (usage.length > 0) return reply.code(409).send({ error: 'Изображение используется и не может быть удалено.', usage });
+    try {
+      await deleteImageAsset(store, config.dataDir, id);
+    } catch (error) {
+      if (error instanceof AssetInUseError) return reply.code(409).send({ error: error.message, usage: error.usage });
+      if (error instanceof AssetNotFoundError) return reply.code(404).send({ error: error.message });
+      throw error;
+    }
+    sendState();
+    return reply.code(204).send();
+  });
+
   app.get('/api/assets/:id', async (request, reply) => {
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     const { id } = request.params as { id: string };
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    if (!ASSET_ID_PATTERN.test(id)) {
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
     const asset = store.getAsset(id);
@@ -421,6 +452,11 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
           store.saveDiceRoll(entry);
         } else if (typeof input.type === 'string' && input.type.startsWith('sheet:')) {
           executeSheetCommand(store, liveSession.identity, input);
+        } else if (input.type === 'room:background:set') {
+          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может менять фон доски.');
+          if (Object.keys(input).some((key) => !['type', 'requestId', 'background'].includes(key))) throw new BoardCommandError('Некорректные настройки фона.');
+          if (input.background !== 'black' && input.background !== 'gray') throw new BoardCommandError('Доступны только чёрный и серый фон.');
+          store.setBoardBackground(input.background);
         } else if (input.type === 'room:system:set') {
           if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.');
           if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version'].includes(key))) throw new BoardCommandError('Некорректные настройки системы.');
