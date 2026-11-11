@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { BoardImage, CropRect, LayerAudience, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardFontFamily, BoardImage, CropRect, LayerAudience, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import type { Identity } from './store.js';
 import { RoomStore } from './store.js';
 
@@ -50,6 +51,10 @@ function stickerTextColor(value: unknown): StickerTextColor {
 function stickerFontSize(value: unknown): number {
   if (![12, 14, 16, 18, 24, 32, 40].includes(value as number)) throw new BoardCommandError('Недопустимый размер текста стикера.');
   return value as number;
+}
+function stickerFontFamily(value: unknown): BoardFontFamily {
+  if (!isBoardFontFamily(value)) throw new BoardCommandError('Недопустимый шрифт стикера. Доступны «Стандартный» и «Caveat».');
+  return value;
 }
 function crop(value: unknown): CropRect | null {
   if (value === null) return null;
@@ -298,6 +303,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
         bgColor: command.bgColor === undefined ? 'butter' : stickerBackground(command.bgColor),
         textColor: command.textColor === undefined ? 'black' : stickerTextColor(command.textColor),
         fontSize: command.fontSize === undefined ? 18 : stickerFontSize(command.fontSize),
+        fontFamily: command.fontFamily === undefined ? DEFAULT_BOARD_FONT : stickerFontFamily(command.fontFamily),
       });
       return;
     }
@@ -310,7 +316,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       if (identity.role !== 'gm' && sticker.creatorId !== identity.participantId) throw new BoardCommandError('Можно редактировать только свой стикер.');
       if (identity.role === 'player' && (source.audience !== 'all-players' || !source.visible)) throw new BoardCommandError('Стикер недоступен.');
       const changes = objectValue(command.changes, 'Изменения стикера');
-      const allowed = new Set(['text', 'x', 'y', 'width', 'height', 'bgColor', 'textColor', 'fontSize', 'layerId']);
+      const allowed = new Set(['text', 'x', 'y', 'width', 'height', 'bgColor', 'textColor', 'fontSize', 'fontFamily', 'layerId']);
       if (!Object.keys(changes).length || Object.keys(changes).some((key) => !allowed.has(key))) throw new BoardCommandError('Недопустимые изменения стикера.');
       const patch = {
         ...(owns(changes, 'text') ? { text: text(changes.text, 'Текст стикера', 1000) } : {}),
@@ -321,6 +327,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
         ...(owns(changes, 'bgColor') ? { bgColor: stickerBackground(changes.bgColor) } : {}),
         ...(owns(changes, 'textColor') ? { textColor: stickerTextColor(changes.textColor) } : {}),
         ...(owns(changes, 'fontSize') ? { fontSize: stickerFontSize(changes.fontSize) } : {}),
+        ...(owns(changes, 'fontFamily') ? { fontFamily: stickerFontFamily(changes.fontFamily) } : {}),
         ...(owns(changes, 'layerId') ? (() => {
           const target = store.getLayer(text(changes.layerId, 'Целевой слой', 64));
           if (!target) throw new BoardCommandError('Целевой слой не найден.');

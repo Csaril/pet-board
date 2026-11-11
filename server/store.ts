@@ -2,7 +2,8 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -14,19 +15,19 @@ export interface ObjectPatch {
   flipX?: boolean; flipY?: boolean; crop?: CropRect | null; allowPlayerMove?: boolean; freeStretch?: boolean; orderIndex?: number;
 }
 export interface StickerInput extends Omit<BoardSticker, 'orderIndex'> { orderIndex?: number }
-export interface StickerPatch { text?: string; x?: number; y?: number; width?: number; height?: number; bgColor?: StickerBackground; textColor?: StickerTextColor; fontSize?: number; layerId?: string }
-export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string }
-export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string }
+export interface StickerPatch { text?: string; x?: number; y?: number; width?: number; height?: number; bgColor?: StickerBackground; textColor?: StickerTextColor; fontSize?: number; fontFamily?: BoardFontFamily; layerId?: string }
+export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string; fontFamily?: BoardFontFamily }
+export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string; fontFamily?: BoardFontFamily }
 export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number; width?: number; height?: number }
 export interface SheetInput {
   id: string; creatorId: string; creatorName: string; assignedPlayerId: string | null; assignedPlayerName: string | null;
   systemId: string; systemVersion: string; schemaVersion: number;
-  characterName: string; portraitAssetId: string | null; characteristics: Record<SheetCharacteristicKey, number>; fate: number;
+  characterName: string; portraitAssetId: string | null; characteristics: Record<SheetCharacteristicKey, number>; fate: number; fontFamily?: BoardFontFamily;
 }
-export interface SheetPatch { characterName?: string; portraitAssetId?: string | null; characteristics?: Record<SheetCharacteristicKey, number>; fate?: number }
+export interface SheetPatch { characterName?: string; portraitAssetId?: string | null; characteristics?: Record<SheetCharacteristicKey, number>; fate?: number; fontFamily?: BoardFontFamily }
 export interface CounterPatch { name?: string; value?: number }
-export interface AbilityInput { id: string; name: string; description: string; assetId: string | null; counterEnabled: boolean; counterName: string; counterValue: number; checkboxEnabled: boolean; checkboxLabel: string; checked: boolean }
-export interface AbilityPatch { name?: string; description?: string; assetId?: string | null; counterEnabled?: boolean; counterName?: string; counterValue?: number; checkboxEnabled?: boolean; checkboxLabel?: string; checked?: boolean; orderIndex?: number }
+export interface AbilityInput { id: string; name: string; description: string; assetId: string | null; counterEnabled: boolean; counterName: string; counterValue: number; checkboxEnabled: boolean; checkboxLabel: string; checked: boolean; fontFamily?: BoardFontFamily }
+export interface AbilityPatch { name?: string; description?: string; assetId?: string | null; counterEnabled?: boolean; counterName?: string; counterValue?: number; checkboxEnabled?: boolean; checkboxLabel?: string; checked?: boolean; fontFamily?: BoardFontFamily; orderIndex?: number }
 
 type LayerRow = { id: string; name: string; order_index: number; visible: number; locked: number; audience: LayerAudience };
 type ObjectRow = {
@@ -34,19 +35,20 @@ type ObjectRow = {
   order_index: number; flip_x: number; flip_y: number; crop_json: string | null; allow_player_move: number; free_stretch: number;
 };
 type AssetRow = { id: string; sha256: string; mime_type: BoardAsset['mimeType']; original_name: string; size: number; width: number; height: number; created_at: string };
-type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; order_index: number };
-type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null };
+type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; font_family: BoardFontFamily; order_index: number };
+type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; font_family: BoardFontFamily };
 type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; width: number | null; height: number | null; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
 type SheetRow = {
   id: string; creator_id: string; creator_name: string; assigned_player_id: string | null; assigned_player_name: string | null;
   system_id: string; system_version: string; schema_version: number;
-  character_name: string; portrait_asset_id: string | null; characteristics_json: string; fate: number; created_at: string; updated_at: string;
+  character_name: string; portrait_asset_id: string | null; characteristics_json: string; fate: number;
+  font_family: BoardFontFamily; created_at: string; updated_at: string;
 };
 type CounterRow = { id: string; sheet_id: string; name: string; value: number; order_index: number };
 type AbilityRow = {
   id: string; sheet_id: string; name: string; description: string; asset_id: string | null;
   counter_enabled: number; counter_name: string; counter_value: number;
-  checkbox_enabled: number; checkbox_label: string; checked: number; order_index: number;
+  checkbox_enabled: number; checkbox_label: string; checked: number; font_family: BoardFontFamily; order_index: number;
 };
 
 function toLayer(row: LayerRow): BoardLayer {
@@ -66,7 +68,10 @@ function toAsset(row: AssetRow): BoardAsset {
   return { id: row.id, sha256: row.sha256, mimeType: row.mime_type, originalName: row.original_name, size: row.size, width: row.width, height: row.height, createdAt: row.created_at };
 }
 function toSticker(row: StickerRow): BoardSticker {
-  return { id: row.id, creatorId: row.creator_id, layerId: row.layer_id, text: row.text, x: row.x, y: row.y, width: row.width, height: row.height, bgColor: row.bg_color, textColor: row.text_color, fontSize: row.font_size, orderIndex: row.order_index };
+  return { id: row.id, creatorId: row.creator_id, layerId: row.layer_id, text: row.text, x: row.x, y: row.y, width: row.width, height: row.height, bgColor: row.bg_color, textColor: row.text_color, fontSize: row.font_size, fontFamily: safeFont(row.font_family), orderIndex: row.order_index };
+}
+function safeFont(value: unknown): BoardFontFamily {
+  return isBoardFontFamily(value) ? value : DEFAULT_BOARD_FONT;
 }
 function textMarkerSize(text: string): { width: number; height: number } {
   return { width: Math.min(200, Math.max(64, text.length * 8 + 18)), height: 34 };
@@ -98,7 +103,7 @@ function toAbility(row: AbilityRow): CharacterSheetAbility {
     id: row.id, name: row.name, description: row.description, assetId: row.asset_id,
     counterEnabled: row.counter_enabled === 1, counterName: row.counter_name, counterValue: row.counter_value,
     checkboxEnabled: row.checkbox_enabled === 1, checkboxLabel: row.checkbox_label, checked: row.checked === 1,
-    orderIndex: row.order_index,
+    fontFamily: safeFont(row.font_family), orderIndex: row.order_index,
   };
 }
 
@@ -136,7 +141,7 @@ export class RoomStore {
         actor_id TEXT NOT NULL,
         actor_name TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free')),
+        kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use')),
         dice_json TEXT NOT NULL,
         kept_dice_json TEXT NOT NULL,
         discarded_die INTEGER,
@@ -150,7 +155,15 @@ export class RoomStore {
         total INTEGER NOT NULL,
         category TEXT CHECK (category IN ('failure', 'success', 'triumph')),
         critical TEXT CHECK (critical IN ('critical-failure', 'critical-success')),
-        reroll_of TEXT
+        reroll_of TEXT,
+        ability_id TEXT,
+        ability_sheet_id TEXT,
+        ability_character_name TEXT,
+        ability_name TEXT,
+        ability_asset_id TEXT,
+        ability_summary TEXT,
+        ability_description TEXT,
+        ability_font_family TEXT
       );
       CREATE INDEX IF NOT EXISTS dice_rolls_created ON dice_rolls(created_at DESC, id DESC);
       CREATE TABLE IF NOT EXISTS board_layers (
@@ -198,6 +211,7 @@ export class RoomStore {
         marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image')),
         marker_text TEXT,
         marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
+        font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         created_by TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -232,6 +246,7 @@ export class RoomStore {
         bg_color TEXT NOT NULL CHECK (bg_color IN ('butter', 'rose', 'sky', 'sage')),
         text_color TEXT NOT NULL CHECK (text_color IN ('black', 'white')),
         font_size INTEGER NOT NULL,
+        font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         order_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS stickers_layer_order ON stickers(layer_id, order_index);
@@ -255,6 +270,7 @@ export class RoomStore {
         portrait_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
         characteristics_json TEXT NOT NULL,
         fate INTEGER NOT NULL DEFAULT 0,
+        font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -279,6 +295,7 @@ export class RoomStore {
         checkbox_enabled INTEGER NOT NULL DEFAULT 0 CHECK (checkbox_enabled IN (0, 1)),
         checkbox_label TEXT NOT NULL DEFAULT '',
         checked INTEGER NOT NULL DEFAULT 0 CHECK (checked IN (0, 1)),
+        font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         order_index INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS character_abilities_sheet_order ON character_abilities(sheet_id, order_index);
@@ -333,10 +350,11 @@ export class RoomStore {
           id TEXT PRIMARY KEY, creator_id TEXT NOT NULL, layer_id TEXT NOT NULL REFERENCES board_layers(id) ON DELETE RESTRICT,
           text TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL,
           bg_color TEXT NOT NULL CHECK (bg_color IN ('butter', 'rose', 'sky', 'sage')),
-          text_color TEXT NOT NULL CHECK (text_color IN ('black', 'white')), font_size INTEGER NOT NULL, order_index INTEGER NOT NULL
+          text_color TEXT NOT NULL CHECK (text_color IN ('black', 'white')), font_size INTEGER NOT NULL,
+          font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')), order_index INTEGER NOT NULL
         )`);
-        this.db.exec(`INSERT INTO stickers (id, creator_id, layer_id, text, x, y, width, height, bg_color, text_color, font_size, order_index)
-          SELECT id, creator_id, layer_id, text, x, y, width, height, bg_color, CASE text_color WHEN 'plum' THEN 'white' ELSE 'black' END, font_size, order_index FROM stickers_legacy_colors`);
+        this.db.exec(`INSERT INTO stickers (id, creator_id, layer_id, text, x, y, width, height, bg_color, text_color, font_size, font_family, order_index)
+          SELECT id, creator_id, layer_id, text, x, y, width, height, bg_color, CASE text_color WHEN 'plum' THEN 'white' ELSE 'black' END, font_size, 'default', order_index FROM stickers_legacy_colors`);
         this.db.exec('DROP TABLE stickers_legacy_colors');
         this.db.exec('CREATE INDEX stickers_layer_order ON stickers(layer_id, order_index)');
       });
@@ -359,6 +377,13 @@ export class RoomStore {
     if (!noteColumns.some((column) => column.name === 'marker_type')) this.db.exec("ALTER TABLE notes ADD COLUMN marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image'))");
     if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
     if (!noteColumns.some((column) => column.name === 'marker_asset_id')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT');
+    if (!noteColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE notes ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
+    const stickerColumns = this.db.pragma('table_info(stickers)') as Array<{ name: string }>;
+    if (!stickerColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE stickers ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
+    const characterSheetColumns = this.db.pragma('table_info(character_sheets)') as Array<{ name: string }>;
+    if (!characterSheetColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE character_sheets ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
+    const abilityColumns = this.db.pragma('table_info(character_abilities)') as Array<{ name: string }>;
+    if (!abilityColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE character_abilities ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
     const markerColumns = this.db.pragma('table_info(note_markers)') as Array<{ name: string }>;
     if (!markerColumns.some((column) => column.name === 'width')) this.db.exec('ALTER TABLE note_markers ADD COLUMN width REAL');
     if (!markerColumns.some((column) => column.name === 'height')) this.db.exec('ALTER TABLE note_markers ADD COLUMN height REAL');
@@ -379,6 +404,71 @@ export class RoomStore {
     const diceColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
     if (!diceColumns.some((column) => column.name === 'character_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_id TEXT');
     if (!diceColumns.some((column) => column.name === 'character_owner_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_owner_id TEXT');
+    const diceSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dice_rolls'").get() as { sql: string } | undefined;
+    const abilityHistoryColumns = [
+      ['ability_id', 'TEXT'], ['ability_sheet_id', 'TEXT'], ['ability_character_name', 'TEXT'], ['ability_name', 'TEXT'],
+      ['ability_asset_id', 'TEXT'], ['ability_summary', 'TEXT'], ['ability_description', 'TEXT'], ['ability_font_family', 'TEXT'],
+    ] as const;
+    if (diceSchema && !diceSchema.sql.includes("'ability-use'")) {
+      // SQLite cannot extend a CHECK constraint in place. Rebuild the journal
+      // table while preserving every row and both indexes.
+      this.db.pragma('foreign_keys = OFF');
+      try {
+        this.db.transaction(() => {
+          this.db.exec('DROP INDEX IF EXISTS dice_rolls_created');
+          this.db.exec('DROP TABLE IF EXISTS dice_rolls_new');
+          this.db.exec(`CREATE TABLE dice_rolls_new (
+            id TEXT PRIMARY KEY,
+            author_id TEXT NOT NULL,
+            author_name TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            actor_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use')),
+            dice_json TEXT NOT NULL,
+            kept_dice_json TEXT NOT NULL,
+            discarded_die INTEGER,
+            characteristic_name TEXT,
+            character_id TEXT,
+            character_owner_id TEXT,
+            characteristic_bonus INTEGER,
+            situational_modifier INTEGER NOT NULL DEFAULT 0 CHECK (situational_modifier IN (-1, 0, 1)),
+            disadvantage INTEGER NOT NULL DEFAULT 0 CHECK (disadvantage IN (0, 1)),
+            sides INTEGER,
+            total INTEGER NOT NULL,
+            category TEXT CHECK (category IN ('failure', 'success', 'triumph')),
+            critical TEXT CHECK (critical IN ('critical-failure', 'critical-success')),
+            reroll_of TEXT,
+            ability_id TEXT,
+            ability_sheet_id TEXT,
+            ability_character_name TEXT,
+            ability_name TEXT,
+            ability_asset_id TEXT,
+            ability_summary TEXT,
+            ability_description TEXT,
+            ability_font_family TEXT
+          )`);
+          this.db.exec(`INSERT INTO dice_rolls_new
+            (id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
+             characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage,
+             sides, total, category, critical, reroll_of)
+            SELECT id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
+             characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage,
+             sides, total, category, critical, reroll_of
+            FROM dice_rolls ORDER BY rowid`);
+          this.db.exec('DROP TABLE dice_rolls');
+          this.db.exec('ALTER TABLE dice_rolls_new RENAME TO dice_rolls');
+          this.db.exec('CREATE INDEX IF NOT EXISTS dice_rolls_created ON dice_rolls(created_at DESC, id DESC)');
+        })();
+      } finally {
+        this.db.pragma('foreign_keys = ON');
+      }
+    } else {
+      const columns = new Set(diceColumns.map((column) => column.name));
+      for (const [name, type] of abilityHistoryColumns) {
+        if (!columns.has(name)) this.db.exec(`ALTER TABLE dice_rolls ADD COLUMN ${name} ${type}`);
+      }
+    }
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
     const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers').get() as { count: number }).count;
     if (layerCount === 0) this.createLayer('Основной слой', 'all-players');
@@ -407,9 +497,11 @@ export class RoomStore {
   saveDiceRoll(entry: DiceRollEntry): void {
     const insert = this.db.prepare(`INSERT INTO dice_rolls
       (id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
-       characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage, sides, total, category, critical, reroll_of)
+       characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage, sides, total, category, critical, reroll_of,
+       ability_id, ability_sheet_id, ability_character_name, ability_name, ability_asset_id, ability_summary, ability_description, ability_font_family)
       VALUES (@id, @authorId, @authorName, @actorId, @actorName, @createdAt, @kind, @dice, @keptDice, @discardedDie,
-       @characteristicName, @characterId, @characterOwnerId, @characteristicBonus, @situationalModifier, @disadvantage, @sides, @total, @category, @critical, @rerollOf)`);
+       @characteristicName, @characterId, @characterOwnerId, @characteristicBonus, @situationalModifier, @disadvantage, @sides, @total, @category, @critical, @rerollOf,
+       @abilityId, @abilitySheetId, @abilityCharacterName, @abilityName, @abilityAssetId, @abilitySummary, @abilityDescription, @abilityFontFamily)`);
     this.db.transaction(() => {
       insert.run({
         id: entry.id, authorId: entry.authorId, authorName: entry.authorName, actorId: entry.actorId, actorName: entry.actorName,
@@ -417,6 +509,9 @@ export class RoomStore {
         discardedDie: entry.discardedDie, characteristicName: entry.characteristicName, characterId: entry.characterId, characterOwnerId: entry.characterOwnerId, characteristicBonus: entry.characteristicBonus,
         situationalModifier: entry.situationalModifier, disadvantage: Number(entry.disadvantage), sides: entry.sides,
         total: entry.total, category: entry.category, critical: entry.critical, rerollOf: entry.rerollOf,
+        abilityId: entry.abilityId, abilitySheetId: entry.abilitySheetId, abilityCharacterName: entry.abilityCharacterName,
+        abilityName: entry.abilityName, abilityAssetId: entry.abilityAssetId, abilitySummary: entry.abilitySummary,
+        abilityDescription: entry.abilityDescription, abilityFontFamily: entry.abilityFontFamily,
       });
       this.db.exec('DELETE FROM dice_rolls WHERE id NOT IN (SELECT id FROM dice_rolls ORDER BY created_at DESC, rowid DESC LIMIT 10)');
     })();
@@ -434,6 +529,14 @@ export class RoomStore {
       sides: row.sides === null ? null : Number(row.sides), total: Number(row.total),
       category: row.category as DiceRollEntry['category'], critical: row.critical as DiceRollEntry['critical'],
       rerollOf: row.reroll_of === null ? null : String(row.reroll_of),
+      abilityId: row.ability_id === null || row.ability_id === undefined ? null : String(row.ability_id),
+      abilitySheetId: row.ability_sheet_id === null || row.ability_sheet_id === undefined ? null : String(row.ability_sheet_id),
+      abilityCharacterName: row.ability_character_name === null || row.ability_character_name === undefined ? null : String(row.ability_character_name),
+      abilityName: row.ability_name === null || row.ability_name === undefined ? null : String(row.ability_name),
+      abilityAssetId: row.ability_asset_id === null || row.ability_asset_id === undefined ? null : String(row.ability_asset_id),
+      abilitySummary: row.ability_summary === null || row.ability_summary === undefined ? null : String(row.ability_summary),
+      abilityDescription: row.ability_description === null || row.ability_description === undefined ? null : String(row.ability_description),
+      abilityFontFamily: row.ability_font_family === null || row.ability_font_family === undefined ? null : safeFont(row.ability_font_family),
     }));
   }
 
@@ -597,8 +700,8 @@ export class RoomStore {
 
   createNote(note: NoteInput): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by, marker_type, marker_text, marker_asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId, note.markerType || 'text', note.markerText || null, note.markerAssetId || null);
+      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by, marker_type, marker_text, marker_asset_id, font_family) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId, note.markerType || 'text', note.markerText || null, note.markerAssetId || null, note.fontFamily ?? DEFAULT_BOARD_FONT);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       note.assetIds.forEach((assetId, index) => insertAsset.run(note.id, assetId, index));
     });
@@ -606,8 +709,8 @@ export class RoomStore {
   }
   updateNote(id: string, patch: NotePatch): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare(`UPDATE notes SET title = ?, body = ?, access = ?, selected_participant_ids = ?, marker_type = ?, marker_text = ?, marker_asset_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-        .run(patch.title, patch.body, patch.access, JSON.stringify(patch.selectedParticipantIds), patch.markerType, patch.markerText || null, patch.markerAssetId || null, id);
+      this.db.prepare(`UPDATE notes SET title = ?, body = ?, access = ?, selected_participant_ids = ?, marker_type = ?, marker_text = ?, marker_asset_id = ?, font_family = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(patch.title, patch.body, patch.access, JSON.stringify(patch.selectedParticipantIds), patch.markerType, patch.markerText || null, patch.markerAssetId || null, patch.fontFamily ?? DEFAULT_BOARD_FONT, id);
       this.db.prepare('DELETE FROM note_assets WHERE note_id = ?').run(id);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       patch.assetIds.forEach((assetId, index) => insertAsset.run(id, assetId, index));
@@ -632,6 +735,7 @@ export class RoomStore {
       selectedParticipantIds, assetIds: assetIds.map((asset) => asset.asset_id),
       createdAt: row.created_at, updatedAt: row.updated_at, images,
       markerType: row.marker_type || 'text', markerText: row.marker_text || row.title,
+      fontFamily: safeFont(row.font_family),
       ...(row.marker_asset_id ? { markerAssetId: row.marker_asset_id } : {}),
     };
   }
@@ -699,12 +803,12 @@ export class RoomStore {
   }
   createSticker(sticker: StickerInput): void {
     const orderIndex = sticker.orderIndex ?? (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM stickers WHERE layer_id = ?').get(sticker.layerId) as { next: number }).next;
-    this.db.prepare(`INSERT INTO stickers (id, creator_id, layer_id, text, x, y, width, height, bg_color, text_color, font_size, order_index)
-      VALUES (@id, @creatorId, @layerId, @text, @x, @y, @width, @height, @bgColor, @textColor, @fontSize, @orderIndex)`)
-      .run({ ...sticker, orderIndex });
+    this.db.prepare(`INSERT INTO stickers (id, creator_id, layer_id, text, x, y, width, height, bg_color, text_color, font_size, font_family, order_index)
+      VALUES (@id, @creatorId, @layerId, @text, @x, @y, @width, @height, @bgColor, @textColor, @fontSize, @fontFamily, @orderIndex)`)
+      .run({ ...sticker, fontFamily: sticker.fontFamily ?? DEFAULT_BOARD_FONT, orderIndex });
   }
   updateSticker(id: string, patch: StickerPatch): void {
-    const columns: Record<keyof StickerPatch, string> = { text: 'text', x: 'x', y: 'y', width: 'width', height: 'height', bgColor: 'bg_color', textColor: 'text_color', fontSize: 'font_size', layerId: 'layer_id' };
+    const columns: Record<keyof StickerPatch, string> = { text: 'text', x: 'x', y: 'y', width: 'width', height: 'height', bgColor: 'bg_color', textColor: 'text_color', fontSize: 'font_size', fontFamily: 'font_family', layerId: 'layer_id' };
     const entries = Object.entries(patch) as Array<[keyof StickerPatch, StickerPatch[keyof StickerPatch]]>;
     if (!entries.length) return;
     this.db.prepare(`UPDATE stickers SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')} WHERE id = @id`)
@@ -775,17 +879,17 @@ export class RoomStore {
       assignedPlayerId: row.assigned_player_id, assignedPlayerName: row.assigned_player_name,
       systemId: row.system_id, systemVersion: row.system_version, schemaVersion: row.schema_version,
       characterName: row.character_name, portraitAssetId: row.portrait_asset_id, characteristics,
-      fate: row.fate, counters, abilities, createdAt: row.created_at, updatedAt: row.updated_at,
+      fate: row.fate, fontFamily: safeFont(row.font_family), counters, abilities, createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
   createSheet(sheet: SheetInput): void {
     this.db.prepare(`INSERT INTO character_sheets
-      (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate);
+      (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate, font_family)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate, sheet.fontFamily ?? DEFAULT_BOARD_FONT);
   }
   updateSheet(id: string, patch: SheetPatch): void {
-    const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate' };
+    const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate', fontFamily: 'font_family' };
     const entries = Object.entries(patch) as Array<[keyof SheetPatch, SheetPatch[keyof SheetPatch]]>;
     if (!entries.length) return;
     this.db.prepare(`UPDATE character_sheets SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
@@ -818,16 +922,17 @@ export class RoomStore {
   createAbility(sheetId: string, ability: AbilityInput): CharacterSheetAbility {
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM character_abilities WHERE sheet_id = ?').get(sheetId) as { next: number }).next;
     this.db.prepare(`INSERT INTO character_abilities
-      (id, sheet_id, name, description, asset_id, counter_enabled, counter_name, counter_value, checkbox_enabled, checkbox_label, checked, order_index)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(ability.id, sheetId, ability.name, ability.description, ability.assetId, Number(ability.counterEnabled), ability.counterName, ability.counterValue, Number(ability.checkboxEnabled), ability.checkboxLabel, Number(ability.checked), orderIndex);
+      (id, sheet_id, name, description, asset_id, counter_enabled, counter_name, counter_value, checkbox_enabled, checkbox_label, checked, font_family, order_index)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(ability.id, sheetId, ability.name, ability.description, ability.assetId, Number(ability.counterEnabled), ability.counterName, ability.counterValue, Number(ability.checkboxEnabled), ability.checkboxLabel, Number(ability.checked), ability.fontFamily ?? DEFAULT_BOARD_FONT, orderIndex);
     this.touchSheet(sheetId);
-    return { ...ability, orderIndex };
+    return { ...ability, fontFamily: ability.fontFamily ?? DEFAULT_BOARD_FONT, orderIndex };
   }
   updateAbility(sheetId: string, id: string, patch: AbilityPatch): void {
     const columns: Record<keyof AbilityPatch, string> = {
       name: 'name', description: 'description', assetId: 'asset_id', counterEnabled: 'counter_enabled', counterName: 'counter_name',
-      counterValue: 'counter_value', checkboxEnabled: 'checkbox_enabled', checkboxLabel: 'checkbox_label', checked: 'checked', orderIndex: 'order_index',
+      counterValue: 'counter_value', checkboxEnabled: 'checkbox_enabled', checkboxLabel: 'checkbox_label', checked: 'checked',
+      fontFamily: 'font_family', orderIndex: 'order_index',
     };
     const entries = Object.entries(patch) as Array<[keyof AbilityPatch, AbilityPatch[keyof AbilityPatch]]>;
     if (!entries.length) return;

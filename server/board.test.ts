@@ -219,7 +219,7 @@ test('legacy plum sticker text color migrates to white and preserves sticker dat
   legacy.close();
   const store = new RoomStore(dataDir, 'Ignored');
   try {
-    assert.deepEqual(store.getSticker('sticker-old'), { id: 'sticker-old', creatorId: 'player-old', layerId: 'layer-old', text: 'Saved', x: 12, y: 34, width: 240, height: 140, bgColor: 'sky', textColor: 'white', fontSize: 24, orderIndex: 7 });
+    assert.deepEqual(store.getSticker('sticker-old'), { id: 'sticker-old', creatorId: 'player-old', layerId: 'layer-old', text: 'Saved', x: 12, y: 34, width: 240, height: 140, bgColor: 'sky', textColor: 'white', fontSize: 24, fontFamily: 'default', orderIndex: 7 });
     assert.equal((store.db.prepare('SELECT text_color FROM stickers WHERE id = ?').get('sticker-old') as { text_color: string }).text_color, 'white');
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });

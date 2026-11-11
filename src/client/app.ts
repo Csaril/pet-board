@@ -1,7 +1,9 @@
 import Konva from 'konva';
-import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
+import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, isBoardFontFamily } from '../shared/fonts.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
+import { overflowGroupCount, placePopover } from '../shared/menu.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
 import { shouldHideGmOnlyElement } from '../shared/role-ui.js';
@@ -74,6 +76,11 @@ const pbtaControlsHome = select<HTMLElement>('#pbta-controls-home');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
+const topbarGroups = select<HTMLElement>('#topbar-groups');
+const topbarMoreToggle = select<HTMLButtonElement>('#topbar-more-toggle');
+const topbarMoreMenu = select<HTMLElement>('#topbar-more-menu');
+const createToggle = select<HTMLButtonElement>('#create-toggle');
+const topbarGroupElements = Array.from(topbarGroups.querySelectorAll<HTMLElement>(':scope > .topbar-group'));
 const MAX_WORLD_COORDINATE = 10_000_000;
 const MAX_ZOOM = 4;
 const MIN_ZOOM = 0.00001;
@@ -146,6 +153,9 @@ let camera = { x: 0, y: 0, scale: 1 };
 let hasRestoredCamera = false;
 let panGesture: { x: number; y: number; cameraX: number; cameraY: number } | undefined;
 let messageTimer: number | undefined;
+let openMenuTrigger: HTMLButtonElement | undefined;
+let topbarLayoutFrame: number | undefined;
+let boardFontsLoaded = false;
 const imageCache = new Map<string, HTMLImageElement>();
 const renderedObjects = new Map<string, RenderedObject>();
 const renderedStickers = new Map<string, RenderedSticker>();
@@ -172,6 +182,8 @@ function applyGmOnlyVisibility(role: AppIdentity['role']): void {
       hidden: element.hidden,
     });
   }
+  refreshCreateToggle();
+  scheduleTopbarLayout();
 }
 
 function applyBoardBackground(background: BoardBackground | undefined): void {
@@ -180,12 +192,115 @@ function applyBoardBackground(background: BoardBackground | undefined): void {
   if (boardBackgroundSelect.value !== selected) boardBackgroundSelect.value = selected;
 }
 
+function applyBoardFont(element: HTMLElement, font: BoardFontFamily | null | undefined): void {
+  element.classList.toggle('font-caveat', font === 'caveat');
+  element.style.fontFamily = cssFontFamily(font);
+}
+
+async function loadBoardFonts(): Promise<void> {
+  try {
+    await document.fonts.load('16px Caveat');
+    await document.fonts.ready;
+  } catch { /* The standard font remains available if loading fails. */ }
+  boardFontsLoaded = true;
+  if (roomState) drawObjects();
+}
+
+function positionMenu(trigger: HTMLButtonElement, menu: HTMLElement): void {
+  const anchor = trigger.getBoundingClientRect();
+  const wasHidden = menu.hidden;
+  const previousVisibility = menu.style.visibility;
+  menu.hidden = false;
+  menu.style.visibility = 'hidden';
+  const size = { width: menu.offsetWidth, height: menu.offsetHeight };
+  menu.hidden = wasHidden;
+  menu.style.visibility = previousVisibility;
+  const placement = placePopover(anchor, size, { width: window.innerWidth, height: window.innerHeight }, {
+    align: trigger === topbarMoreToggle ? 'right' : 'auto',
+  });
+  menu.style.left = `${placement.left}px`;
+  menu.style.top = `${placement.top}px`;
+  menu.dataset.side = placement.side;
+}
+
+function closeMenus(): void {
+  for (const trigger of document.querySelectorAll<HTMLButtonElement>('[data-menu-trigger]')) {
+    trigger.setAttribute('aria-expanded', 'false');
+    const menuId = trigger.getAttribute('aria-controls');
+    if (!menuId) continue;
+    const menu = document.getElementById(menuId);
+    if (menu) menu.hidden = true;
+  }
+  openMenuTrigger = undefined;
+}
+
+function toggleMenu(trigger: HTMLButtonElement): void {
+  const menuId = trigger.getAttribute('aria-controls');
+  const menu = menuId ? document.getElementById(menuId) : undefined;
+  if (!menu) return;
+  if (openMenuTrigger === trigger && !menu.hidden) { closeMenus(); return; }
+  closeMenus();
+  menu.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  openMenuTrigger = trigger;
+  positionMenu(trigger, menu);
+}
+
+function setupMenus(): void {
+  for (const trigger of document.querySelectorAll<HTMLButtonElement>('[data-menu-trigger]')) {
+    trigger.addEventListener('click', () => toggleMenu(trigger));
+    const menuId = trigger.getAttribute('aria-controls');
+    const menu = menuId ? document.getElementById(menuId) : undefined;
+    menu?.addEventListener('click', (event) => {
+      if ((event.target as Element | null)?.closest('.menu-item')) closeMenus();
+    });
+  }
+  document.addEventListener('pointerdown', (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (openMenuTrigger && !openMenuTrigger.contains(event.target) && !document.getElementById(openMenuTrigger.getAttribute('aria-controls') || '')?.contains(event.target)) closeMenus();
+  });
+  window.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeMenus(); });
+  window.addEventListener('resize', () => { if (openMenuTrigger) positionMenu(openMenuTrigger, document.getElementById(openMenuTrigger.getAttribute('aria-controls') || '') as HTMLElement); });
+}
+
+function refreshTopbarOverflow(): void {
+  closeMenus();
+  for (const group of topbarGroupElements) topbarGroups.append(group);
+  topbarMoreToggle.hidden = true;
+  topbarMoreToggle.setAttribute('aria-expanded', 'false');
+  const gap = Number.parseFloat(getComputedStyle(topbarGroups).columnGap) || 0;
+  const groups = topbarGroupElements.filter((group) => !group.hidden && group.offsetWidth > 0);
+  if (!groups.length) return;
+  const widths = groups.map((group) => group.getBoundingClientRect().width);
+  // Show the trigger first so its width is included in the available space.
+  topbarMoreToggle.hidden = false;
+  const count = overflowGroupCount(widths, topbarGroups.clientWidth, gap);
+  if (count === 0) {
+    topbarMoreToggle.hidden = true;
+    return;
+  }
+  for (const group of groups.slice(groups.length - count)) topbarMoreMenu.append(group);
+}
+
+function scheduleTopbarLayout(): void {
+  if (topbarLayoutFrame !== undefined) cancelAnimationFrame(topbarLayoutFrame);
+  topbarLayoutFrame = requestAnimationFrame(() => { topbarLayoutFrame = undefined; refreshTopbarOverflow(); });
+}
+
+function refreshCreateToggle(): void {
+  const note = select<HTMLButtonElement>('#note-create');
+  const sticker = select<HTMLButtonElement>('#sticker-create');
+  createToggle.hidden = note.hidden && sticker.hidden;
+}
+
 function login(role: AppIdentity['role'], name: string) {
   identity = { participantId: '', role, name };
   loginShell.hidden = true;
   workspace.hidden = false;
   applyGmOnlyVisibility(role);
   if (!stage) setupStage();
+  void loadBoardFonts();
+  scheduleTopbarLayout();
   connect();
 }
 
@@ -495,6 +610,7 @@ function updateCropShades(rendered: RenderedObject, width: number, height: numbe
 
 function drawObjects() {
   if (!boardLayer || !roomState) return;
+  if (!boardFontsLoaded) void loadBoardFonts();
   boardLayer.destroyChildren();
   transformer?.nodes([]);
   cropTransformer?.nodes([]);
@@ -572,7 +688,7 @@ function drawObjects() {
       const textColors: Record<BoardSticker['textColor'], string> = { black: '#000000', white: '#FFFFFF' };
       const group = new Konva.Group({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height, draggable: !layer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId), name: `board-sticker ${sticker.id}` });
       const background = new Konva.Rect({ width: sticker.width, height: sticker.height, fill: colors[sticker.bgColor], cornerRadius: 8, stroke: '#0002', strokeWidth: 1 });
-      const text = new Konva.Text({ x: 10, y: 8, width: sticker.width - 20, height: sticker.height - 16, text: sticker.text, fontFamily: 'system-ui, sans-serif', fontSize: sticker.fontSize, fill: textColors[sticker.textColor], wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false });
+      const text = new Konva.Text({ x: 10, y: 8, width: sticker.width - 20, height: sticker.height - 16, text: sticker.text, fontFamily: canvasFontFamily(sticker.fontFamily), fontSize: sticker.fontSize, fill: textColors[sticker.textColor], wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false });
       group.add(background, text);
       group.on('click tap', (event) => { event.cancelBubble = true; setSelectedSticker(sticker.id); });
       group.on('dragend', () => void runCommand('sticker:update', { id: sticker.id, changes: { x: clampWorld(group.x()), y: clampWorld(group.y()) } }));
@@ -689,7 +805,9 @@ function updateSelectionControls() {
   if (sticker && stickerRendered) {
     markerTransformer?.nodes([]);
     transformer?.nodes(canEditSticker ? [stickerRendered.group] : []); cropTransformer?.nodes([]);
-    select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor; select<HTMLSelectElement>('#sticker-font-size').value = String(sticker.fontSize);
+    select<HTMLSelectElement>('#sticker-bg').value = sticker.bgColor; select<HTMLSelectElement>('#sticker-text-color').value = sticker.textColor;
+    select<HTMLSelectElement>('#sticker-font-size').value = String(sticker.fontSize);
+    select<HTMLSelectElement>('#sticker-font-family').value = sticker.fontFamily || 'default';
     return;
   }
   if (marker && markerRendered) {
@@ -1085,6 +1203,7 @@ function updateBoard(state: RoomMessage) {
   if (!state.stickers?.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
   if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
   select<HTMLButtonElement>('#sticker-create').hidden = false;
+  refreshCreateToggle();
   renderLayers();
   renderAssets();
   renderDicePanel();
@@ -1126,12 +1245,56 @@ function renderDicePanel() {
   if (roomState.participants.some((participant) => participant.participantId === actorValue && participant.role === 'player')) pbtaActor.value = actorValue;
   diceHistory.replaceChildren();
   if (!roomState.diceRolls.length) {
-    const empty = document.createElement('li'); empty.className = 'dice-history-empty'; empty.textContent = 'Пока нет бросков.'; diceHistory.append(empty); return;
+    const empty = document.createElement('li'); empty.className = 'dice-history-empty'; empty.textContent = 'Пока нет событий.'; diceHistory.append(empty); return;
   }
   for (const roll of roomState.diceRolls) diceHistory.append(renderDiceEntry(roll));
 }
 
+function renderAbilityEntry(roll: DiceRollEntry): HTMLLIElement {
+  const item = document.createElement('li'); item.className = 'dice-entry dice-entry-ability';
+  const title = document.createElement('div'); title.className = 'dice-entry-top';
+  const heading = document.createElement('span');
+  const actor = roll.actorName && roll.actorName !== roll.authorName ? `${roll.authorName} за ${roll.actorName}` : roll.authorName;
+  heading.textContent = `${actor} · ${roll.abilityCharacterName || 'Персонаж'}`;
+  const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt;
+  time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  title.append(heading, time);
+
+  const abilityRow = document.createElement('div'); abilityRow.className = 'dice-entry-ability-row';
+  const image = makeSheetPortrait(roll.abilityAssetId, roll.abilityName || 'Способность', 'dice-ability-image');
+  const abilityCopy = document.createElement('div'); abilityCopy.className = 'dice-entry-ability-copy';
+  const abilityName = document.createElement('strong'); abilityName.className = 'dice-entry-ability-name';
+  abilityName.textContent = roll.abilityName || 'Без названия';
+  applyBoardFont(abilityName, roll.abilityFontFamily);
+  const marker = document.createElement('span'); marker.className = 'dice-entry-applied'; marker.textContent = 'Применено';
+  abilityCopy.append(abilityName, marker);
+  abilityRow.append(image, abilityCopy);
+
+  const summary = document.createElement('div'); summary.className = 'dice-entry-detail dice-entry-ability-summary';
+  summary.textContent = roll.abilitySummary || 'Без описания';
+  applyBoardFont(summary, roll.abilityFontFamily);
+  item.append(title, abilityRow, summary);
+
+  if (roll.abilityDescription) {
+    const description = document.createElement('div');
+    description.className = 'dice-entry-ability-description';
+    description.textContent = roll.abilityDescription;
+    description.hidden = true;
+    applyBoardFont(description, roll.abilityFontFamily);
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'secondary dice-entry-details'; toggle.textContent = 'Подробнее';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', () => {
+      description.hidden = !description.hidden;
+      toggle.textContent = description.hidden ? 'Подробнее' : 'Свернуть';
+      toggle.setAttribute('aria-expanded', String(!description.hidden));
+    });
+    item.append(toggle, description);
+  }
+  return item;
+}
+
 function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
+  if (roll.kind === 'ability-use') return renderAbilityEntry(roll);
   const item = document.createElement('li'); item.className = 'dice-entry';
   const title = document.createElement('div'); title.className = 'dice-entry-top';
   const label = roll.kind === 'free' ? `${roll.actorName} · свободный бросок` : roll.authorId === roll.actorId ? `${roll.actorName} · PbtA` : `${roll.authorName} за ${roll.actorName} · PbtA`;
@@ -1237,6 +1400,7 @@ function renderSheetCatalogCard(sheet: CharacterSheet, assign: boolean): HTMLLIE
   const character = document.createElement('strong');
   character.className = 'sheet-catalog-character';
   character.textContent = sheet.characterName || 'Без имени';
+  applyBoardFont(character, sheet.fontFamily);
   copy.append(owner, character);
   item.append(portrait, copy);
   const actions = document.createElement('div');
@@ -1442,6 +1606,7 @@ function renderSheetPanel() {
   const canEdit = canEditSheet(sheet);
   if (!canEdit) sheetDialogMode = DEFAULT_SHEET_PANEL_MODE;
   sheetNameHeading.textContent = sheet.characterName || 'Без имени';
+  applyBoardFont(sheetNameHeading, sheet.fontFamily);
   sheetOwnerLabel.textContent = sheet.assignedPlayerName ? `Игрок: ${sheet.assignedPlayerName}` : 'Не назначен';
   sheetSystemLabel.textContent = `${pbtaSystemModule.name} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
   if (sheet.portraitAssetId) {
@@ -1478,6 +1643,13 @@ function renderSheetPanel() {
       portraitRow.append(clearPortrait);
     }
     fields.append(nameLabel, portraitRow);
+    const fontLabel = document.createElement('label'); fontLabel.textContent = 'Шрифт имени и текста';
+    const fontSelect = document.createElement('select');
+    for (const font of BOARD_FONT_OPTIONS) { const option = document.createElement('option'); option.value = font.value; option.textContent = font.label; fontSelect.append(option); }
+    fontSelect.value = sheet.fontFamily || 'default';
+    fontSelect.addEventListener('change', () => void runCommand('sheet:update', { id: sheet.id, changes: { fontFamily: fontSelect.value } }));
+    fontLabel.append(fontSelect);
+    fields.append(fontLabel);
     identitySection.append(fields);
     sheetContent.append(identitySection);
   }
@@ -1614,6 +1786,7 @@ function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbilit
   });
   const image = makeSheetPortrait(ability.assetId, ability.name, 'sheet-ability-image');
   const title = document.createElement('strong'); title.className = 'sheet-ability-name'; title.textContent = ability.name || 'Без названия';
+  applyBoardFont(title, ability.fontFamily);
   header.append(expand, image, title);
   if (collapsed && ability.counterEnabled) {
     const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = `${ability.counterName || 'Счётчик'}: ${ability.counterValue}`;
@@ -1623,11 +1796,22 @@ function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbilit
     const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = ability.checkboxLabel || 'Отмечено';
     header.append(summary);
   }
+  if (canEditSheet(sheet)) {
+    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'secondary sheet-ability-apply';
+    apply.textContent = 'Применить';
+    apply.title = 'Добавить событие применения способности в историю';
+    apply.addEventListener('click', () => {
+      apply.disabled = true;
+      void runCommand('sheet:ability:apply', { sheetId: sheet.id, id: ability.id }).finally(() => { apply.disabled = false; });
+    });
+    header.append(apply);
+  }
   card.append(header);
   if (collapsed) return card;
 
   const body = document.createElement('div'); body.className = 'sheet-ability-body';
   const description = document.createElement('div'); description.className = 'sheet-ability-description'; description.textContent = ability.description || 'Описание не задано.';
+  applyBoardFont(description, ability.fontFamily);
   body.append(description);
 
   if (ability.counterEnabled) {
@@ -1667,7 +1851,13 @@ function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbilit
     const descriptionInput = document.createElement('textarea'); descriptionInput.rows = 5; descriptionInput.maxLength = 8000; descriptionInput.value = ability.description;
     descriptionInput.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { description: descriptionInput.value } }));
     descriptionLabel.append(descriptionInput);
-    editor.append(nameLabel, descriptionLabel);
+    const fontLabel = document.createElement('label'); fontLabel.textContent = 'Шрифт';
+    const fontSelect = document.createElement('select');
+    for (const font of BOARD_FONT_OPTIONS) { const option = document.createElement('option'); option.value = font.value; option.textContent = font.label; fontSelect.append(option); }
+    fontSelect.value = ability.fontFamily || 'default';
+    fontSelect.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { fontFamily: fontSelect.value } }));
+    fontLabel.append(fontSelect);
+    editor.append(nameLabel, descriptionLabel, fontLabel);
 
     const imageRow = document.createElement('div'); imageRow.className = 'sheet-portrait-actions';
     const pick = document.createElement('button'); pick.type = 'button'; pick.className = 'secondary'; pick.textContent = 'Выбрать картинку';
@@ -1763,7 +1953,10 @@ async function openNote(id: string) {
     select<HTMLElement>('#note-participants').hidden = true;
     select<HTMLElement>('.note-assets').hidden = true;
     select<HTMLElement>('#note-marker-text-row').hidden = true; select<HTMLElement>('#note-marker-image-row').hidden = true;
+    select<HTMLLabelElement>('label[for="note-font-family"]').hidden = true;
+    select<HTMLSelectElement>('#note-font-family').hidden = true;
     const body = select<HTMLElement>('#note-view-body'); body.textContent = note.body; body.hidden = false;
+    applyBoardFont(body, note.fontFamily);
     const images = select<HTMLElement>('#note-view-images'); images.replaceChildren(); images.hidden = note.images.length === 0;
     for (const asset of note.images) { const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
     select<HTMLButtonElement>('#note-save').hidden = true;
@@ -1784,6 +1977,10 @@ function openNoteEditor(note?: NoteRecord) {
   select<HTMLInputElement>('#note-title').value = note?.title || '';
   select<HTMLTextAreaElement>('#note-body').value = note?.body || '';
   select<HTMLSelectElement>('#note-access').value = note?.access || 'gm-only';
+  select<HTMLSelectElement>('#note-font-family').value = note?.fontFamily || 'default';
+  applyBoardFont(select<HTMLTextAreaElement>('#note-body'), note?.fontFamily);
+  const noteFontSelect = select<HTMLSelectElement>('#note-font-family');
+  noteFontSelect.onchange = () => applyBoardFont(select<HTMLTextAreaElement>('#note-body'), isBoardFontFamily(noteFontSelect.value) ? noteFontSelect.value : 'default');
   select<HTMLSelectElement>('#note-marker-type').value = note?.markerType || 'text';
   select<HTMLInputElement>('#note-marker-text').value = note?.markerText === note?.title ? '' : note?.markerText || '';
   selectedMarkerAssetId = note?.markerAssetId;
@@ -1796,6 +1993,8 @@ function openNoteEditor(note?: NoteRecord) {
   select<HTMLLabelElement>('label[for="note-marker-type"]').hidden = false;
   select<HTMLSelectElement>('#note-marker-type').hidden = false;
   select<HTMLLabelElement>('label[for="note-body"]').hidden = false;
+  select<HTMLLabelElement>('label[for="note-font-family"]').hidden = false;
+  select<HTMLSelectElement>('#note-font-family').hidden = false;
   select<HTMLElement>('#note-view-body').hidden = true; select<HTMLElement>('#note-view-images').hidden = true;
   select<HTMLElement>('.note-assets').hidden = false;
   const participantWrap = select<HTMLElement>('#note-participants'); participantWrap.hidden = true;
@@ -2027,7 +2226,7 @@ async function saveNote() {
   if (markerType === 'image' && !selectedMarkerAssetId) { setNoteMessage('Выберите изображение для графической метки.'); return; }
   const id = editingNoteId;
   try {
-    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds: editingAssetIds, markerType, markerText: select<HTMLInputElement>('#note-marker-text').value, ...(markerType === 'image' && selectedMarkerAssetId ? { markerAssetId: selectedMarkerAssetId } : {}) }) });
+    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds: editingAssetIds, markerType, markerText: select<HTMLInputElement>('#note-marker-text').value, fontFamily: select<HTMLSelectElement>('#note-font-family').value, ...(markerType === 'image' && selectedMarkerAssetId ? { markerAssetId: selectedMarkerAssetId } : {}) }) });
     const result = await response.json() as { note?: NoteRecord; error?: string };
     if (!response.ok) throw new Error(result.error || 'Не удалось сохранить заметку.');
     closeNoteDialog(); await refreshNotesList();
@@ -2310,6 +2509,7 @@ makeFloatingPanelDraggable(diceHistoryPanel, 'dice-history');
 makeFloatingPanelDraggable(sheetPanel, 'sheet');
 makeFloatingPanelDraggable(sheetRollPanel, 'sheet-roll');
 window.addEventListener('resize', () => {
+  scheduleTopbarLayout();
   for (const [panel, key] of [[diceToolsPanel, 'dice-tools'], [diceHistoryPanel, 'dice-history']] as const) {
     clampFloatingPanel(panel);
     if (identity?.participantId) saveFloatingPanel(panel, identity.participantId, key);
@@ -2402,13 +2602,14 @@ select<HTMLButtonElement>('#sticker-create-confirm').addEventListener('click', (
   const layer = identity?.role === 'gm' ? roomState.layers.find((entry) => entry.id === activeLayerId && !entry.locked) : undefined;
   if (identity?.role === 'gm' && !layer) { showCanvasMessage('Выберите незаблокированный слой для стикера.', true); return; }
   const x = stage ? clampWorld((stage.width() / 2 - stage.x()) / stage.scaleX()) : 0; const y = stage ? clampWorld((stage.height() / 2 - stage.y()) / stage.scaleY()) : 0;
-  void runCommand('sticker:create', { ...(layer ? { layerId: layer.id } : {}), text, x, y, fontSize: Number(select<HTMLSelectElement>('#sticker-new-size').value), textColor: select<HTMLSelectElement>('#sticker-new-color').value });
+  void runCommand('sticker:create', { ...(layer ? { layerId: layer.id } : {}), text, x, y, fontSize: Number(select<HTMLSelectElement>('#sticker-new-size').value), fontFamily: select<HTMLSelectElement>('#sticker-new-font').value, textColor: select<HTMLSelectElement>('#sticker-new-color').value });
   stickerCreateDialog.close();
 });
 select<HTMLButtonElement>('#sticker-edit').addEventListener('click', () => { const sticker = roomState?.stickers.find((entry) => entry.id === selectedStickerId); if (!sticker) return; const text = window.prompt('Текст стикера', sticker.text); if (text?.trim()) void runCommand('sticker:update', { id: sticker.id, changes: { text: text.trim() } }); });
 select<HTMLSelectElement>('#sticker-bg').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { bgColor: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLSelectElement>('#sticker-text-color').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { textColor: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLSelectElement>('#sticker-font-size').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { fontSize: Number((event.currentTarget as HTMLSelectElement).value) } }));
+select<HTMLSelectElement>('#sticker-font-family').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { fontFamily: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLButtonElement>('#sticker-duplicate').addEventListener('click', () => selectedStickerId && void runCommand('sticker:duplicate', { id: selectedStickerId }));
 select<HTMLButtonElement>('#sticker-delete').addEventListener('click', () => selectedStickerId && void runCommand('sticker:delete', { id: selectedStickerId }));
 select<HTMLButtonElement>('#layer-create').addEventListener('click', () => {
@@ -2521,4 +2722,5 @@ async function restoreSession() {
   } catch { loginMessage.textContent = 'Нет соединения с сервером.'; }
 }
 
+setupMenus();
 void restoreSession();

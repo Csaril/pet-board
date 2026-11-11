@@ -1,3 +1,13 @@
+@font-face {
+  font-family: 'Caveat';
+  src: url('/fonts/Caveat-VariableFont_wght.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+.font-caveat { font-family: 'Caveat', 'Comic Sans MS', cursive; }
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: #242a28;
@@ -38,11 +48,43 @@ button.secondary:hover { background: #e7ebe5; }
 footer { position: fixed; bottom: 20px; color: #8a928c; font-size: 11px; }
 @media (max-width: 500px) { .card { padding: 26px 22px; } footer { position: static; margin-top: 20px; text-align: center; } }
 
-body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; background: #e9ece8; }
+body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; background: #e9ece8; }
 .workspace { position: fixed; inset: 0; display: flex; flex-direction: column; background: #e9ece8; }
-.topbar { z-index: 3; height: 64px; flex: 0 0 64px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 20px; border-bottom: 1px solid #dce1db; background: #fff; }
+.topbar { z-index: 3; height: 64px; flex: 0 0 64px; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 0 14px; border-bottom: 1px solid #dce1db; background: #fff; }
 .topbar-brand, .topbar-center, .topbar-actions { display: flex; align-items: center; gap: 12px; }
-.topbar-brand { min-width: 220px; }
+.topbar-brand { min-width: 0; flex: 0 0 auto; }
+.topbar-brand-copy { min-width: 0; }
+.topbar-brand-copy .topbar-group-label { display: block; margin-bottom: 1px; }
+.topbar-groups { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; overflow: hidden; }
+.topbar-group { min-width: 0; display: flex; align-items: center; gap: 7px; flex: 0 0 auto; padding-left: 10px; border-left: 1px solid #e7ebe6; }
+.topbar-group:first-child { padding-left: 0; border-left: 0; }
+.topbar-group-label { color: #8a938c; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+.topbar-group-actions { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.topbar-tail { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.topbar-tail .status { margin: 0; }
+.menu-anchor { position: relative; display: inline-flex; }
+.dropdown-menu {
+  position: fixed; z-index: 80; min-width: 190px; max-width: min(300px, calc(100vw - 24px));
+  max-height: min(70vh, 460px); overflow-y: auto; padding: 12px;
+  border: 1px solid #d5ddd5; border-radius: 10px; background: #fff;
+  box-shadow: 0 14px 40px #23372b26; scrollbar-width: thin;
+}
+.dropdown-menu::-webkit-scrollbar { width: 9px; }
+.dropdown-menu::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 9px; background: #c9d2cb; }
+.dropdown-menu[data-side="top"] { box-shadow: 0 -12px 36px #23372b1f; }
+.dropdown-menu .menu-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 36px; margin: 0;
+  padding: 0 11px; border: 0; border-radius: 7px; background: transparent;
+  color: #3f4842; font-size: 12px; font-weight: 600; text-align: left; white-space: nowrap;
+}
+.dropdown-menu .menu-item:hover { background: #f1f6f0; color: #2f5a43; }
+.dropdown-menu .menu-item > span { width: 14px; color: #6f7d73; text-align: center; }
+.topbar-more-menu { width: 250px; }
+.topbar-more-menu .topbar-group { display: grid; gap: 5px; width: 100%; padding: 8px 4px; border-left: 0; border-top: 1px solid #edf0eb; }
+.topbar-more-menu .topbar-group:first-child { border-top: 0; }
+.topbar-more-menu .topbar-group-actions { flex-wrap: wrap; gap: 5px; }
+.topbar-more-menu .board-background-control { width: 100%; }
+.menu-caret { color: #7b857e; font-size: 9px; }
 .brand-mark.small { width: 32px; height: 32px; border-radius: 9px; font-size: 10px; flex: 0 0 32px; }
 .topbar-brand strong { display: block; font-size: 13px; }
 .topbar-brand .identity { display: block; margin: 2px 0 0; font-size: 11px; }
@@ -316,4 +358,23 @@ body:has(.workspace:not([hidden])) { min-width: 760px; overflow: hidden; backgro
 .sheet-ability-editor { display: grid; gap: 7px; margin-top: 9px; padding: 10px; border: 1px solid #e4e8e2; border-radius: 7px; background: #fafbf9; }
 .sheet-portrait-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .sheet-portrait-actions button { width: fit-content; height: 31px; margin: 0; padding: 0 10px; font-size: 11px; }
-@media (max-width: 900px) { .topbar { padding: 0 10px; gap: 6px; } .topbar-brand, .topbar-actions { min-width: unset; } .topbar-center { gap: 5px; } .topbar-center .status { display: none; } .side-panel { width: 235px; flex-basis: 235px; } .sheet-characteristics { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); } }
+.sheet-ability-apply-row { padding: 4px 0 2px; }
+.sheet-ability-apply { width: fit-content; height: 30px; margin: 0; padding: 0 12px; font-size: 11px; }
+.sheet-ability-header .sheet-ability-apply { flex: 0 0 auto; height: 27px; padding: 0 9px; font-size: 10px; }
+.dice-entry-ability-row { display: flex; align-items: center; gap: 8px; margin: 1px 0; }
+.dice-ability-image { width: 38px; height: 38px; flex: 0 0 38px; object-fit: contain; border: 1px solid #e2e6df; border-radius: 6px; background: #f5f6f3; }
+.dice-entry-ability-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.dice-entry-ability-name { color: #354239; font-size: 12px; }
+.dice-entry-applied { padding: 2px 6px; border-radius: 999px; background: #e6f0e8; color: #396747; font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.dice-entry-ability-summary { white-space: pre-wrap; }
+.dice-entry-ability-description { padding: 6px 8px; border-radius: 6px; background: #f7f9f6; color: #5d685f; font-size: 10px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+#note-font-family { height: 36px; }
+@media (max-width: 1280px) { .topbar-group-label, .topbar-brand-copy .topbar-group-label { display: none; } }
+@media (max-width: 900px) {
+  .topbar { padding: 0 10px; gap: 6px; }
+  .topbar-groups { gap: 6px; }
+  .topbar-brand .identity { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-tail .status { display: none; }
+  .side-panel { width: 235px; flex-basis: 235px; }
+}
+.topbar-more-menu .topbar-group-label { display: block; }

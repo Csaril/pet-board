@@ -1,5 +1,6 @@
 export type LayerAudience = 'gm-only' | 'all-players';
 export type BoardBackground = 'black' | 'gray';
+export type BoardFontFamily = 'default' | 'caveat';
 
 export interface BoardLayer {
   id: string;
@@ -67,6 +68,7 @@ export interface BoardSticker {
   bgColor: StickerBackground;
   textColor: StickerTextColor;
   fontSize: number;
+  fontFamily: BoardFontFamily;
   orderIndex: number;
 }
 
@@ -105,6 +107,7 @@ export interface NoteRecord {
   markerType: 'text' | 'image';
   markerText: string;
   markerAssetId?: string;
+  fontFamily: BoardFontFamily;
 }
 
 export interface NoteListItem {
@@ -135,6 +138,7 @@ export interface CharacterSheetAbility {
   checkboxEnabled: boolean;
   checkboxLabel: string;
   checked: boolean;
+  fontFamily: BoardFontFamily;
   orderIndex: number;
 }
 
@@ -151,6 +155,7 @@ export interface CharacterSheet {
   portraitAssetId: string | null;
   characteristics: Record<SheetCharacteristicKey, number>;
   fate: number;
+  fontFamily: BoardFontFamily;
   counters: CharacterSheetCounter[];
   abilities: CharacterSheetAbility[];
   createdAt: string;
@@ -177,7 +182,7 @@ export type DiceRollEntry = {
   actorId: string;
   actorName: string;
   createdAt: string;
-  kind: 'pbta' | 'free';
+  kind: 'pbta' | 'free' | 'ability-use';
   dice: number[];
   keptDice: number[];
   discardedDie: number | null;
@@ -192,6 +197,15 @@ export type DiceRollEntry = {
   category: 'failure' | 'success' | 'triumph' | null;
   critical: 'critical-failure' | 'critical-success' | null;
   rerollOf: string | null;
+  /** Snapshot of an ability application; null for dice rolls. */
+  abilityId: string | null;
+  abilitySheetId: string | null;
+  abilityCharacterName: string | null;
+  abilityName: string | null;
+  abilityAssetId: string | null;
+  abilitySummary: string | null;
+  abilityDescription: string | null;
+  abilityFontFamily: BoardFontFamily | null;
 };
 
 export interface BoardStateMessage extends BoardSnapshot {

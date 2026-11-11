@@ -9,7 +9,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomInt, randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
-import type { NoteAccess } from '../src/shared/board.js';
+import type { BoardFontFamily, NoteAccess } from '../src/shared/board.js';
+import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
 import { executeBoardCommand, BoardCommandError } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
@@ -24,10 +25,10 @@ import { executeSheetCommand } from './sheets.js';
 const COOKIE_PATH = '/';
 const ASSET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string } | undefined {
+function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string; fontFamily: BoardFontFamily } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
   const body = input as Record<string, unknown>;
-  if (Object.keys(body).some((key) => !['title', 'body', 'access', 'selectedParticipantIds', 'assetIds', 'markerType', 'markerText', 'markerAssetId'].includes(key))) return undefined;
+  if (Object.keys(body).some((key) => !['title', 'body', 'access', 'selectedParticipantIds', 'assetIds', 'markerType', 'markerText', 'markerAssetId', 'fontFamily'].includes(key))) return undefined;
   if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return undefined;
   if (typeof body.body !== 'string' || body.body.length > 20_000) return undefined;
   if (body.access !== 'gm-only' && body.access !== 'all-players' && body.access !== 'selected-players') return undefined;
@@ -47,7 +48,9 @@ function parseNotePayload(input: unknown, store: RoomStore): { title: string; bo
   const markerAssetId = typeof body.markerAssetId === 'string' && body.markerAssetId ? body.markerAssetId : undefined;
   if (markerType === 'image' && (!markerAssetId || !store.getAsset(markerAssetId))) return undefined;
   if (markerType === 'text' && markerAssetId !== undefined) return undefined;
-  return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds, markerType, markerText: markerText.trim(), ...(markerAssetId ? { markerAssetId } : {}) };
+  const fontFamily = body.fontFamily === undefined ? DEFAULT_BOARD_FONT : body.fontFamily;
+  if (!isBoardFontFamily(fontFamily)) return undefined;
+  return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds, markerType, markerText: markerText.trim(), fontFamily, ...(markerAssetId ? { markerAssetId } : {}) };
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
@@ -157,6 +160,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
         createdAt: new Date().toISOString(), kind: 'free', dice: result.dice, keptDice: result.dice, discardedDie: null,
         characteristicName: null, characterId: null, characterOwnerId: null, characteristicBonus: null, situationalModifier: 0, disadvantage: false,
         sides: sides as number, total: result.total, category: null, critical: null, rerollOf: null,
+        abilityId: null, abilitySheetId: null, abilityCharacterName: null, abilityName: null, abilityAssetId: null,
+        abilitySummary: null, abilityDescription: null, abilityFontFamily: null,
       };
     }
 
@@ -216,6 +221,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: actor.participantId, actorName: actor.name,
       createdAt: new Date().toISOString(), kind: 'pbta', ...result, characteristicName, characterId, characterOwnerId,
       sides: 6, disadvantage, rerollOf: original?.id ?? null,
+      abilityId: null, abilitySheetId: null, abilityCharacterName: null, abilityName: null, abilityAssetId: null,
+      abilitySummary: null, abilityDescription: null, abilityFontFamily: null,
     };
   };
 

@@ -39,22 +39,52 @@ import '../styles/global.css';
 
     <main id="workspace" class="workspace" hidden>
       <header class="topbar">
-        <div class="topbar-brand"><span class="brand-mark small" aria-hidden="true">TB</span><div><strong id="room-name">Игровая комната</strong><span id="identity" class="identity"></span></div></div>
-        <div class="topbar-center">
-          <button id="zoom-reset" class="tool-button" type="button" title="Вернуть масштаб к 100%">100%</button>
-          <button id="fit-board" class="tool-button" type="button">Показать всё</button>
-          <label class="board-background-control gm-only" hidden>Фон <select id="board-background"><option value="gray">Серый</option><option value="black">Чёрный</option></select></label>
-          <button id="dice-tools-toggle" class="tool-button" type="button" aria-controls="dice-tools-panel" aria-expanded="false">Инструменты бросков</button>
-          <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
-          <span id="connection" class="status"><i></i><span>Подключение…</span></span>
+        <div class="topbar-brand" aria-label="Информация о комнате">
+          <span class="brand-mark small" aria-hidden="true">TB</span>
+          <div class="topbar-brand-copy"><span class="topbar-group-label">Информация о комнате</span><strong id="room-name">Игровая комната</strong><span id="identity" class="identity"></span></div>
         </div>
-        <div class="topbar-actions">
-          <button id="sheets-toggle" class="tool-button" type="button" aria-controls="sheets-panel" aria-expanded="false">Листы</button>
-          <button id="notes-toggle" class="tool-button gm-only" type="button" hidden>Заметки</button>
-          <button id="note-create" class="tool-button gm-only" type="button" hidden>＋ Заметка</button>
-          <button id="sticker-create" class="tool-button" type="button" hidden>＋ Стикер</button>
-          <button id="library-toggle" class="tool-button gm-only" type="button" hidden>Библиотека</button>
-          <button id="leave" class="tool-button secondary" type="button">Выйти</button>
+        <nav id="topbar-groups" class="topbar-groups" aria-label="Панель управления">
+          <section class="topbar-group" data-topbar-group="view" aria-label="Вид доски">
+            <span class="topbar-group-label">Вид доски</span>
+            <div class="topbar-group-actions">
+              <button id="zoom-reset" class="tool-button" type="button" title="Вернуть масштаб к 100%">100%</button>
+              <button id="fit-board" class="tool-button" type="button">Показать всё</button>
+              <label class="board-background-control gm-only" hidden>Фон <select id="board-background"><option value="gray">Серый</option><option value="black">Чёрный</option></select></label>
+            </div>
+          </section>
+          <section class="topbar-group" data-topbar-group="dice" aria-label="Игровые инструменты">
+            <span class="topbar-group-label">Игровые инструменты</span>
+            <div class="topbar-group-actions">
+              <button id="dice-tools-toggle" class="tool-button" type="button" aria-controls="dice-tools-panel" aria-expanded="false">Броски</button>
+              <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
+            </div>
+          </section>
+          <section class="topbar-group" data-topbar-group="characters" aria-label="Персонажи и материалы">
+            <span class="topbar-group-label">Персонажи и материалы</span>
+            <div class="topbar-group-actions">
+              <button id="sheets-toggle" class="tool-button" type="button" aria-controls="sheets-panel" aria-expanded="false">Листы</button>
+              <button id="notes-toggle" class="tool-button gm-only" type="button" hidden>Заметки</button>
+              <button id="library-toggle" class="tool-button gm-only" type="button" hidden>Библиотека</button>
+            </div>
+          </section>
+          <section class="topbar-group" data-topbar-group="user" aria-label="Пользовательские действия">
+            <span class="topbar-group-label">Пользовательские действия</span>
+            <div class="topbar-group-actions">
+              <div class="menu-anchor">
+                <button id="create-toggle" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="create-menu" data-menu-trigger="create-menu">＋ Создать <span class="menu-caret" aria-hidden="true">▾</span></button>
+                <div id="create-menu" class="dropdown-menu create-menu" role="menu" aria-label="Создать" hidden>
+                  <button id="note-create" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Заметка</button>
+                  <button id="sticker-create" class="menu-item" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Стикер</button>
+                </div>
+              </div>
+              <button id="leave" class="tool-button secondary" type="button">Выйти</button>
+            </div>
+          </section>
+        </nav>
+        <div class="topbar-tail">
+          <span id="connection" class="status"><i></i><span>Подключение…</span></span>
+          <button id="topbar-more-toggle" class="tool-button topbar-more-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="topbar-more-menu" data-menu-trigger="topbar-more-menu" hidden>Ещё <span class="menu-caret" aria-hidden="true">▾</span></button>
+          <div id="topbar-more-menu" class="dropdown-menu topbar-more-menu" role="menu" aria-label="Ещё" hidden></div>
         </div>
       </header>
       <div class="workspace-body">
@@ -84,6 +114,7 @@ import '../styles/global.css';
             <button id="sticker-edit" type="button">Текст</button>
             <label class="sticker-color-control">Фон <select id="sticker-bg"><option value="butter">Светлый</option><option value="rose">Розовый</option><option value="sky">Голубой</option><option value="sage">Зелёный</option></select></label>
             <label class="sticker-color-control">Размер <select id="sticker-font-size"><option>12</option><option>14</option><option>16</option><option>18</option><option>24</option><option>32</option><option>40</option></select></label>
+            <label class="sticker-color-control">Шрифт <select id="sticker-font-family"><option value="default">Стандартный</option><option value="caveat">Caveat</option></select></label>
             <label class="sticker-color-control">Цвет <select id="sticker-text-color"><option value="black">Чёрный</option><option value="white">Белый</option></select></label>
             <button id="sticker-duplicate" type="button">Дублировать</button>
             <button id="sticker-delete" class="danger" type="button">Удалить</button>
@@ -172,6 +203,7 @@ import '../styles/global.css';
       <h2>Новый стикер</h2>
       <label for="sticker-new-text">Текст</label><textarea id="sticker-new-text" rows="4" maxlength="1000"></textarea>
       <label for="sticker-new-size">Размер текста</label><select id="sticker-new-size"><option>12</option><option>14</option><option>16</option><option selected>18</option><option>24</option><option>32</option><option>40</option></select>
+      <label for="sticker-new-font">Шрифт</label><select id="sticker-new-font"><option value="default">Стандартный</option><option value="caveat">Caveat</option></select>
       <label for="sticker-new-color">Цвет текста</label><select id="sticker-new-color"><option value="black">Чёрный</option><option value="white">Белый</option></select>
       <div class="note-dialog-actions"><button id="sticker-create-cancel" class="secondary" type="button">Отмена</button><button id="sticker-create-confirm" type="button">Создать</button></div>
     </dialog>
@@ -185,6 +217,7 @@ import '../styles/global.css';
         <label for="note-marker-type">Вид метки</label><select id="note-marker-type"><option value="text">Текстовая</option><option value="image">Изображение</option></select>
         <div id="note-marker-text-row"><label for="note-marker-text">Подпись метки (необязательно)</label><input id="note-marker-text" maxlength="60" placeholder="По умолчанию — название заметки" /></div>
         <div id="note-marker-image-row" hidden><button id="note-marker-image-pick" class="secondary" type="button">Выбрать изображение метки</button><span id="note-marker-image-name"></span></div>
+        <label for="note-font-family">Шрифт текста</label><select id="note-font-family"><option value="default">Стандартный</option><option value="caveat">Caveat</option></select>
         <label for="note-body">Текст</label><textarea id="note-body" rows="8" maxlength="20000"></textarea>
         <fieldset class="note-assets"><legend>Изображения заметки</legend><div id="note-selected-assets" class="note-selected-assets"></div><button id="note-add-image" class="secondary" type="button">Добавить изображение</button></fieldset>
       </div>

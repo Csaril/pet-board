@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { CharacterSheet, SheetCharacteristicKey } from '../src/shared/board.js';
+import type { BoardFontFamily, CharacterSheet, DiceRollEntry, SheetCharacteristicKey } from '../src/shared/board.js';
+import { abilityEventSummary } from '../src/shared/ability-history.js';
+import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { defaultPbtACharacteristics, isPbtACharacteristicKey, pbtaSheetSchema, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
 import { BoardCommandError } from './board.js';
 import type { RoomStore, Identity } from './store.js';
@@ -32,6 +34,11 @@ function integer(value: unknown, label: string, min: number, max: number): numbe
 
 function boolean(value: unknown, label: string): boolean {
   if (typeof value !== 'boolean') throw new BoardCommandError(`Недопустимое значение ${label}.`);
+  return value;
+}
+
+function fontFamilyValue(value: unknown): BoardFontFamily {
+  if (!isBoardFontFamily(value)) throw new BoardCommandError('Недопустимый шрифт. Доступны «Стандартный» и «Caveat».');
   return value;
 }
 
@@ -145,12 +152,13 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:update': {
       const sheet = editableSheet(store, identity, command.id);
-      const changes = changesObject(command.changes, new Set(['characterName', 'portraitAssetId', 'characteristics', 'fate']), 'Изменения листа');
+      const changes = changesObject(command.changes, new Set(['characterName', 'portraitAssetId', 'characteristics', 'fate', 'fontFamily']), 'Изменения листа');
       const patch: Parameters<RoomStore['updateSheet']>[1] = {};
       if (owns(changes, 'characterName')) patch.characterName = text(changes.characterName, 'Имя персонажа', 80, true);
       if (owns(changes, 'portraitAssetId')) patch.portraitAssetId = accessibleAssetId(changes.portraitAssetId, store, identity, 'Портрет');
       if (owns(changes, 'characteristics')) patch.characteristics = characteristicsFrom(changes.characteristics, sheet.characteristics);
       if (owns(changes, 'fate')) patch.fate = integer(changes.fate, 'Сила Судьбы', -MAX_VALUE, MAX_VALUE);
+      if (owns(changes, 'fontFamily')) patch.fontFamily = fontFamilyValue(changes.fontFamily);
       store.updateSheet(sheet.id, patch);
       return;
     }
@@ -208,7 +216,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:ability:create': {
       const sheet = editableSheet(store, identity, command.sheetId);
-      const allowed = new Set(['type', 'requestId', 'sheetId', 'name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked']);
+      const allowed = new Set(['type', 'requestId', 'sheetId', 'name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked', 'fontFamily']);
       if (Object.keys(command).some((key) => !allowed.has(key))) throw new BoardCommandError('Некорректная команда способности.');
       const id = randomUUID();
       store.createAbility(sheet.id, {
@@ -222,13 +230,14 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
         checkboxEnabled: command.checkboxEnabled === undefined ? false : boolean(command.checkboxEnabled, 'чекбокс способности'),
         checkboxLabel: command.checkboxLabel === undefined ? '' : text(command.checkboxLabel, 'Подпись чекбокса', 80, true),
         checked: command.checked === undefined ? false : boolean(command.checked, 'состояние чекбокса'),
+        fontFamily: command.fontFamily === undefined ? DEFAULT_BOARD_FONT : fontFamilyValue(command.fontFamily),
       });
       return;
     }
     case 'sheet:ability:update': {
       const sheet = editableSheet(store, identity, command.sheetId);
       const ability = requireAbility(sheet, command.id);
-      const changes = changesObject(command.changes, new Set(['name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked']), 'Изменения способности');
+      const changes = changesObject(command.changes, new Set(['name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked', 'fontFamily']), 'Изменения способности');
       const patch: Parameters<RoomStore['updateAbility']>[2] = {};
       if (owns(changes, 'name')) patch.name = text(changes.name, 'Название способности', 80);
       if (owns(changes, 'description')) patch.description = text(changes.description, 'Описание способности', 8000, true);
@@ -239,7 +248,29 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
       if (owns(changes, 'checkboxEnabled')) patch.checkboxEnabled = boolean(changes.checkboxEnabled, 'чекбокс способности');
       if (owns(changes, 'checkboxLabel')) patch.checkboxLabel = text(changes.checkboxLabel, 'Подпись чекбокса', 80, true);
       if (owns(changes, 'checked')) patch.checked = boolean(changes.checked, 'состояние чекбокса');
+      if (owns(changes, 'fontFamily')) patch.fontFamily = fontFamilyValue(changes.fontFamily);
       store.updateAbility(sheet.id, ability.id, patch);
+      return;
+    }
+    case 'sheet:ability:apply': {
+      const sheet = editableSheet(store, identity, command.sheetId);
+      if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'id'].includes(key))) throw new BoardCommandError('Некорректная команда применения способности.');
+      const ability = requireAbility(sheet, command.id);
+      const characterName = sheet.characterName || sheet.assignedPlayerName || sheet.creatorName || 'Без имени';
+      const entry: DiceRollEntry = {
+        id: randomUUID(), authorId: identity.participantId, authorName: identity.name,
+        actorId: sheet.assignedPlayerId ?? identity.participantId,
+        actorName: sheet.assignedPlayerName ?? identity.name,
+        createdAt: new Date().toISOString(), kind: 'ability-use',
+        dice: [], keptDice: [], discardedDie: null, characteristicName: null, characterId: sheet.id,
+        characterOwnerId: sheet.assignedPlayerId, characteristicBonus: null, situationalModifier: 0,
+        disadvantage: false, sides: null, total: 0, category: null, critical: null, rerollOf: null,
+        abilityId: ability.id, abilitySheetId: sheet.id, abilityCharacterName: characterName,
+        abilityName: ability.name || 'Без названия', abilityAssetId: ability.assetId,
+        abilitySummary: abilityEventSummary(ability.description), abilityDescription: ability.description,
+        abilityFontFamily: ability.fontFamily,
+      };
+      store.saveDiceRoll(entry);
       return;
     }
     case 'sheet:ability:delete': {
