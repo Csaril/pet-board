@@ -76,11 +76,17 @@ const pbtaControlsHome = select<HTMLElement>('#pbta-controls-home');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
+const topbar = select<HTMLElement>('.topbar');
+const topbarBrand = select<HTMLElement>('.topbar-brand');
 const topbarGroups = select<HTMLElement>('#topbar-groups');
+const topbarTail = select<HTMLElement>('.topbar-tail');
 const topbarMoreToggle = select<HTMLButtonElement>('#topbar-more-toggle');
 const topbarMoreMenu = select<HTMLElement>('#topbar-more-menu');
+const topbarMoreStatic = select<HTMLElement>('#topbar-more-static');
+const topbarCreate = select<HTMLElement>('.topbar-create');
 const createToggle = select<HTMLButtonElement>('#create-toggle');
 const topbarGroupElements = Array.from(topbarGroups.querySelectorAll<HTMLElement>(':scope > .topbar-group'));
+const topbarMoreStaticItems = Array.from(topbarMoreStatic.querySelectorAll<HTMLElement>(':scope > .menu-item'));
 const MAX_WORLD_COORDINATE = 10_000_000;
 const MAX_ZOOM = 4;
 const MIN_ZOOM = 0.00001;
@@ -265,21 +271,32 @@ function setupMenus(): void {
 
 function refreshTopbarOverflow(): void {
   closeMenus();
-  for (const group of topbarGroupElements) topbarGroups.append(group);
-  topbarMoreToggle.hidden = true;
-  topbarMoreToggle.setAttribute('aria-expanded', 'false');
-  const gap = Number.parseFloat(getComputedStyle(topbarGroups).columnGap) || 0;
-  const groups = topbarGroupElements.filter((group) => !group.hidden && group.offsetWidth > 0);
-  if (!groups.length) return;
-  const widths = groups.map((group) => group.getBoundingClientRect().width);
-  // Show the trigger first so its width is included in the available space.
+  refreshCreateToggle();
+  // "Создать" always stays in the centre, behind the overflow groups.
+  for (const group of topbarGroupElements) topbarGroups.insertBefore(group, topbarCreate);
+  const hasStaticItems = topbarMoreStaticItems.some((item) => !item.hidden);
+  topbarMoreStatic.hidden = !hasStaticItems;
+  // Reserve the trigger width while measuring, because it lives in the right zone.
   topbarMoreToggle.hidden = false;
-  const count = overflowGroupCount(widths, topbarGroups.clientWidth, gap);
-  if (count === 0) {
-    topbarMoreToggle.hidden = true;
-    return;
-  }
+  topbarMoreToggle.setAttribute('aria-expanded', 'false');
+
+  const barStyle = getComputedStyle(topbar);
+  const horizontalPadding = (Number.parseFloat(barStyle.paddingLeft) || 0) + (Number.parseFloat(barStyle.paddingRight) || 0);
+  const barGap = Number.parseFloat(barStyle.columnGap) || 0;
+  // Both 1fr side tracks have equal width, so the wider side decides how much room the centre gets.
+  const sideWidth = Math.max(topbarBrand.getBoundingClientRect().width, topbarTail.getBoundingClientRect().width);
+  const centerAvailable = Math.max(0, topbar.clientWidth - horizontalPadding - 2 * sideWidth - 2 * barGap);
+
+  const groupGap = Number.parseFloat(getComputedStyle(topbarGroups).columnGap) || 0;
+  const createWidth = createToggle.hidden ? 0 : createToggle.getBoundingClientRect().width;
+  const createGap = createToggle.hidden ? 0 : groupGap;
+  const groups = topbarGroupElements.filter((group) => !group.hidden && group.offsetWidth > 0);
+  const widths = groups.map((group) => group.getBoundingClientRect().width);
+  const availableForGroups = Math.max(0, centerAvailable - createWidth - createGap);
+  const count = overflowGroupCount(widths, availableForGroups, groupGap);
   for (const group of groups.slice(groups.length - count)) topbarMoreMenu.append(group);
+
+  if (count === 0 && !hasStaticItems) topbarMoreToggle.hidden = true;
 }
 
 function scheduleTopbarLayout(): void {
@@ -1204,6 +1221,7 @@ function updateBoard(state: RoomMessage) {
   if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
   select<HTMLButtonElement>('#sticker-create').hidden = false;
   refreshCreateToggle();
+  scheduleTopbarLayout();
   renderLayers();
   renderAssets();
   renderDicePanel();

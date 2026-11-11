@@ -43,7 +43,7 @@ import '../styles/global.css';
           <span class="brand-mark small" aria-hidden="true">TB</span>
           <div class="topbar-brand-copy"><span class="topbar-group-label">Информация о комнате</span><strong id="room-name">Игровая комната</strong><span id="identity" class="identity"></span></div>
         </div>
-        <nav id="topbar-groups" class="topbar-groups" aria-label="Панель управления">
+        <nav id="topbar-groups" class="topbar-groups" aria-label="Основные инструменты">
           <section class="topbar-group" data-topbar-group="view" aria-label="Вид доски">
             <span class="topbar-group-label">Вид доски</span>
             <div class="topbar-group-actions">
@@ -59,32 +59,30 @@ import '../styles/global.css';
               <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
             </div>
           </section>
-          <section class="topbar-group" data-topbar-group="characters" aria-label="Персонажи и материалы">
-            <span class="topbar-group-label">Персонажи и материалы</span>
+          <section class="topbar-group" data-topbar-group="sheets" aria-label="Персонажи">
+            <span class="topbar-group-label">Персонажи</span>
             <div class="topbar-group-actions">
               <button id="sheets-toggle" class="tool-button" type="button" aria-controls="sheets-panel" aria-expanded="false">Листы</button>
-              <button id="notes-toggle" class="tool-button gm-only" type="button" hidden>Заметки</button>
-              <button id="library-toggle" class="tool-button gm-only" type="button" hidden>Библиотека</button>
             </div>
           </section>
-          <section class="topbar-group" data-topbar-group="user" aria-label="Пользовательские действия">
-            <span class="topbar-group-label">Пользовательские действия</span>
-            <div class="topbar-group-actions">
-              <div class="menu-anchor">
-                <button id="create-toggle" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="create-menu" data-menu-trigger="create-menu">＋ Создать <span class="menu-caret" aria-hidden="true">▾</span></button>
-                <div id="create-menu" class="dropdown-menu create-menu" role="menu" aria-label="Создать" hidden>
-                  <button id="note-create" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Заметка</button>
-                  <button id="sticker-create" class="menu-item" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Стикер</button>
-                </div>
-              </div>
-              <button id="leave" class="tool-button secondary" type="button">Выйти</button>
+          <div class="menu-anchor topbar-create">
+            <button id="create-toggle" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="create-menu" aria-label="Создать" data-menu-trigger="create-menu">＋ <span class="topbar-create-label">Создать</span> <span class="menu-caret" aria-hidden="true">▾</span></button>
+            <div id="create-menu" class="dropdown-menu create-menu" role="menu" aria-label="Создать" hidden>
+              <button id="note-create" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Заметка</button>
+              <button id="sticker-create" class="menu-item" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Стикер</button>
             </div>
-          </section>
+          </div>
         </nav>
         <div class="topbar-tail">
           <span id="connection" class="status"><i></i><span>Подключение…</span></span>
           <button id="topbar-more-toggle" class="tool-button topbar-more-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="topbar-more-menu" data-menu-trigger="topbar-more-menu" hidden>Ещё <span class="menu-caret" aria-hidden="true">▾</span></button>
-          <div id="topbar-more-menu" class="dropdown-menu topbar-more-menu" role="menu" aria-label="Ещё" hidden></div>
+          <div id="topbar-more-menu" class="dropdown-menu topbar-more-menu" role="menu" aria-label="Ещё" hidden>
+            <div id="topbar-more-static" class="topbar-more-static" role="none">
+              <button id="notes-toggle" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">◇</span> Заметки</button>
+              <button id="library-toggle" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">▦</span> Библиотека</button>
+            </div>
+          </div>
+          <button id="leave" class="tool-button secondary" type="button">Выйти</button>
         </div>
       </header>
       <div class="workspace-body">

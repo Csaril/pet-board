@@ -50,18 +50,19 @@ footer { position: fixed; bottom: 20px; color: #8a928c; font-size: 11px; }
 
 body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; background: #e9ece8; }
 .workspace { position: fixed; inset: 0; display: flex; flex-direction: column; background: #e9ece8; }
-.topbar { z-index: 3; height: 64px; flex: 0 0 64px; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 0 14px; border-bottom: 1px solid #dce1db; background: #fff; }
-.topbar-brand, .topbar-center, .topbar-actions { display: flex; align-items: center; gap: 12px; }
-.topbar-brand { min-width: 0; flex: 0 0 auto; }
-.topbar-brand-copy { min-width: 0; }
+.topbar { z-index: 3; height: 64px; flex: 0 0 64px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 12px; min-width: 0; padding: 0 14px; border-bottom: 1px solid #dce1db; background: #fff; }
+.topbar-brand { justify-self: start; min-width: 0; display: flex; align-items: center; gap: 12px; }
+.topbar-brand-copy { min-width: 0; max-width: 240px; }
 .topbar-brand-copy .topbar-group-label { display: block; margin-bottom: 1px; }
-.topbar-groups { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; overflow: hidden; }
+.topbar-groups { justify-self: center; min-width: 0; max-width: 100%; display: flex; align-items: center; gap: 10px; overflow: hidden; }
 .topbar-group { min-width: 0; display: flex; align-items: center; gap: 7px; flex: 0 0 auto; padding-left: 10px; border-left: 1px solid #e7ebe6; }
 .topbar-group:first-child { padding-left: 0; border-left: 0; }
 .topbar-group-label { color: #8a938c; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
 .topbar-group-actions { min-width: 0; display: flex; align-items: center; gap: 4px; }
-.topbar-tail { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.topbar-tail { justify-self: end; min-width: 0; display: flex; align-items: center; gap: 6px; }
 .topbar-tail .status { margin: 0; }
+.topbar-create { flex: 0 0 auto; }
+.topbar-create .menu-caret { margin-left: 2px; }
 .menu-anchor { position: relative; display: inline-flex; }
 .dropdown-menu {
   position: fixed; z-index: 80; min-width: 190px; max-width: min(300px, calc(100vw - 24px));
@@ -80,16 +81,17 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .dropdown-menu .menu-item:hover { background: #f1f6f0; color: #2f5a43; }
 .dropdown-menu .menu-item > span { width: 14px; color: #6f7d73; text-align: center; }
 .topbar-more-menu { width: 250px; }
+.topbar-more-static { display: grid; gap: 4px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #edf0eb; }
+.topbar-more-static[hidden] { display: none; }
+.topbar-more-static + .topbar-group { border-top: 0; }
 .topbar-more-menu .topbar-group { display: grid; gap: 5px; width: 100%; padding: 8px 4px; border-left: 0; border-top: 1px solid #edf0eb; }
 .topbar-more-menu .topbar-group:first-child { border-top: 0; }
 .topbar-more-menu .topbar-group-actions { flex-wrap: wrap; gap: 5px; }
 .topbar-more-menu .board-background-control { width: 100%; }
 .menu-caret { color: #7b857e; font-size: 9px; }
 .brand-mark.small { width: 32px; height: 32px; border-radius: 9px; font-size: 10px; flex: 0 0 32px; }
-.topbar-brand strong { display: block; font-size: 13px; }
-.topbar-brand .identity { display: block; margin: 2px 0 0; font-size: 11px; }
-.topbar-center { justify-content: center; }
-.topbar-actions { min-width: 220px; justify-content: flex-end; }
+.topbar-brand strong { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-brand .identity { display: block; overflow: hidden; margin: 2px 0 0; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .tool-button, .object-tools button, .icon-button { height: 34px; margin: 0; padding: 0 11px; border: 1px solid #dce1db; border-radius: 7px; background: #fff; color: #3f4842; font-size: 12px; font-weight: 600; }
 .tool-button:hover, .object-tools button:hover, .icon-button:hover { border-color: #b8c7bc; background: #f5f8f4; }
 .tool-button.secondary { width: auto; height: 34px; margin: 0; background: #f5f6f3; color: #505a53; }
@@ -371,10 +373,21 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 #note-font-family { height: 36px; }
 @media (max-width: 1280px) { .topbar-group-label, .topbar-brand-copy .topbar-group-label { display: none; } }
 @media (max-width: 900px) {
-  .topbar { padding: 0 10px; gap: 6px; }
+  .topbar { padding: 0 10px; column-gap: 6px; }
+  .topbar-brand { gap: 8px; }
+  .topbar-brand-copy { max-width: 170px; }
   .topbar-groups { gap: 6px; }
   .topbar-brand .identity { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-tail { gap: 5px; }
   .topbar-tail .status { display: none; }
   .side-panel { width: 235px; flex-basis: 235px; }
+}
+@media (max-width: 480px) {
+  .topbar { padding: 0 8px; column-gap: 5px; }
+  .topbar-brand-copy { display: none; }
+}
+@media (max-width: 380px) {
+  .topbar-create-label { display: none; }
+  #create-toggle { padding: 0 9px; }
 }
 .topbar-more-menu .topbar-group-label { display: block; }
