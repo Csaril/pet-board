@@ -297,6 +297,13 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .note-entry-title { min-width: 0; overflow: hidden; color: var(--text-primary); font-size: 12px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 .note-entry-actions { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
 .note-entry-actions button { min-width: 0; height: 27px; margin: 0; padding: 0 7px; font-size: 10px; white-space: nowrap; }
+.note-entry-copy { min-width: 0; display: grid; gap: 3px; }
+.note-entry-meta { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.notes-modes { display: flex; gap: 6px; margin: 0 0 10px; }
+.notes-modes button { flex: 1 1 0; min-width: 0; height: 30px; margin: 0; padding: 0 8px; font-size: 11px; white-space: nowrap; }
+.notes-modes button.active { box-shadow: inset 0 0 0 2px var(--accent-border); }
+.notes-personal-groups { display: grid; gap: 12px; }
+.notes-personal-group h3 { margin: 0 0 6px; color: var(--text-primary); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .note-selected-assets { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 7px; }
 .note-attachment-thumb { position: relative; width: 76px; height: 58px; }
 .note-attachment-thumb img { width: 100%; height: 100%; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-secondary); }

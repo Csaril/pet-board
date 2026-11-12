@@ -69,6 +69,7 @@ import '../styles/global.css';
             <button id="create-toggle" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="create-menu" aria-label="Создать" data-menu-trigger="create-menu">＋ <span class="topbar-create-label">Создать</span> <span class="menu-caret" aria-hidden="true">▾</span></button>
             <div id="create-menu" class="dropdown-menu create-menu" role="menu" aria-label="Создать" hidden>
               <button id="note-create" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Заметка</button>
+              <button id="personal-note-create" class="menu-item" data-player-only="true" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Заметка</button>
               <button id="sticker-create" class="menu-item" type="button" role="menuitem" hidden><span aria-hidden="true">＋</span> Стикер</button>
             </div>
           </div>
@@ -78,7 +79,7 @@ import '../styles/global.css';
           <button id="topbar-more-toggle" class="tool-button topbar-more-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="topbar-more-menu" data-menu-trigger="topbar-more-menu" hidden>Ещё <span class="menu-caret" aria-hidden="true">▾</span></button>
           <div id="topbar-more-menu" class="dropdown-menu topbar-more-menu" role="menu" aria-label="Ещё" hidden>
             <div id="topbar-more-static" class="topbar-more-static" role="none">
-              <button id="notes-toggle" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">◇</span> Заметки</button>
+              <button id="notes-toggle" class="menu-item" type="button" role="menuitem"><span aria-hidden="true">◇</span> Заметки</button>
               <button id="library-toggle" class="menu-item gm-only" type="button" role="menuitem" hidden><span aria-hidden="true">▦</span> Библиотека</button>
             </div>
             <div id="topbar-theme-control" class="topbar-theme-control" role="none">
@@ -193,9 +194,19 @@ import '../styles/global.css';
         <p id="asset-delete-message" class="message" role="status" aria-live="polite"></p>
       </dialog>
 
-      <aside id="notes-panel" class="library-panel notes-panel gm-only" data-manual-visibility="true" hidden>
+      <aside id="notes-panel" class="library-panel notes-panel" data-manual-visibility="true" hidden>
         <div class="panel-heading"><div><p class="eyebrow">Подготовка игры</p><h2>Заметки</h2></div><button id="notes-close" class="icon-button" type="button" aria-label="Закрыть заметки">×</button></div>
-        <ul id="notes-list" class="assets-list"></ul>
+        <div id="notes-modes" class="notes-modes" role="group" aria-label="Раздел заметок" hidden>
+          <button id="notes-mode-board" class="active" type="button" aria-pressed="true">Мои заметки</button>
+          <button id="notes-mode-players" type="button" aria-pressed="false">Заметки игроков</button>
+        </div>
+        <div id="notes-board-section">
+          <ul id="notes-list" class="assets-list"></ul>
+        </div>
+        <div id="notes-personal-section" hidden>
+          <p class="panel-note" id="notes-personal-hint" hidden>Ваши личные записи видите только вы и ведущий.</p>
+          <div id="notes-personal-groups" class="notes-personal-groups"></div>
+        </div>
       </aside>
 
       <aside id="sheets-panel" class="library-panel sheets-panel" hidden>

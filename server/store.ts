@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 
 export type Role = 'gm' | 'player';
@@ -16,8 +16,9 @@ export interface ObjectPatch {
 }
 export interface StickerInput extends Omit<BoardSticker, 'orderIndex'> { orderIndex?: number }
 export interface StickerPatch { text?: string; x?: number; y?: number; width?: number; height?: number; bgColor?: StickerBackground; textColor?: StickerTextColor; fontSize?: number; fontFamily?: BoardFontFamily; layerId?: string }
-export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string; fontFamily?: BoardFontFamily }
+export interface NoteInput { id: string; title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; creatorId: string; assetIds: string[]; markerType?: 'text' | 'image'; markerText?: string; markerAssetId?: string; fontFamily?: BoardFontFamily; noteType?: NoteType; ownerId?: string; ownerName?: string }
 export interface NotePatch { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string; fontFamily?: BoardFontFamily }
+export interface PersonalNotePatch { title: string; body: string; assetIds: string[]; fontFamily?: BoardFontFamily }
 export interface NoteMarkerInput { id: string; noteId: string; layerId: string; x: number; y: number; width?: number; height?: number }
 export interface SheetInput {
   id: string; creatorId: string; creatorName: string; assignedPlayerId: string | null; assignedPlayerName: string | null;
@@ -36,7 +37,7 @@ type ObjectRow = {
 };
 type AssetRow = { id: string; sha256: string; mime_type: BoardAsset['mimeType']; original_name: string; size: number; width: number; height: number; created_at: string };
 type StickerRow = { id: string; creator_id: string; layer_id: string; text: string; x: number; y: number; width: number; height: number; bg_color: StickerBackground; text_color: StickerTextColor; font_size: number; font_family: BoardFontFamily; order_index: number };
-type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; font_family: BoardFontFamily };
+type NoteRow = { id: string; title: string; body: string; access: NoteAccess; selected_participant_ids: string; created_by: string; created_at: string; updated_at: string; note_type: NoteType; owner_id: string | null; owner_name: string | null; marker_id?: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; font_family: BoardFontFamily };
 type NoteMarkerRow = { id: string; note_id: string; layer_id: string; x: number; y: number; width: number | null; height: number | null; order_index: number; title: string; marker_type: 'text' | 'image'; marker_text: string | null; marker_asset_id: string | null; asset_width: number | null; asset_height: number | null };
 type SheetRow = {
   id: string; creator_id: string; creator_name: string; assigned_player_id: string | null; assigned_player_name: string | null;
@@ -213,6 +214,9 @@ export class RoomStore {
         marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
         font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         created_by TEXT NOT NULL,
+        note_type TEXT NOT NULL DEFAULT 'board' CHECK (note_type IN ('board', 'personal')),
+        owner_id TEXT,
+        owner_name TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -378,6 +382,10 @@ export class RoomStore {
     if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
     if (!noteColumns.some((column) => column.name === 'marker_asset_id')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT');
     if (!noteColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE notes ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
+    if (!noteColumns.some((column) => column.name === 'note_type')) this.db.exec("ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'board' CHECK (note_type IN ('board', 'personal'))");
+    if (!noteColumns.some((column) => column.name === 'owner_id')) this.db.exec('ALTER TABLE notes ADD COLUMN owner_id TEXT');
+    if (!noteColumns.some((column) => column.name === 'owner_name')) this.db.exec('ALTER TABLE notes ADD COLUMN owner_name TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS notes_type_owner ON notes(note_type, owner_id)');
     const stickerColumns = this.db.pragma('table_info(stickers)') as Array<{ name: string }>;
     if (!stickerColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE stickers ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
     const characterSheetColumns = this.db.pragma('table_info(character_sheets)') as Array<{ name: string }>;
@@ -699,9 +707,12 @@ export class RoomStore {
   }
 
   createNote(note: NoteInput): void {
+    const noteType: NoteType = note.noteType === 'personal' ? 'personal' : 'board';
+    const ownerId = noteType === 'personal' ? note.ownerId ?? note.creatorId : null;
+    const ownerName = noteType === 'personal' ? note.ownerName ?? '' : null;
     const transaction = this.db.transaction(() => {
-      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by, marker_type, marker_text, marker_asset_id, font_family) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId, note.markerType || 'text', note.markerText || null, note.markerAssetId || null, note.fontFamily ?? DEFAULT_BOARD_FONT);
+      this.db.prepare('INSERT INTO notes (id, title, body, access, selected_participant_ids, created_by, marker_type, marker_text, marker_asset_id, font_family, note_type, owner_id, owner_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(note.id, note.title, note.body, note.access, JSON.stringify(note.selectedParticipantIds), note.creatorId, note.markerType || 'text', note.markerText || null, note.markerAssetId || null, note.fontFamily ?? DEFAULT_BOARD_FONT, noteType, ownerId, ownerName);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       note.assetIds.forEach((assetId, index) => insertAsset.run(note.id, assetId, index));
     });
@@ -711,6 +722,17 @@ export class RoomStore {
     const transaction = this.db.transaction(() => {
       this.db.prepare(`UPDATE notes SET title = ?, body = ?, access = ?, selected_participant_ids = ?, marker_type = ?, marker_text = ?, marker_asset_id = ?, font_family = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
         .run(patch.title, patch.body, patch.access, JSON.stringify(patch.selectedParticipantIds), patch.markerType, patch.markerText || null, patch.markerAssetId || null, patch.fontFamily ?? DEFAULT_BOARD_FONT, id);
+      this.db.prepare('DELETE FROM note_assets WHERE note_id = ?').run(id);
+      const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
+      patch.assetIds.forEach((assetId, index) => insertAsset.run(id, assetId, index));
+    });
+    transaction();
+  }
+  /** Personal notes never carry markers or GM audience settings. */
+  updatePersonalNote(id: string, patch: PersonalNotePatch): void {
+    const transaction = this.db.transaction(() => {
+      this.db.prepare('UPDATE notes SET title = ?, body = ?, font_family = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND note_type = \'personal\'')
+        .run(patch.title, patch.body, patch.fontFamily ?? DEFAULT_BOARD_FONT, id);
       this.db.prepare('DELETE FROM note_assets WHERE note_id = ?').run(id);
       const insertAsset = this.db.prepare('INSERT INTO note_assets (note_id, asset_id, order_index) VALUES (?, ?, ?)');
       patch.assetIds.forEach((assetId, index) => insertAsset.run(id, assetId, index));
@@ -731,7 +753,9 @@ export class RoomStore {
       if (Array.isArray(parsed)) selectedParticipantIds = parsed.filter((value): value is string => typeof value === 'string');
     } catch { /* Invalid legacy access metadata grants no player access. */ }
     return {
-      id: row.id, title: row.title, body: row.body, access: row.access,
+      id: row.id, noteType: row.note_type === 'personal' ? 'personal' : 'board',
+      ownerId: row.owner_id ?? null, ownerName: row.owner_name ?? null,
+      title: row.title, body: row.body, access: row.access,
       selectedParticipantIds, assetIds: assetIds.map((asset) => asset.asset_id),
       createdAt: row.created_at, updatedAt: row.updated_at, images,
       markerType: row.marker_type || 'text', markerText: row.marker_text || row.title,
@@ -742,17 +766,44 @@ export class RoomStore {
   listNotes(): NoteListItem[] {
     const rows = this.db.prepare(`SELECT note.id, note.title, note.access, note.updated_at, marker.id AS marker_id
       FROM notes AS note LEFT JOIN note_markers AS marker ON marker.note_id = note.id
+      WHERE note.note_type = 'board'
       ORDER BY note.updated_at DESC, note.created_at DESC`).all() as NoteRow[];
     return rows.map((row) => ({ id: row.id, title: row.title, access: row.access, updatedAt: row.updated_at, ...(row.marker_id ? { markerId: row.marker_id } : {}) }));
   }
+  /**
+   * Personal note metadata filtered on the server: the GM receives every
+   * author, a player only receives their own records. Bodies and images stay
+   * behind the per-note access check.
+   */
+  listPersonalNotes(identity: Identity): PersonalNoteListItem[] {
+    const rows = identity.role === 'gm'
+      ? this.db.prepare("SELECT id, title, owner_id, owner_name, created_by, updated_at FROM notes WHERE note_type = 'personal' ORDER BY owner_name ASC, updated_at DESC").all() as NoteRow[]
+      : this.db.prepare("SELECT id, title, owner_id, owner_name, created_by, updated_at FROM notes WHERE note_type = 'personal' AND owner_id = ? ORDER BY updated_at DESC").all(identity.participantId) as NoteRow[];
+    return rows.map((row) => ({
+      id: row.id, title: row.title,
+      ownerId: row.owner_id ?? row.created_by,
+      ownerName: row.owner_name ?? '',
+      updatedAt: row.updated_at,
+    }));
+  }
+  getNoteType(id: string): NoteType | undefined {
+    const row = this.db.prepare('SELECT note_type FROM notes WHERE id = ?').get(id) as { note_type: NoteType } | undefined;
+    return row?.note_type === 'personal' ? 'personal' : row ? 'board' : undefined;
+  }
   canReadNote(id: string, identity: Identity): boolean {
-    if (identity.role === 'gm') return Boolean(this.db.prepare('SELECT 1 FROM notes WHERE id = ?').get(id));
-    const row = this.db.prepare('SELECT access, selected_participant_ids FROM notes WHERE id = ?').get(id) as { access: NoteAccess; selected_participant_ids: string } | undefined;
+    const row = this.db.prepare('SELECT access, selected_participant_ids, note_type, owner_id FROM notes WHERE id = ?').get(id) as { access: NoteAccess; selected_participant_ids: string; note_type: NoteType; owner_id: string | null } | undefined;
     if (!row) return false;
+    if (row.note_type === 'personal') return identity.role === 'gm' || row.owner_id === identity.participantId;
+    if (identity.role === 'gm') return true;
     if (row.access === 'all-players') return true;
     if (row.access !== 'selected-players') return false;
     try { return (JSON.parse(row.selected_participant_ids) as unknown[]).includes(identity.participantId); }
     catch { return false; }
+  }
+  /** Only the owner may change a personal note; the GM has read-only access to foreign records. */
+  canEditPersonalNote(id: string, identity: Identity): boolean {
+    const row = this.db.prepare("SELECT owner_id FROM notes WHERE id = ? AND note_type = 'personal'").get(id) as { owner_id: string | null } | undefined;
+    return Boolean(row) && row?.owner_id === identity.participantId;
   }
   isPlayerParticipant(participantId: string): boolean {
     const identity = this.getSession(participantId);
@@ -777,10 +828,11 @@ export class RoomStore {
   }
   createNoteMarker(marker: NoteMarkerInput): void {
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM note_markers WHERE layer_id = ?').get(marker.layerId) as { next: number }).next;
-    const note = this.db.prepare(`SELECT note.marker_type, COALESCE(note.marker_text, note.title) AS marker_text,
+    const note = this.db.prepare(`SELECT note.note_type, note.marker_type, COALESCE(note.marker_text, note.title) AS marker_text,
       asset.width AS asset_width, asset.height AS asset_height
       FROM notes AS note LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id WHERE note.id = ?`)
-      .get(marker.noteId) as { marker_type: 'text' | 'image'; marker_text: string; asset_width: number | null; asset_height: number | null } | undefined;
+      .get(marker.noteId) as { note_type: NoteType; marker_type: 'text' | 'image'; marker_text: string; asset_width: number | null; asset_height: number | null } | undefined;
+    if (note?.note_type === 'personal') throw new Error('Личные заметки не размещаются на доске.');
     const fallback = note ? defaultMarkerSize(note.marker_type, note.marker_text, note.asset_width, note.asset_height) : { width: 84, height: 34 };
     this.db.prepare('INSERT INTO note_markers (id, note_id, layer_id, x, y, width, height, order_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(marker.id, marker.noteId, marker.layerId, marker.x, marker.y, marker.width ?? fallback.width, marker.height ?? fallback.height, orderIndex);
@@ -973,7 +1025,7 @@ export class RoomStore {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
     const allLayers = this.getLayers();
-    const common = { background: this.boardBackground, activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity) };
+    const common = { background: this.boardBackground, activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity), personalNotes: this.listPersonalNotes(identity) };
     if (role === 'gm') return { ...common, layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
     const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
     const visibleIds = new Set(layers.map((layer) => layer.id));

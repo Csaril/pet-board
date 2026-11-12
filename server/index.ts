@@ -53,6 +53,20 @@ function parseNotePayload(input: unknown, store: RoomStore): { title: string; bo
   return { title: body.title.trim(), body: body.body, access: body.access, selectedParticipantIds, assetIds, markerType, markerText: markerText.trim(), fontFamily, ...(markerAssetId ? { markerAssetId } : {}) };
 }
 
+function parsePersonalNotePayload(input: unknown, store: RoomStore, identity: Identity): { title: string; body: string; assetIds: string[]; fontFamily: BoardFontFamily } | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !['title', 'body', 'assetIds', 'fontFamily'].includes(key))) return undefined;
+  if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return undefined;
+  if (typeof body.body !== 'string' || body.body.length > 20_000) return undefined;
+  if (!Array.isArray(body.assetIds) || body.assetIds.length > 20 || body.assetIds.some((id) => typeof id !== 'string' || !store.getAsset(id) || !store.canReadAsset(id, identity))) return undefined;
+  const assetIds = [...new Set(body.assetIds as string[])];
+  if (assetIds.length !== body.assetIds.length) return undefined;
+  const fontFamily = body.fontFamily === undefined ? DEFAULT_BOARD_FONT : body.fontFamily;
+  if (!isBoardFontFamily(fontFamily)) return undefined;
+  return { title: body.title.trim(), body: body.body, assetIds, fontFamily };
+}
+
 function firstHeader(value: string | string[] | undefined): string | undefined {
   const raw = Array.isArray(value) ? value[0] : value;
   return raw?.split(',')[0]?.trim() || undefined;
@@ -276,9 +290,10 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     const session = sessionFor(request.cookies[SESSION_COOKIE]);
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     const { id } = request.params as { id: string };
-    if (!store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    const note = store.getNote(id);
+    if (!note || note.noteType !== 'board' || !store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
     reply.header('Cache-Control', 'no-store');
-    return { note: store.getNote(id) };
+    return { note };
   });
 
   app.put('/api/notes/:id', async (request, reply) => {
@@ -287,7 +302,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может редактировать только ведущий.' });
     const { id } = request.params as { id: string };
-    if (!store.getNote(id)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
     const input = parseNotePayload(request.body, store);
     if (!input) return reply.code(400).send({ error: 'Проверьте заголовок, текст, доступ, участников и изображения заметки.' });
     store.updateNote(id, input);
@@ -302,7 +317,68 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять заметки может только ведущий.' });
     const { id } = request.params as { id: string };
-    if (!store.getNote(id)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    store.deleteNote(id);
+    sendState();
+    return reply.code(204).send();
+  });
+
+  app.get('/api/personal-notes', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    reply.header('Cache-Control', 'no-store');
+    return { notes: store.listPersonalNotes(session.identity) };
+  });
+
+  app.post('/api/personal-notes', async (request, reply) => {
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    if (session.identity.role !== 'player') return reply.code(403).send({ error: 'Личные заметки создают игроки.' });
+    const input = parsePersonalNotePayload(request.body, store, session.identity);
+    if (!input) return reply.code(400).send({ error: 'Проверьте название, текст и изображения личной заметки.' });
+    const id = randomUUID();
+    store.createNote({
+      id, ...input, access: 'gm-only', selectedParticipantIds: [], creatorId: session.identity.participantId,
+      markerType: 'text', markerText: '', noteType: 'personal',
+      ownerId: session.identity.participantId, ownerName: session.identity.name,
+    });
+    reply.header('Cache-Control', 'no-store');
+    sendState();
+    return { note: store.getNote(id) };
+  });
+
+  app.get('/api/personal-notes/:id', async (request, reply) => {
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const { id } = request.params as { id: string };
+    if (store.getNoteType(id) !== 'personal' || !store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    reply.header('Cache-Control', 'no-store');
+    return { note: store.getNote(id) };
+  });
+
+  app.put('/api/personal-notes/:id', async (request, reply) => {
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const { id } = request.params as { id: string };
+    if (store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (!store.canEditPersonalNote(id, session.identity)) return reply.code(403).send({ error: 'Можно редактировать только собственную личную заметку.' });
+    const input = parsePersonalNotePayload(request.body, store, session.identity);
+    if (!input) return reply.code(400).send({ error: 'Проверьте название, текст и изображения личной заметки.' });
+    store.updatePersonalNote(id, input);
+    reply.header('Cache-Control', 'no-store');
+    sendState();
+    return { note: store.getNote(id) };
+  });
+
+  app.delete('/api/personal-notes/:id', async (request, reply) => {
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const { id } = request.params as { id: string };
+    if (store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (!store.canEditPersonalNote(id, session.identity)) return reply.code(403).send({ error: 'Можно удалять только собственную личную заметку.' });
     store.deleteNote(id);
     sendState();
     return reply.code(204).send();

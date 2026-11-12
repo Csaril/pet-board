@@ -28,7 +28,7 @@ test('role visibility is applied through the shared helper in login and room sta
   assert.match(clientSource, /function applyGmOnlyVisibility\(role: AppIdentity\['role'\]\): void \{/);
   assert.match(clientSource, /manual: element\.dataset\.manualVisibility === 'true'/);
   assert.equal((clientSource.match(/document\.querySelectorAll<HTMLElement>\('\.gm-only'\)/g) || []).length, 1);
-  assert.match(clientSource, /loginShell\.hidden = true;\s+workspace\.hidden = false;\s+applyGmOnlyVisibility\(role\);/);
+  assert.match(clientSource, /loginShell\.hidden = true;\s+workspace\.hidden = false;\s+applyGmOnlyVisibility\(nextIdentity\.role\);/);
   assert.match(clientSource, /identityLabel\.textContent = [^\n]+\n\s+applyGmOnlyVisibility\(identity\.role\);/);
 });
 

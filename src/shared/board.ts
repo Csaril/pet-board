@@ -53,6 +53,7 @@ export interface BoardAssetUsage {
 }
 
 export type NoteAccess = 'gm-only' | 'all-players' | 'selected-players';
+export type NoteType = 'board' | 'personal';
 export type StickerBackground = 'butter' | 'rose' | 'sky' | 'sage';
 export type StickerTextColor = 'black' | 'white';
 
@@ -96,6 +97,9 @@ export interface RoomParticipant {
 
 export interface NoteRecord {
   id: string;
+  noteType: NoteType;
+  ownerId: string | null;
+  ownerName: string | null;
   title: string;
   body: string;
   access: NoteAccess;
@@ -116,6 +120,15 @@ export interface NoteListItem {
   access: NoteAccess;
   updatedAt: string;
   markerId?: string;
+}
+
+/** Metadata only: personal note bodies and images are fetched through the owner/GM-protected endpoint. */
+export interface PersonalNoteListItem {
+  id: string;
+  title: string;
+  ownerId: string;
+  ownerName: string;
+  updatedAt: string;
 }
 
 export type SheetCharacteristicKey = 'might' | 'insight' | 'glory' | 'will';
@@ -168,6 +181,7 @@ export interface BoardSnapshot {
   objects: BoardImage[];
   stickers: BoardSticker[];
   noteMarkers: NoteMarker[];
+  personalNotes?: PersonalNoteListItem[];
   assets?: BoardAsset[];
   availableAssets?: BoardAsset[];
   sheets: CharacterSheet[];

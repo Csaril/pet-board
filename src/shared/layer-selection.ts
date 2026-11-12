@@ -22,3 +22,18 @@ export function isLayerPickable(role: BoardRole, layerId: string, activeLayerId:
   if (role !== 'gm') return true;
   return Boolean(activeLayerId) && layerId === activeLayerId;
 }
+
+/**
+ * Whether a board image may receive pointer events.
+ *
+ * For the GM this only depends on the active layer. Players additionally need
+ * the existing "players may move" permission: an image without it stays fully
+ * visible but ignores the pointer, so clicks fall through to the stage and the
+ * camera can be dragged directly over the image. Because a non-listening Konva
+ * group is skipped by hit testing, a higher forbidden image also stops
+ * shadowing an interactive image underneath it.
+ */
+export function isImagePickable(role: BoardRole, layerId: string, activeLayerId: string | undefined, allowPlayerMove: boolean): boolean {
+  if (!isLayerPickable(role, layerId, activeLayerId)) return false;
+  return role === 'gm' || allowPlayerMove;
+}

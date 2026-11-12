@@ -1,9 +1,9 @@
 import Konva from 'konva';
-import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, PersonalNoteListItem, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, isBoardFontFamily } from '../shared/fonts.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
-import { isLayerPickable } from '../shared/layer-selection.js';
+import { isImagePickable, isLayerPickable } from '../shared/layer-selection.js';
 import { overflowGroupCount, placePopover } from '../shared/menu.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
@@ -40,6 +40,13 @@ const stickerTools = select<HTMLElement>('#sticker-tools');
 const markerTools = select<HTMLElement>('#marker-tools');
 const notesPanel = select<HTMLElement>('#notes-panel');
 const notesList = select<HTMLUListElement>('#notes-list');
+const notesModes = select<HTMLElement>('#notes-modes');
+const notesBoardSection = select<HTMLElement>('#notes-board-section');
+const notesPersonalSection = select<HTMLElement>('#notes-personal-section');
+const notesPersonalGroups = select<HTMLElement>('#notes-personal-groups');
+const notesPersonalHint = select<HTMLElement>('#notes-personal-hint');
+const notesModeBoard = select<HTMLButtonElement>('#notes-mode-board');
+const notesModePlayers = select<HTMLButtonElement>('#notes-mode-players');
 const noteDialog = select<HTMLDialogElement>('#note-dialog');
 const assetPickerDialog = select<HTMLDialogElement>('#asset-picker-dialog');
 const assetDeleteDialog = select<HTMLDialogElement>('#asset-delete-dialog');
@@ -136,6 +143,8 @@ let notePlacementId: string | undefined;
 let openNoteId: string | undefined;
 let editingNoteId: string | undefined;
 let noteDialogMode: 'view' | 'edit' = 'view';
+let noteEditorKind: 'board' | 'personal' = 'board';
+let notesPanelMode: 'board' | 'players' = 'board';
 let noteRequestSequence = 0;
 let noteEditorGeneration = 0;
 let editingAssetIds: string[] = [];
@@ -192,6 +201,9 @@ function applyGmOnlyVisibility(role: AppIdentity['role']): void {
       hidden: element.hidden,
     });
   }
+  // Player-only actions (personal notes) are hidden from the GM, who has the
+  // read-only "Заметки игроков" section instead.
+  for (const element of document.querySelectorAll<HTMLElement>('[data-player-only="true"]')) element.hidden = role !== 'player';
   refreshCreateToggle();
   scheduleTopbarLayout();
 }
@@ -336,8 +348,9 @@ function scheduleTopbarLayout(): void {
 
 function refreshCreateToggle(): void {
   const note = select<HTMLButtonElement>('#note-create');
+  const personalNote = select<HTMLButtonElement>('#personal-note-create');
   const sticker = select<HTMLButtonElement>('#sticker-create');
-  createToggle.hidden = note.hidden && sticker.hidden;
+  createToggle.hidden = note.hidden && personalNote.hidden && sticker.hidden;
 }
 
 function login(nextIdentity: AppIdentity) {
@@ -670,7 +683,7 @@ function drawObjects() {
     const objects = roomState.objects.filter((object) => object.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex);
     for (const item of objects) {
       const editingCrop = cropMode && selectedObjectId === item.id;
-      const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
+      const pickable = isImagePickable(identity?.role, layer.id, activeLayerId, item.allowPlayerMove);
       const htmlImage = cachedImage(item.assetId);
       const group = new Konva.Group({
         x: item.x, y: item.y, width: item.width, height: item.height,
@@ -798,11 +811,19 @@ function drawObjects() {
 
 function clampWorld(value: number) { return Math.max(-MAX_WORLD_COORDINATE, Math.min(MAX_WORLD_COORDINATE, value)); }
 
-/** Drop a GM selection that no longer belongs to the active layer. */
+/** Drop a selection that the current role may no longer pick. */
 function clearSelectionOutsideActiveLayer(): void {
-  if (identity?.role !== 'gm') return;
   const object = roomState?.objects.find((entry) => entry.id === selectedObjectId);
-  if (object && !isLayerPickable(identity.role, object.layerId, activeLayerId)) selectedObjectId = undefined;
+  const objectLayer = object && roomState?.layers.find((entry) => entry.id === object.layerId);
+  if (object && objectLayer && !isImagePickable(identity?.role, objectLayer.id, activeLayerId, object.allowPlayerMove)) selectedObjectId = undefined;
+  if (identity?.role !== 'gm') {
+    if (!selectedObjectId && !selectedStickerId && !selectedMarkerId) {
+      cropMode = false;
+      markerResizeMode = false;
+      markerResizeOriginal = undefined;
+    }
+    return;
+  }
   const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
   if (sticker && !isLayerPickable(identity.role, sticker.layerId, activeLayerId)) selectedStickerId = undefined;
   const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
@@ -818,7 +839,7 @@ function setSelectedObject(id: string | undefined) {
   if (id) {
     const item = roomState?.objects.find((object) => object.id === id);
     const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
-    if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
+    if (!item || !layer || !isImagePickable(identity?.role, layer.id, activeLayerId, item.allowPlayerMove)) id = undefined;
   }
   const changed = id !== selectedObjectId;
   selectedObjectId = id; selectedStickerId = undefined; selectedMarkerId = undefined;
@@ -1308,6 +1329,7 @@ function updateBoard(state: RoomMessage) {
       openSheet(ownSheet);
     }
   }
+  if (!notesPanel.hidden) renderNotesPanel();
   drawObjects();
 }
 
@@ -2016,10 +2038,18 @@ function setNoteMessage(message: string) { select<HTMLElement>('#note-message').
 function clearNoteContent() { select<HTMLElement>('#note-view-body').textContent = ''; select<HTMLElement>('#note-view-images').replaceChildren(); }
 function closeNoteDialog() { noteRequestSequence += 1; noteDialog.close(); openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); }
 
-async function openNote(id: string) {
+function noteEndpoint(kind: 'board' | 'personal', id: string): string {
+  return `${kind === 'personal' ? '/api/personal-notes' : '/api/notes'}/${encodeURIComponent(id)}`;
+}
+
+function noteCollectionEndpoint(kind: 'board' | 'personal'): string {
+  return kind === 'personal' ? '/api/personal-notes' : '/api/notes';
+}
+
+async function openNote(id: string, kind: 'board' | 'personal' = 'board') {
   const requestSequence = ++noteRequestSequence;
   try {
-    const response = await fetch(`/api/notes/${encodeURIComponent(id)}`, { cache: 'no-store' });
+    const response = await fetch(noteEndpoint(kind, id), { cache: 'no-store' });
     if (requestSequence !== noteRequestSequence) return;
     if (!response.ok) {
       if (openNoteId === id) closeNoteDialog();
@@ -2028,9 +2058,9 @@ async function openNote(id: string) {
     }
     const note = (await response.json() as { note: NoteRecord }).note;
     if (requestSequence !== noteRequestSequence) return;
-    openNoteId = id; editingNoteId = id; noteDialogMode = 'view';
+    openNoteId = id; editingNoteId = id; noteDialogMode = 'view'; noteEditorKind = kind;
     select<HTMLElement>('#note-dialog-heading').textContent = note.title;
-    select<HTMLElement>('#note-privacy').textContent = note.access === 'gm-only' ? 'Только ведущий' : note.access === 'selected-players' ? 'Выбранные игроки' : 'Все игроки';
+    select<HTMLElement>('#note-privacy').textContent = kind === 'personal' ? 'Личная заметка · видна владельцу и ведущему' : note.access === 'gm-only' ? 'Только ведущий' : note.access === 'selected-players' ? 'Выбранные игроки' : 'Все игроки';
     select<HTMLTextAreaElement>('#note-body').hidden = true;
     select<HTMLInputElement>('#note-title').hidden = true;
     select<HTMLLabelElement>('label[for="note-title"]').hidden = true;
@@ -2049,20 +2079,29 @@ async function openNote(id: string) {
     const images = select<HTMLElement>('#note-view-images'); images.replaceChildren(); images.hidden = note.images.length === 0;
     for (const asset of note.images) { const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
     select<HTMLButtonElement>('#note-save').hidden = true;
-    select<HTMLButtonElement>('#note-place-marker').hidden = false;
-    const edit = select<HTMLButtonElement>('#note-edit'); edit.hidden = identity?.role !== 'gm';
+    select<HTMLButtonElement>('#note-place-marker').hidden = kind === 'personal';
+    const canEdit = kind === 'personal'
+      ? identity?.role === 'player' && note.ownerId === identity?.participantId
+      : identity?.role === 'gm';
+    const edit = select<HTMLButtonElement>('#note-edit'); edit.hidden = !canEdit;
     setNoteMessage('');
     if (!noteDialog.open) noteDialog.showModal();
   } catch { setNoteMessage('Не удалось загрузить заметку. Проверьте соединение.'); }
 }
 
-function openNoteEditor(note?: NoteRecord) {
-  if (identity?.role !== 'gm') return;
+function openNoteEditor(note?: NoteRecord, kind: 'board' | 'personal' = 'board') {
+  if (kind === 'board') {
+    if (identity?.role !== 'gm') return;
+  } else {
+    if (identity?.role !== 'player') return;
+    if (note && note.ownerId !== identity.participantId) return;
+  }
+  noteEditorKind = kind;
   noteRequestSequence += 1;
   noteEditorGeneration += 1;
   editingNoteId = note?.id; openNoteId = note?.id; noteDialogMode = 'edit';
-  select<HTMLElement>('#note-dialog-heading').textContent = note ? 'Редактирование заметки' : 'Новая заметка';
-  select<HTMLElement>('#note-privacy').textContent = note ? 'Настройки доступа' : 'Черновик';
+  select<HTMLElement>('#note-dialog-heading').textContent = kind === 'personal' ? note ? 'Редактирование личной заметки' : 'Новая личная заметка' : note ? 'Редактирование заметки' : 'Новая заметка';
+  select<HTMLElement>('#note-privacy').textContent = kind === 'personal' ? 'Личная заметка · видна владельцу и ведущему' : note ? 'Настройки доступа' : 'Черновик';
   select<HTMLInputElement>('#note-title').value = note?.title || '';
   select<HTMLTextAreaElement>('#note-body').value = note?.body || '';
   select<HTMLSelectElement>('#note-access').value = note?.access || 'gm-only';
@@ -2070,17 +2109,21 @@ function openNoteEditor(note?: NoteRecord) {
   applyBoardFont(select<HTMLTextAreaElement>('#note-body'), note?.fontFamily);
   const noteFontSelect = select<HTMLSelectElement>('#note-font-family');
   noteFontSelect.onchange = () => applyBoardFont(select<HTMLTextAreaElement>('#note-body'), isBoardFontFamily(noteFontSelect.value) ? noteFontSelect.value : 'default');
-  select<HTMLSelectElement>('#note-marker-type').value = note?.markerType || 'text';
+  select<HTMLSelectElement>('#note-marker-type').value = kind === 'personal' ? 'text' : note?.markerType || 'text';
   select<HTMLInputElement>('#note-marker-text').value = note?.markerText === note?.title ? '' : note?.markerText || '';
-  selectedMarkerAssetId = note?.markerAssetId;
+  selectedMarkerAssetId = kind === 'personal' ? undefined : note?.markerAssetId;
   updateMarkerEditorFields();
   select<HTMLInputElement>('#note-title').hidden = false;
   select<HTMLTextAreaElement>('#note-body').hidden = false;
   select<HTMLLabelElement>('label[for="note-title"]').hidden = false;
-  select<HTMLLabelElement>('label[for="note-access"]').hidden = false;
-  select<HTMLSelectElement>('#note-access').hidden = false;
-  select<HTMLLabelElement>('label[for="note-marker-type"]').hidden = false;
-  select<HTMLSelectElement>('#note-marker-type').hidden = false;
+  select<HTMLLabelElement>('label[for="note-access"]').hidden = kind === 'personal';
+  select<HTMLSelectElement>('#note-access').hidden = kind === 'personal';
+  select<HTMLLabelElement>('label[for="note-marker-type"]').hidden = kind === 'personal';
+  select<HTMLSelectElement>('#note-marker-type').hidden = kind === 'personal';
+  if (kind === 'personal') {
+    select<HTMLElement>('#note-marker-text-row').hidden = true;
+    select<HTMLElement>('#note-marker-image-row').hidden = true;
+  }
   select<HTMLLabelElement>('label[for="note-body"]').hidden = false;
   select<HTMLLabelElement>('label[for="note-font-family"]').hidden = false;
   select<HTMLSelectElement>('#note-font-family').hidden = false;
@@ -2100,7 +2143,7 @@ function openNoteEditor(note?: NoteRecord) {
     const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = participantId; checkbox.checked = true;
     label.append(checkbox, document.createTextNode(`Отключённый участник · ${participantId.slice(0, 8)}`)); participantList.append(label);
   }
-  participantWrap.hidden = select<HTMLSelectElement>('#note-access').value !== 'selected-players';
+  participantWrap.hidden = kind === 'personal' || select<HTMLSelectElement>('#note-access').value !== 'selected-players';
   editingAssetIds = [...(note?.assetIds || [])]; renderNoteAttachments();
   select<HTMLButtonElement>('#note-save').hidden = false;
   select<HTMLButtonElement>('#note-place-marker').hidden = true;
@@ -2308,18 +2351,39 @@ function setAssetPickerLibraryMode() {
 }
 
 async function saveNote() {
-  if (identity?.role !== 'gm') return;
+  const personal = noteEditorKind === 'personal';
+  if (personal ? identity?.role !== 'player' : identity?.role !== 'gm') return;
   if (pendingNoteUploads > 0) { setNoteMessage('Дождитесь завершения загрузки изображений.'); return; }
-  const selectedParticipantIds = Array.from(select<HTMLElement>('#note-participant-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
-  const markerType = select<HTMLSelectElement>('#note-marker-type').value;
-  if (markerType === 'image' && !selectedMarkerAssetId) { setNoteMessage('Выберите изображение для графической метки.'); return; }
   const id = editingNoteId;
+  const markerType = personal ? 'text' : select<HTMLSelectElement>('#note-marker-type').value;
+  if (!personal && markerType === 'image' && !selectedMarkerAssetId) { setNoteMessage('Выберите изображение для графической метки.'); return; }
+  const selectedParticipantIds = personal ? [] : Array.from(select<HTMLElement>('#note-participant-list').querySelectorAll<HTMLInputElement>('input:checked'), (input) => input.value);
+  const common = {
+    title: select<HTMLInputElement>('#note-title').value,
+    body: select<HTMLTextAreaElement>('#note-body').value,
+    assetIds: editingAssetIds,
+    fontFamily: select<HTMLSelectElement>('#note-font-family').value,
+  };
+  const payload = personal ? common : {
+    ...common,
+    access: select<HTMLSelectElement>('#note-access').value,
+    selectedParticipantIds,
+    markerType,
+    markerText: select<HTMLInputElement>('#note-marker-text').value,
+    ...(markerType === 'image' && selectedMarkerAssetId ? { markerAssetId: selectedMarkerAssetId } : {}),
+  };
   try {
-    const response = await fetch(id ? `/api/notes/${encodeURIComponent(id)}` : '/api/notes', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: select<HTMLInputElement>('#note-title').value, body: select<HTMLTextAreaElement>('#note-body').value, access: select<HTMLSelectElement>('#note-access').value, selectedParticipantIds, assetIds: editingAssetIds, markerType, markerText: select<HTMLInputElement>('#note-marker-text').value, fontFamily: select<HTMLSelectElement>('#note-font-family').value, ...(markerType === 'image' && selectedMarkerAssetId ? { markerAssetId: selectedMarkerAssetId } : {}) }) });
+    const response = await fetch(id ? noteEndpoint(personal ? 'personal' : 'board', id) : noteCollectionEndpoint(personal ? 'personal' : 'board'), { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const result = await response.json() as { note?: NoteRecord; error?: string };
     if (!response.ok) throw new Error(result.error || 'Не удалось сохранить заметку.');
-    closeNoteDialog(); await refreshNotesList();
-    if (!id && result.note) startNotePlacement(result.note.id);
+    closeNoteDialog();
+    if (personal) {
+      if (result.note) upsertPersonalNote(result.note);
+      renderNotesPanel();
+    } else {
+      await refreshNotesList();
+      if (!id && result.note) startNotePlacement(result.note.id);
+    }
   } catch (error) { setNoteMessage(error instanceof Error ? error.message : 'Ошибка сервера.'); }
 }
 
@@ -2329,11 +2393,103 @@ function startNotePlacement(id: string) {
   notePlacementId = id; notePlacementHint.hidden = false; canvasContainer.style.cursor = 'crosshair';
 }
 
+function upsertPersonalNote(note: NoteRecord): void {
+  if (!roomState || note.noteType !== 'personal') return;
+  const entry: PersonalNoteListItem = {
+    id: note.id,
+    title: note.title,
+    ownerId: note.ownerId || identity?.participantId || '',
+    ownerName: note.ownerName || identity?.name || '',
+    updatedAt: note.updatedAt,
+  };
+  roomState.personalNotes = [...(roomState.personalNotes || []).filter((current) => current.id !== note.id), entry];
+}
+
+function renderNotesPanel(): void {
+  if (!identity) return;
+  const isGm = identity.role === 'gm';
+  if (!isGm) notesPanelMode = 'players';
+  notesModes.hidden = !isGm;
+  notesModeBoard.classList.toggle('active', notesPanelMode === 'board');
+  notesModePlayers.classList.toggle('active', notesPanelMode === 'players');
+  notesModeBoard.setAttribute('aria-pressed', String(notesPanelMode === 'board'));
+  notesModePlayers.setAttribute('aria-pressed', String(notesPanelMode === 'players'));
+  notesBoardSection.hidden = !(isGm && notesPanelMode === 'board');
+  notesPersonalSection.hidden = notesPanelMode !== 'players';
+  notesPersonalHint.hidden = isGm;
+  if (notesPanelMode === 'players') renderPersonalNotesList();
+}
+
+function personalNoteEntry(note: PersonalNoteListItem, canManage: boolean, showOwner: boolean): HTMLLIElement {
+  const item = document.createElement('li'); item.className = 'note-entry';
+  const copy = document.createElement('div'); copy.className = 'note-entry-copy';
+  const title = document.createElement('span'); title.className = 'note-entry-title'; title.textContent = note.title; title.title = note.title;
+  const meta = document.createElement('span'); meta.className = 'note-entry-meta';
+  const timestamp = new Date(note.updatedAt).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  meta.textContent = showOwner ? `${note.ownerName || 'Игрок'} · ${timestamp}` : timestamp;
+  copy.append(title, meta);
+  const actions = document.createElement('div'); actions.className = 'note-entry-actions';
+  const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Открыть'; open.addEventListener('click', () => void openNote(note.id, 'personal'));
+  actions.append(open);
+  if (canManage) {
+    const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Править';
+    edit.addEventListener('click', async () => {
+      try {
+        const response = await fetch(noteEndpoint('personal', note.id), { cache: 'no-store' });
+        if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note, 'personal');
+      } catch { showCanvasMessage('Не удалось загрузить заметку.', true); }
+    });
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Удалить';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Удалить личную заметку «${note.title}»?`)) return;
+      const response = await fetch(noteEndpoint('personal', note.id), { method: 'DELETE' });
+      if (!response.ok || !roomState) return;
+      roomState.personalNotes = (roomState.personalNotes || []).filter((current) => current.id !== note.id);
+      renderNotesPanel();
+    });
+    actions.append(edit, remove);
+  }
+  item.append(copy, actions);
+  return item;
+}
+
+function renderPersonalNotesList(): void {
+  notesPersonalGroups.replaceChildren();
+  const notes = roomState?.personalNotes ?? [];
+  if (!notes.length) {
+    const empty = document.createElement('p'); empty.className = 'panel-note';
+    empty.textContent = identity?.role === 'gm' ? 'Игроки ещё не создали личных заметок.' : 'У вас пока нет личных заметок.';
+    notesPersonalGroups.append(empty);
+    return;
+  }
+  const isGm = identity?.role === 'gm';
+  if (!isGm) {
+    const list = document.createElement('ul'); list.className = 'assets-list';
+    for (const note of notes) list.append(personalNoteEntry(note, true, false));
+    notesPersonalGroups.append(list);
+    return;
+  }
+  const groups = new Map<string, { name: string; notes: PersonalNoteListItem[] }>();
+  for (const note of notes) {
+    const group = groups.get(note.ownerId) ?? { name: note.ownerName || 'Игрок', notes: [] };
+    group.notes.push(note);
+    groups.set(note.ownerId, group);
+  }
+  for (const group of groups.values()) {
+    const section = document.createElement('section'); section.className = 'notes-personal-group';
+    const heading = document.createElement('h3'); heading.textContent = group.name; section.append(heading);
+    const list = document.createElement('ul'); list.className = 'assets-list';
+    for (const note of group.notes) list.append(personalNoteEntry(note, false, true));
+    section.append(list); notesPersonalGroups.append(section);
+  }
+}
+
 function refreshNotesListIfVisible(): void {
   if (identity?.role === 'gm' && !notesPanel.hidden) void refreshNotesList();
 }
 
 async function refreshNotesList() {
+  if (identity?.role !== 'gm') return;
   try {
     const response = await fetch('/api/notes', { cache: 'no-store' }); if (!response.ok) return;
     const notes = (await response.json() as { notes: NoteListItem[] }).notes; notesList.replaceChildren();
@@ -2660,13 +2816,16 @@ boardBackgroundSelect.addEventListener('change', () => {
 });
 select<HTMLButtonElement>('#library-toggle').addEventListener('click', () => { libraryPanel.hidden = !libraryPanel.hidden; });
 select<HTMLButtonElement>('#library-close').addEventListener('click', () => { libraryPanel.hidden = true; });
-select<HTMLButtonElement>('#notes-toggle').addEventListener('click', () => { notesPanel.hidden = !notesPanel.hidden; if (!notesPanel.hidden) void refreshNotesList(); });
+select<HTMLButtonElement>('#notes-toggle').addEventListener('click', () => { notesPanel.hidden = !notesPanel.hidden; if (!notesPanel.hidden) { void refreshNotesList(); renderNotesPanel(); } });
 select<HTMLButtonElement>('#notes-close').addEventListener('click', () => { notesPanel.hidden = true; });
+select<HTMLButtonElement>('#notes-mode-board').addEventListener('click', () => { notesPanelMode = 'board'; refreshNotesListIfVisible(); renderNotesPanel(); });
+select<HTMLButtonElement>('#notes-mode-players').addEventListener('click', () => { notesPanelMode = 'players'; renderNotesPanel(); });
 select<HTMLButtonElement>('#note-create').addEventListener('click', () => openNoteEditor());
+select<HTMLButtonElement>('#personal-note-create').addEventListener('click', () => openNoteEditor(undefined, 'personal'));
 select<HTMLButtonElement>('#note-close').addEventListener('click', closeNoteDialog);
-noteDialog.addEventListener('close', () => { noteRequestSequence += 1; noteEditorGeneration += 1; openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); });
+noteDialog.addEventListener('close', () => { noteRequestSequence += 1; noteEditorGeneration += 1; openNoteId = undefined; editingNoteId = undefined; noteEditorKind = 'board'; clearNoteContent(); });
 select<HTMLButtonElement>('#note-save').addEventListener('click', () => void saveNote());
-select<HTMLButtonElement>('#note-edit').addEventListener('click', async () => { if (!openNoteId) return; try { const response = await fetch(`/api/notes/${encodeURIComponent(openNoteId)}`, { cache: 'no-store' }); if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note); } catch { setNoteMessage('Не удалось загрузить заметку.'); } });
+select<HTMLButtonElement>('#note-edit').addEventListener('click', async () => { if (!openNoteId) return; try { const response = await fetch(noteEndpoint(noteEditorKind, openNoteId), { cache: 'no-store' }); if (response.ok) openNoteEditor((await response.json() as { note: NoteRecord }).note, noteEditorKind); } catch { setNoteMessage('Не удалось загрузить заметку.'); } });
 select<HTMLButtonElement>('#note-place-marker').addEventListener('click', () => { if (openNoteId) { const id = openNoteId; closeNoteDialog(); startNotePlacement(id); } });
 select<HTMLSelectElement>('#note-access').addEventListener('change', (event) => { select<HTMLElement>('#note-participants').hidden = (event.currentTarget as HTMLSelectElement).value !== 'selected-players'; });
 select<HTMLSelectElement>('#note-marker-type').addEventListener('change', updateMarkerEditorFields);

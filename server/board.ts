@@ -230,7 +230,9 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       gmOnly(identity);
       const noteId = text(command.noteId, 'ID заметки', 64);
       const layerId = text(command.layerId, 'ID слоя', 64);
-      if (!store.getNote(noteId)) throw new BoardCommandError('Заметка не найдена.');
+      const note = store.getNote(noteId);
+      if (!note) throw new BoardCommandError('Заметка не найдена.');
+      if (note.noteType !== 'board') throw new BoardCommandError('Личные заметки не размещаются на доске.');
       const layer = store.getLayer(layerId);
       if (!layer) throw new BoardCommandError('Слой не найден.');
       if (layer.locked) throw new BoardCommandError('Слой заблокирован.');
