@@ -3,6 +3,7 @@ import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, Boa
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, isBoardFontFamily } from '../shared/fonts.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
+import { isLayerPickable } from '../shared/layer-selection.js';
 import { overflowGroupCount, placePopover } from '../shared/menu.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
@@ -83,6 +84,9 @@ const topbarTail = select<HTMLElement>('.topbar-tail');
 const topbarMoreToggle = select<HTMLButtonElement>('#topbar-more-toggle');
 const topbarMoreMenu = select<HTMLElement>('#topbar-more-menu');
 const topbarMoreStatic = select<HTMLElement>('#topbar-more-static');
+const themeControl = select<HTMLElement>('#topbar-theme-control');
+const themeLightButton = select<HTMLButtonElement>('#theme-light');
+const themeDarkButton = select<HTMLButtonElement>('#theme-dark');
 const topbarCreate = select<HTMLElement>('.topbar-create');
 const createToggle = select<HTMLButtonElement>('#create-toggle');
 const topbarGroupElements = Array.from(topbarGroups.querySelectorAll<HTMLElement>(':scope > .topbar-group'));
@@ -203,6 +207,31 @@ function applyBoardFont(element: HTMLElement, font: BoardFontFamily | null | und
   element.style.fontFamily = cssFontFamily(font);
 }
 
+type ThemePreference = 'light' | 'dark';
+
+function readThemePreference(participantId: string): ThemePreference {
+  if (!participantId) return 'light';
+  try {
+    return localStorage.getItem(uiStorageKey(participantId, 'theme')) === 'dark' ? 'dark' : 'light';
+  } catch { return 'light'; }
+}
+
+function applyThemePreference(theme: ThemePreference): void {
+  document.documentElement.dataset.theme = theme;
+  themeLightButton.setAttribute('aria-pressed', String(theme === 'light'));
+  themeDarkButton.setAttribute('aria-pressed', String(theme === 'dark'));
+}
+
+function setThemePreference(theme: ThemePreference): void {
+  applyThemePreference(theme);
+  if (!identity?.participantId) return;
+  try { localStorage.setItem(uiStorageKey(identity.participantId, 'theme'), theme); } catch { /* Local UI preferences are optional. */ }
+}
+
+function setupTheme(participantId: string): void {
+  applyThemePreference(readThemePreference(participantId));
+}
+
 async function loadBoardFonts(): Promise<void> {
   try {
     await document.fonts.load('16px Caveat');
@@ -276,6 +305,7 @@ function refreshTopbarOverflow(): void {
   for (const group of topbarGroupElements) topbarGroups.insertBefore(group, topbarCreate);
   const hasStaticItems = topbarMoreStaticItems.some((item) => !item.hidden);
   topbarMoreStatic.hidden = !hasStaticItems;
+  const hasThemeControl = !themeControl.hidden;
   // Reserve the trigger width while measuring, because it lives in the right zone.
   topbarMoreToggle.hidden = false;
   topbarMoreToggle.setAttribute('aria-expanded', 'false');
@@ -296,7 +326,7 @@ function refreshTopbarOverflow(): void {
   const count = overflowGroupCount(widths, availableForGroups, groupGap);
   for (const group of groups.slice(groups.length - count)) topbarMoreMenu.append(group);
 
-  if (count === 0 && !hasStaticItems) topbarMoreToggle.hidden = true;
+  if (count === 0 && !hasStaticItems && !hasThemeControl) topbarMoreToggle.hidden = true;
 }
 
 function scheduleTopbarLayout(): void {
@@ -310,11 +340,12 @@ function refreshCreateToggle(): void {
   createToggle.hidden = note.hidden && sticker.hidden;
 }
 
-function login(role: AppIdentity['role'], name: string) {
-  identity = { participantId: '', role, name };
+function login(nextIdentity: AppIdentity) {
+  identity = nextIdentity;
+  setupTheme(nextIdentity.participantId);
   loginShell.hidden = true;
   workspace.hidden = false;
-  applyGmOnlyVisibility(role);
+  applyGmOnlyVisibility(nextIdentity.role);
   if (!stage) setupStage();
   void loadBoardFonts();
   scheduleTopbarLayout();
@@ -639,17 +670,19 @@ function drawObjects() {
     const objects = roomState.objects.filter((object) => object.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex);
     for (const item of objects) {
       const editingCrop = cropMode && selectedObjectId === item.id;
+      const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
       const htmlImage = cachedImage(item.assetId);
       const group = new Konva.Group({
         x: item.x, y: item.y, width: item.width, height: item.height,
-        draggable: canMove(item, layer) && !(cropMode && selectedObjectId === item.id),
+        listening: pickable,
+        draggable: pickable && canMove(item, layer) && !(cropMode && selectedObjectId === item.id),
         name: `board-object ${item.id}`,
         ...(!editingCrop ? { clipFunc: (context: Konva.Context) => {
           const rect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
           context.rect(rect.x, rect.y, rect.width, rect.height);
         } } : {}),
       });
-      const imageNode = new Konva.Image({ image: htmlImage, listening: true });
+      const imageNode = new Konva.Image({ image: htmlImage, listening: pickable });
       updateImageNode(imageNode, item, htmlImage);
       const cropRect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
       const cropShades = [0, 1, 2, 3].map(() => new Konva.Rect({ fill: '#1119', listening: false, perfectDrawEnabled: false }));
@@ -703,7 +736,8 @@ function drawObjects() {
     for (const sticker of (roomState.stickers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
       const colors: Record<BoardSticker['bgColor'], string> = { butter: '#fff1b8', rose: '#ffd6df', sky: '#d7efff', sage: '#d9efdc' };
       const textColors: Record<BoardSticker['textColor'], string> = { black: '#000000', white: '#FFFFFF' };
-      const group = new Konva.Group({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height, draggable: !layer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId), name: `board-sticker ${sticker.id}` });
+      const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
+      const group = new Konva.Group({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height, listening: pickable, draggable: pickable && !layer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId), name: `board-sticker ${sticker.id}` });
       const background = new Konva.Rect({ width: sticker.width, height: sticker.height, fill: colors[sticker.bgColor], cornerRadius: 8, stroke: '#0002', strokeWidth: 1 });
       const text = new Konva.Text({ x: 10, y: 8, width: sticker.width - 20, height: sticker.height - 16, text: sticker.text, fontFamily: canvasFontFamily(sticker.fontFamily), fontSize: sticker.fontSize, fill: textColors[sticker.textColor], wrap: 'word', ellipsis: true, verticalAlign: 'middle', align: 'center', listening: false });
       group.add(background, text);
@@ -715,7 +749,8 @@ function drawObjects() {
     for (const marker of (roomState.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
       const markerWidth = marker.width;
       const markerHeight = marker.height;
-      const group = new Konva.Group({ x: marker.x, y: marker.y, width: markerWidth, height: markerHeight, draggable: identity?.role === 'gm' && !layer.locked && !markerResizeMode, name: `note-marker ${marker.id}` });
+      const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
+      const group = new Konva.Group({ x: marker.x, y: marker.y, width: markerWidth, height: markerHeight, listening: pickable, draggable: pickable && identity?.role === 'gm' && !layer.locked && !markerResizeMode, name: `note-marker ${marker.id}` });
       if (marker.type === 'image' && marker.assetId) {
         const image = cachedImage(marker.assetId);
         group.add(new Konva.Rect({ width: markerWidth, height: markerHeight, fill: '#fff', cornerRadius: 5, stroke: '#426c59', strokeWidth: 2 }));
@@ -763,7 +798,28 @@ function drawObjects() {
 
 function clampWorld(value: number) { return Math.max(-MAX_WORLD_COORDINATE, Math.min(MAX_WORLD_COORDINATE, value)); }
 
+/** Drop a GM selection that no longer belongs to the active layer. */
+function clearSelectionOutsideActiveLayer(): void {
+  if (identity?.role !== 'gm') return;
+  const object = roomState?.objects.find((entry) => entry.id === selectedObjectId);
+  if (object && !isLayerPickable(identity.role, object.layerId, activeLayerId)) selectedObjectId = undefined;
+  const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
+  if (sticker && !isLayerPickable(identity.role, sticker.layerId, activeLayerId)) selectedStickerId = undefined;
+  const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
+  if (marker && !isLayerPickable(identity.role, marker.layerId, activeLayerId)) selectedMarkerId = undefined;
+  if (!selectedObjectId && !selectedStickerId && !selectedMarkerId) {
+    cropMode = false;
+    markerResizeMode = false;
+    markerResizeOriginal = undefined;
+  }
+}
+
 function setSelectedObject(id: string | undefined) {
+  if (id) {
+    const item = roomState?.objects.find((object) => object.id === id);
+    const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+    if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
+  }
   const changed = id !== selectedObjectId;
   selectedObjectId = id; selectedStickerId = undefined; selectedMarkerId = undefined;
   markerResizeMode = false; markerResizeOriginal = undefined;
@@ -772,8 +828,20 @@ function setSelectedObject(id: string | undefined) {
   drawObjects();
 }
 
-function setSelectedSticker(id: string | undefined) { selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; markerResizeMode = false; markerResizeOriginal = undefined; updateSelectionControls(); drawObjects(); }
+function setSelectedSticker(id: string | undefined) {
+  if (id) {
+    const sticker = roomState?.stickers?.find((entry) => entry.id === id);
+    const layer = sticker && roomState?.layers.find((entry) => entry.id === sticker.layerId);
+    if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
+  }
+  selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; markerResizeMode = false; markerResizeOriginal = undefined; updateSelectionControls(); drawObjects();
+}
 function setSelectedMarker(id: string | undefined) {
+  if (id) {
+    const marker = roomState?.noteMarkers?.find((entry) => entry.id === id);
+    const layer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+    if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
+  }
   const changed = id !== selectedMarkerId;
   selectedObjectId = undefined; selectedStickerId = undefined; selectedMarkerId = id; cropMode = false;
   if (changed) { markerResizeMode = false; markerResizeOriginal = undefined; }
@@ -808,10 +876,10 @@ function updateSelectionControls() {
   const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
   const markerLayer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
   const markerRendered = marker && renderedMarkers.get(marker.id);
-  const canEditSticker = !!sticker && !!stickerLayer && !stickerLayer.locked && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId);
+  const canEditSticker = !!sticker && !!stickerLayer && !stickerLayer.locked && isLayerPickable(identity?.role, stickerLayer.id, activeLayerId) && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId);
   objectTools.hidden = true;
   stickerTools.hidden = !sticker || !stickerRendered || !canEditSticker;
-  const canResizeMarker = !!marker && !!markerRendered && !!markerLayer && !markerLayer.locked && identity?.role === 'gm';
+  const canResizeMarker = !!marker && !!markerRendered && !!markerLayer && !markerLayer.locked && isLayerPickable(identity?.role, markerLayer.id, activeLayerId) && identity?.role === 'gm';
   markerTools.hidden = !canResizeMarker;
   if (markerResizeMode && !canResizeMarker) { markerResizeMode = false; markerResizeOriginal = undefined; }
   select<HTMLElement>('#lock-indicator').hidden = !(sticker && stickerLayer?.locked || marker && markerLayer?.locked);
@@ -842,7 +910,7 @@ function updateSelectionControls() {
   const item = roomState?.objects.find((object) => object.id === selectedObjectId);
   const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
   const rendered = item && renderedObjects.get(item.id);
-  objectTools.hidden = !item || !layer || !rendered || identity?.role !== 'gm';
+  objectTools.hidden = !item || !layer || !rendered || identity?.role !== 'gm' || !isLayerPickable(identity?.role, layer.id, activeLayerId);
   if (!item || !layer || !rendered) {
     select<HTMLElement>('#lock-indicator').hidden = true;
     transformer?.nodes([]);
@@ -871,7 +939,7 @@ function updateSelectionControls() {
   allowPlayerMoveControl.checked = item.allowPlayerMove;
   stretchControl.checked = item.freeStretch;
   const isGm = identity?.role === 'gm';
-  const editable = isGm && !layer.locked;
+  const editable = isGm && !layer.locked && isLayerPickable(identity?.role, layer.id, activeLayerId);
   transformer?.nodes(editable && !cropMode ? [rendered.group] : []);
   cropTransformer?.nodes(editable && cropMode ? [rendered.border] : []);
   if (transformer) {
@@ -916,7 +984,7 @@ function confirmCrop() {
 
 interface PanelPreference { version: 1; open: boolean; x: number | null; y: number | null }
 
-function uiStorageKey(participantId: string, panel: 'dice-tools' | 'dice-history' | 'layers'): string {
+function uiStorageKey(participantId: string, panel: 'dice-tools' | 'dice-history' | 'layers' | 'theme'): string {
   return `tabletop:ui:v1:${participantId}:${panel}`;
 }
 
@@ -1136,6 +1204,7 @@ function setLayersCollapsed(collapsed: boolean, persist = true): void {
 function setupParticipantUi(participantId: string): void {
   if (!participantId || uiPreferencesParticipantId === participantId) return;
   uiPreferencesParticipantId = participantId;
+  setupTheme(participantId);
   knownDiceRollIds = undefined;
   unseenDiceRolls = 0;
   restoreFloatingPanel(diceToolsPanel, 'dice-tools', 'left', participantId);
@@ -1219,6 +1288,8 @@ function updateBoard(state: RoomMessage) {
   if (!state.objects.some((item) => item.id === selectedObjectId)) selectedObjectId = undefined;
   if (!state.stickers?.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
   if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
+  // A layer change (local switch or a server update) must not leave the GM editing an off-layer item.
+  clearSelectionOutsideActiveLayer();
   select<HTMLButtonElement>('#sticker-create').hidden = false;
   refreshCreateToggle();
   scheduleTopbarLayout();
@@ -2279,6 +2350,16 @@ async function refreshNotesList() {
   } catch { /* Keep the current list during a brief network failure. */ }
 }
 
+function setActiveLayer(layerId: string): void {
+  if (layerId === activeLayerId) return;
+  activeLayerId = layerId;
+  localStorage.setItem(`tabletop-active-layer:${location.host}`, layerId);
+  clearSelectionOutsideActiveLayer();
+  renderLayers();
+  // Rebuild hit areas: only items on the new active layer stay pickable.
+  drawObjects();
+}
+
 function renderLayers() {
   layersList.replaceChildren();
   if (!roomState || identity?.role !== 'gm') return;
@@ -2307,7 +2388,7 @@ function renderLayers() {
     const main = document.createElement('div'); main.className = 'layer-main';
     const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'layer-select'; choose.textContent = layer.name;
     choose.title = layer.name;
-    choose.addEventListener('click', () => { activeLayerId = layer.id; localStorage.setItem(`tabletop-active-layer:${location.host}`, layer.id); renderLayers(); });
+    choose.addEventListener('click', () => setActiveLayer(layer.id));
     const visible = document.createElement('button'); visible.type = 'button'; visible.className = 'layer-action'; visible.textContent = layer.visible ? '◉' : '○'; visible.title = layer.visible ? 'Скрыть слой' : 'Показать слой';
     visible.addEventListener('click', () => void runCommand('layer:update', { id: layer.id, changes: { visible: !layer.visible } }));
     const locked = document.createElement('button'); locked.type = 'button'; locked.className = `layer-action layer-lock${layer.locked ? ' is-locked' : ''}`; locked.textContent = layer.locked ? '🔒' : '🔓'; locked.title = layer.locked ? 'Разблокировать слой' : 'Заблокировать слой'; locked.setAttribute('aria-label', locked.title); locked.setAttribute('aria-pressed', String(layer.locked));
@@ -2478,7 +2559,7 @@ form.addEventListener('submit', async (event) => {
     const result = await response.json() as { identity?: AppIdentity; error?: string };
     if (!response.ok || !result.identity) throw new Error(result.error || 'Не удалось подключиться.');
     leaving = false;
-    login(result.identity.role, result.identity.name);
+    login(result.identity);
   } catch (error) { loginMessage.textContent = error instanceof Error ? error.message : 'Не удалось подключиться.'; }
 });
 
@@ -2736,9 +2817,12 @@ async function restoreSession() {
     if (!response.ok) return;
     const result = await response.json() as { identity: AppIdentity };
     leaving = false;
-    login(result.identity.role, result.identity.name);
+    login(result.identity);
   } catch { loginMessage.textContent = 'Нет соединения с сервером.'; }
 }
+
+themeLightButton.addEventListener('click', () => setThemePreference('light'));
+themeDarkButton.addEventListener('click', () => setThemePreference('dark'));
 
 setupMenus();
 void restoreSession();
