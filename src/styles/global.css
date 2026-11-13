@@ -210,6 +210,7 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .board-background-control select { width: 90px; height: 34px; padding: 0 8px; font-size: 11px; }
 #board-canvas { position: absolute; inset: 0; }
 .canvas-hint { position: absolute; left: 18px; bottom: 15px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--surface) 85%, transparent); color: var(--text-secondary); font-size: 11px; pointer-events: none; }
+.battle-preview-banner { position: absolute; top: 56px; left: 50%; z-index: 5; transform: translateX(-50%); max-width: min(80%, 620px); padding: 7px 12px; border: 1px solid #bd7b20; border-radius: 7px; background: #fff4dd; color: #6b4410; font-size: 12px; font-weight: 600; pointer-events: none; }
 .canvas-message { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); max-width: min(80%, 620px); padding: 8px 12px; border: 1px solid var(--warning-border); border-radius: 7px; background: var(--warning-soft); color: var(--warning-text); font-size: 12px; pointer-events: none; opacity: 0; transition: opacity .15s; }
 .canvas-message.visible { opacity: 1; }
 .side-panel { width: 284px; flex: 0 0 284px; overflow-y: auto; padding: 18px 15px; border-left: 1px solid var(--border); background: var(--surface); }
@@ -355,8 +356,10 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .dice-panel-heading .icon-button { width: 29px; height: 29px; flex: 0 0 29px; }
 .dice-panel-heading .panel-reset { font-size: 17px; }
 .dice-room-system, .dice-roll-controls { display: grid; gap: 6px; padding: 10px 13px; border-bottom: 1px solid var(--border-subtle); }
-.dice-room-system { grid-template-columns: 1fr 1fr auto; align-items: center; }
-.dice-room-system label { grid-column: 1 / -1; }
+.dice-room-system { grid-template-columns: 1fr auto; align-items: center; }
+.dice-room-system .dice-room-system-label { grid-column: 1 / -1; margin: 0; color: var(--text-label); font-size: 10px; font-weight: 400; }
+.room-system-readonly { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.room-system-readonly strong { color: var(--text-primary); font-size: 12px; }
 .dice-room-system select, .dice-roll-controls input, .dice-roll-controls select { height: 32px; padding: 0 8px; font-size: 11px; }
 .dice-room-system button, .dice-roll-controls button { height: 32px; margin: 0; padding: 0 10px; font-size: 11px; }
 .dice-roll-controls h3 { margin: 0; color: var(--text-primary); }
@@ -370,6 +373,7 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .dice-entry-time { color: var(--text-tertiary); font-size: 9px; font-weight: 400; }
 .dice-entry-detail { color: var(--text-label); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .dice-entry-critical { color: var(--danger); font-weight: 700; }
+.dice-entry-historical { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; background: var(--surface-secondary); color: var(--text-tertiary); font-size: 9px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
 .dice-entry button { justify-self: end; height: 25px; margin: 2px 0 0; padding: 0 8px; font-size: 10px; }
 .dice-history-empty { padding: 12px; color: var(--text-secondary); text-align: center; font-size: 11px; }
 .sheets-panel { width: min(390px, 92vw); }

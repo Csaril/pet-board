@@ -1,10 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import type { BoardFontFamily, BoardImage, CropRect, LayerAudience, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardFontFamily, BoardImage, BoardScene, CropRect, LayerAudience, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import type { Identity } from './store.js';
 import { RoomStore } from './store.js';
 
-export class BoardCommandError extends Error {}
+export const ROOM_SYSTEM_IMMUTABLE = 'ROOM_SYSTEM_IMMUTABLE';
+export const SYSTEM_MISMATCH = 'SYSTEM_MISMATCH';
+
+export class BoardCommandError extends Error {
+  readonly code?: string;
+  readonly statusCode: number;
+
+  constructor(message: string, options: { code?: string; statusCode?: number } = {}) {
+    super(message);
+    this.name = 'BoardCommandError';
+    this.code = options.code;
+    this.statusCode = options.statusCode ?? 400;
+  }
+}
 
 type Command = Record<string, unknown> & { type?: string; requestId?: unknown };
 const owns = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
@@ -40,6 +53,27 @@ function audience(value: unknown): LayerAudience {
   if (value !== 'gm-only' && value !== 'all-players') throw new BoardCommandError('Недопустимая видимость слоя.');
   return value;
 }
+function boardScene(value: unknown): BoardScene {
+  if (value !== 'board' && value !== 'battle') throw new BoardCommandError('Недопустимая сцена.');
+  return value;
+}
+/**
+ * GM may edit either scene (the battle scene is edited as a local preview).
+ * Players may only modify the scene that is currently active for the room.
+ */
+function commandScene(store: RoomStore, identity: Identity, command: Command): BoardScene {
+  const requested = command.scene === undefined ? store.activeScene : boardScene(command.scene);
+  if (identity.role !== 'gm' && requested !== store.activeScene) {
+    throw new BoardCommandError('Игрок не может изменять неактивную сцену.');
+  }
+  return requested;
+}
+function layerInScene(store: RoomStore, id: string, scene: BoardScene): ReturnType<RoomStore['getLayer']> {
+  const layer = store.getLayer(id);
+  if (!layer) throw new BoardCommandError('Слой не найден.');
+  if (layer.scene !== scene) throw new BoardCommandError('Слой относится к другой сцене.');
+  return layer;
+}
 function stickerBackground(value: unknown): StickerBackground {
   if (value !== 'butter' && value !== 'rose' && value !== 'sky' && value !== 'sage') throw new BoardCommandError('Недопустимый цвет стикера.');
   return value;
@@ -74,13 +108,15 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
   switch (command.type) {
     case 'layer:create': {
       gmOnly(identity);
-      store.createLayer(text(command.name, 'Название слоя', 80), command.audience === undefined ? 'all-players' : audience(command.audience));
+      const scene = commandScene(store, identity, command);
+      store.createLayer(text(command.name, 'Название слоя', 80), command.audience === undefined ? 'all-players' : audience(command.audience), scene);
       return;
     }
     case 'layer:update': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const id = text(command.id, 'ID слоя', 64);
-      if (!store.getLayer(id)) throw new BoardCommandError('Слой не найден.');
+      if (!layerInScene(store, id, scene)) throw new BoardCommandError('Слой не найден.');
       const changes = objectValue(command.changes, 'Изменения слоя');
       const allowed = new Set(['name', 'visible', 'locked', 'audience']);
       if (Object.keys(changes).some((key) => !allowed.has(key))) throw new BoardCommandError('Слой содержит неизвестные поля.');
@@ -96,29 +132,31 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'layer:reorder': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       if (!Array.isArray(command.ids) || command.ids.some((id) => typeof id !== 'string')) throw new BoardCommandError('Некорректный порядок слоёв.');
       const ids = command.ids as string[];
-      const existing = store.getLayers().map((layer) => layer.id);
+      const existing = store.getLayers(scene).map((layer) => layer.id);
       if (ids.length !== existing.length || new Set(ids).size !== ids.length || ids.some((id) => !existing.includes(id))) {
         throw new BoardCommandError('Порядок должен включать каждый слой ровно один раз.');
       }
-      store.reorderLayers(ids);
+      store.reorderLayers(ids, scene);
       return;
     }
     case 'layer:delete': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const id = text(command.id, 'ID слоя', 64);
-      const layer = store.getLayer(id);
+      const layer = layerInScene(store, id, scene);
       if (!layer) throw new BoardCommandError('Слой не найден.');
       if (layer.locked) throw new BoardCommandError('Слой заблокирован. Сначала разблокируйте его.');
-      if (store.getLayers().length <= 1) throw new BoardCommandError('В комнате должен остаться хотя бы один слой.');
+      if (store.getLayers(scene).length <= 1) throw new BoardCommandError('В комнате должен остаться хотя бы один слой.');
       const count = store.countObjectsInLayer(id);
       const targetLayerId = command.targetLayerId === undefined ? undefined : text(command.targetLayerId, 'Целевой слой', 64);
       const deleteObjects = command.deleteObjects === true;
       if (targetLayerId && targetLayerId === id) throw new BoardCommandError('Выберите другой слой.');
       if (count > 0 && !targetLayerId && !deleteObjects) throw new BoardCommandError('Переместите объекты в другой слой или подтвердите их удаление.');
       if (targetLayerId) {
-        const target = store.getLayer(targetLayerId);
+        const target = layerInScene(store, targetLayerId, scene);
         if (!target) throw new BoardCommandError('Целевой слой не найден.');
         if (target.locked) throw new BoardCommandError('Целевой слой заблокирован.');
       }
@@ -127,10 +165,11 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'object:create': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const assetId = text(command.assetId, 'ID ресурса', 64);
-      const layerId = command.layerId === undefined ? store.getLayers()[0]?.id : text(command.layerId, 'ID слоя', 64);
+      const layerId = command.layerId === undefined ? store.getLayers(scene)[0]?.id : text(command.layerId, 'ID слоя', 64);
       const asset = store.getAsset(assetId);
-      const layer = layerId ? store.getLayer(layerId) : undefined;
+      const layer = layerId ? layerInScene(store, layerId, scene) : undefined;
       if (!asset) throw new BoardCommandError('Изображение не найдено.');
       if (!layer) throw new BoardCommandError('Слой не найден.');
       if (layer.locked) throw new BoardCommandError('Слой заблокирован.');
@@ -146,10 +185,11 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       return;
     }
     case 'object:update': {
+      const scene = commandScene(store, identity, command);
       const id = text(command.id, 'ID объекта', 64);
       const object = store.getObject(id);
       if (!object) throw new BoardCommandError('Объект не найден.');
-      const sourceLayer = store.getLayer(object.layerId);
+      const sourceLayer = layerInScene(store, object.layerId, scene);
       if (!sourceLayer) throw new BoardCommandError('Слой объекта не найден.');
       if (sourceLayer.locked) throw new BoardCommandError('Слой заблокирован.');
       const changes = objectValue(command.changes, 'Изменения объекта');
@@ -192,7 +232,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       }
       if (owns(changes, 'orderIndex')) patch.orderIndex = number(changes.orderIndex, 'orderIndex', 0, 1_000_000);
       if (owns(changes, 'layerId')) {
-        const target = store.getLayer(text(changes.layerId, 'ID слоя', 64));
+        const target = layerInScene(store, text(changes.layerId, 'ID слоя', 64), scene);
         if (!target) throw new BoardCommandError('Целевой слой не найден.');
         if (target.locked) throw new BoardCommandError('Целевой слой заблокирован.');
         patch.layerId = target.id;
@@ -203,37 +243,41 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'object:delete': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const object = store.getObject(text(command.id, 'ID объекта', 64));
       if (!object) throw new BoardCommandError('Объект не найден.');
-      if (store.getLayer(object.layerId)?.locked) throw new BoardCommandError('Слой заблокирован.');
+      if (layerInScene(store, object.layerId, scene)?.locked) throw new BoardCommandError('Слой заблокирован.');
       store.deleteObject(object.id);
       return;
     }
     case 'object:duplicate': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const source = store.getObject(text(command.id, 'ID объекта', 64));
       if (!source) throw new BoardCommandError('Объект не найден.');
-      if (store.getLayer(source.layerId)?.locked) throw new BoardCommandError('Слой заблокирован.');
+      if (layerInScene(store, source.layerId, scene)?.locked) throw new BoardCommandError('Слой заблокирован.');
       store.createObject({ ...source, id: randomUUID(), x: source.x + 24, y: source.y + 24, orderIndex: store.nextObjectOrder(source.layerId) });
       return;
     }
     case 'object:order': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const object = store.getObject(text(command.id, 'ID объекта', 64));
       if (!object) throw new BoardCommandError('Объект не найден.');
-      if (store.getLayer(object.layerId)?.locked) throw new BoardCommandError('Слой заблокирован.');
+      if (layerInScene(store, object.layerId, scene)?.locked) throw new BoardCommandError('Слой заблокирован.');
       if (command.direction !== 'front' && command.direction !== 'back') throw new BoardCommandError('Недопустимое направление.');
       store.reorderObject(object.id, command.direction);
       return;
     }
     case 'note-marker:create': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const noteId = text(command.noteId, 'ID заметки', 64);
       const layerId = text(command.layerId, 'ID слоя', 64);
       const note = store.getNote(noteId);
       if (!note) throw new BoardCommandError('Заметка не найдена.');
       if (note.noteType !== 'board') throw new BoardCommandError('Личные заметки не размещаются на доске.');
-      const layer = store.getLayer(layerId);
+      const layer = layerInScene(store, layerId, scene);
       if (!layer) throw new BoardCommandError('Слой не найден.');
       if (layer.locked) throw new BoardCommandError('Слой заблокирован.');
       store.createNoteMarker({ id: randomUUID(), noteId, layerId, x: number(command.x, 'x', -10_000_000, 10_000_000), y: number(command.y, 'y', -10_000_000, 10_000_000) });
@@ -241,10 +285,11 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'note-marker:update': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const id = text(command.id, 'ID метки', 64);
       const marker = store.getNoteMarker(id);
       if (!marker) throw new BoardCommandError('Метка не найдена.');
-      const source = store.getLayer(marker.layerId);
+      const source = layerInScene(store, marker.layerId, scene);
       if (!source || source.locked) throw new BoardCommandError('Слой заблокирован.');
       const changes = objectValue(command.changes, 'Изменения метки');
       const allowed = new Set(['x', 'y', 'layerId', 'width', 'height']);
@@ -273,7 +318,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
         ...(owns(changes, 'y') ? { y: number(changes.y, 'y', -10_000_000, 10_000_000) } : {}),
         ...(resize ? { width: Math.round(width), height: Math.round(height) } : {}),
         ...(owns(changes, 'layerId') ? (() => {
-          const target = store.getLayer(text(changes.layerId, 'Целевой слой', 64));
+          const target = layerInScene(store, text(changes.layerId, 'Целевой слой', 64), scene);
           if (!target) throw new BoardCommandError('Целевой слой не найден.');
           if (target.locked) throw new BoardCommandError('Целевой слой заблокирован.');
           return { layerId: target.id };
@@ -283,17 +328,19 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'note-marker:delete': {
       gmOnly(identity);
+      const scene = commandScene(store, identity, command);
       const marker = store.getNoteMarker(text(command.id, 'ID метки', 64));
       if (!marker) throw new BoardCommandError('Метка не найдена.');
-      if (store.getLayer(marker.layerId)?.locked) throw new BoardCommandError('Слой заблокирован.');
+      if (layerInScene(store, marker.layerId, scene)?.locked) throw new BoardCommandError('Слой заблокирован.');
       store.deleteNoteMarker(marker.id);
       return;
     }
     case 'sticker:create': {
+      const scene = commandScene(store, identity, command);
       let layer = identity.role === 'gm'
-        ? store.getLayer(text(command.layerId, 'ID слоя', 64))
-        : store.getLayers().find((candidate) => candidate.audience === 'all-players' && candidate.visible && !candidate.locked);
-      if (!layer && identity.role === 'player') layer = store.createLayer('Стикеры игроков', 'all-players');
+        ? layerInScene(store, text(command.layerId, 'ID слоя', 64), scene)
+        : store.getLayers(scene).find((candidate) => candidate.audience === 'all-players' && candidate.visible && !candidate.locked);
+      if (!layer && identity.role === 'player') layer = store.createLayer('Стикеры игроков', 'all-players', scene);
       if (!layer) throw new BoardCommandError('Слой не найден.');
       if (layer.locked || (identity.role === 'player' && (layer.audience !== 'all-players' || !layer.visible))) throw new BoardCommandError('Слой недоступен для создания стикера.');
       store.createSticker({
@@ -310,10 +357,11 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       return;
     }
     case 'sticker:update': {
+      const scene = commandScene(store, identity, command);
       const id = text(command.id, 'ID стикера', 64);
       const sticker = store.getSticker(id);
       if (!sticker) throw new BoardCommandError('Стикер не найден.');
-      const source = store.getLayer(sticker.layerId);
+      const source = layerInScene(store, sticker.layerId, scene);
       if (!source || source.locked) throw new BoardCommandError('Слой заблокирован.');
       if (identity.role !== 'gm' && sticker.creatorId !== identity.participantId) throw new BoardCommandError('Можно редактировать только свой стикер.');
       if (identity.role === 'player' && (source.audience !== 'all-players' || !source.visible)) throw new BoardCommandError('Стикер недоступен.');
@@ -331,7 +379,7 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
         ...(owns(changes, 'fontSize') ? { fontSize: stickerFontSize(changes.fontSize) } : {}),
         ...(owns(changes, 'fontFamily') ? { fontFamily: stickerFontFamily(changes.fontFamily) } : {}),
         ...(owns(changes, 'layerId') ? (() => {
-          const target = store.getLayer(text(changes.layerId, 'Целевой слой', 64));
+          const target = layerInScene(store, text(changes.layerId, 'Целевой слой', 64), scene);
           if (!target) throw new BoardCommandError('Целевой слой не найден.');
           if (target.locked || (identity.role === 'player' && (target.audience !== 'all-players' || !target.visible))) throw new BoardCommandError('Целевой слой недоступен для редактирования.');
           return { layerId: target.id };
@@ -341,18 +389,20 @@ export function executeBoardCommand(store: RoomStore, identity: Identity, raw: u
       return;
     }
     case 'sticker:delete': {
+      const scene = commandScene(store, identity, command);
       const sticker = store.getSticker(text(command.id, 'ID стикера', 64));
       if (!sticker) throw new BoardCommandError('Стикер не найден.');
-      const layer = store.getLayer(sticker.layerId);
+      const layer = layerInScene(store, sticker.layerId, scene);
       if (!layer || layer.locked) throw new BoardCommandError('Слой заблокирован.');
       if (identity.role !== 'gm' && sticker.creatorId !== identity.participantId) throw new BoardCommandError('Можно удалить только свой стикер.');
       store.deleteSticker(sticker.id);
       return;
     }
     case 'sticker:duplicate': {
+      const scene = commandScene(store, identity, command);
       const source = store.getSticker(text(command.id, 'ID стикера', 64));
       if (!source) throw new BoardCommandError('Стикер не найден.');
-      const layer = store.getLayer(source.layerId);
+      const layer = layerInScene(store, source.layerId, scene);
       if (!layer || layer.locked) throw new BoardCommandError('Слой заблокирован.');
       if (identity.role !== 'gm' && source.creatorId !== identity.participantId) throw new BoardCommandError('Нельзя дублировать чужой стикер.');
       store.createSticker({ ...source, id: randomUUID(), x: source.x + 24, y: source.y + 24 });

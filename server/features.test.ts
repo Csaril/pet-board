@@ -161,6 +161,7 @@ test('legacy rooms and note markers migrate without losing the default backgroun
 test('character sheet scenarios 5-9: delete only unassigned sheets as GM and keep library images', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-sheet-delete-'));
   const store = new RoomStore(dataDir, 'Campaign');
+  store.initializeSystem('pbta-2d6', '1.0.0');
   const sheetInput = (id: string, assignedPlayerId: string | null = null) => ({
     id, creatorId: gm.participantId, creatorName: gm.name, assignedPlayerId,
     assignedPlayerName: assignedPlayerId ? player.name : null, systemId: 'pbta-2d6', systemVersion: '1.0.0', schemaVersion: 1,
@@ -196,6 +197,7 @@ test('asset library scenarios 10-16: complete deletion, reference guards, isolat
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-asset-delete-'));
   const config = configFor(dataDir);
   const store = new RoomStore(dataDir, config.roomName);
+  store.initializeSystem('pbta-2d6', '1.0.0');
   const app = await buildServer({ config, store, logger: false });
   try {
     const baseUrl = await app.listen({ host: '127.0.0.1', port: 0 });

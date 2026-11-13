@@ -72,6 +72,19 @@ export function placePopover(
 }
 
 /**
+ * Returns true when `menu` is `container` itself or lives inside it. Menus can
+ * be nested when a topbar group with its own dropdown is moved into the "Ещё"
+ * overflow menu: opening the nested menu must keep its ancestor open, otherwise
+ * the browser renders it inside a `display: none` subtree.
+ */
+export function menuIsWithin(
+  container: { contains(node: unknown): boolean } | null | undefined,
+  menu: unknown,
+): boolean {
+  return Boolean(container && container.contains(menu));
+}
+
+/**
  * Decides how many trailing topbar groups must move into the "Ещё" menu.
  * Widths are measured without the "Ещё" trigger, while `available` is the
  * width left for the groups themselves (the trigger sits in a sibling tail).

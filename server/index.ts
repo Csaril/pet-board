@@ -9,15 +9,15 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomInt, randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
-import type { BoardFontFamily, NoteAccess } from '../src/shared/board.js';
+import type { BoardFontFamily, BoardScene, NoteAccess } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
-import { executeBoardCommand, BoardCommandError } from './board.js';
+import { executeBoardCommand, BoardCommandError, ROOM_SYSTEM_IMMUTABLE, SYSTEM_MISMATCH } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { AssetInUseError, AssetNotFoundError, deleteImageAsset, saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
 import type { DiceRollEntry } from '../src/shared/board.js';
-import { systemModuleRegistry } from '../src/modules/registry.js';
+import { findSystemModule } from '../src/modules/registry.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
 import { calculatePbtARoll, rollFreeDice, type SituationalModifier } from '../src/modules/system/pbta-2d6/roll.js';
 import { executeSheetCommand } from './sheets.js';
@@ -65,6 +65,14 @@ function parsePersonalNotePayload(input: unknown, store: RoomStore, identity: Id
   const fontFamily = body.fontFamily === undefined ? DEFAULT_BOARD_FONT : body.fontFamily;
   if (!isBoardFontFamily(fontFamily)) return undefined;
   return { title: body.title.trim(), body: body.body, assetIds, fontFamily };
+}
+
+function parseSystemConfig(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const serialized = JSON.stringify(value);
+  if (serialized.length > 16_384) return undefined;
+  return JSON.parse(serialized) as Record<string, unknown>;
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
@@ -160,6 +168,34 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     }
   };
 
+  const immutableSystemError = (): BoardCommandError => new BoardCommandError(
+    'Игровая система комнаты уже закреплена и не может быть изменена.',
+    { code: ROOM_SYSTEM_IMMUTABLE, statusCode: 409 },
+  );
+
+  /** One-time system commit shared by WebSocket and the HTTP API. */
+  const initializeRoomSystem = (identity: Identity, input: Record<string, unknown>): void => {
+    if (store.roomSystem.fixed) throw immutableSystemError();
+    if (identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.', { statusCode: 403 });
+    if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version', 'config'].includes(key))) {
+      throw new BoardCommandError('Некорректная команда выбора системы.');
+    }
+    if (!Object.prototype.hasOwnProperty.call(input, 'systemId')) throw new BoardCommandError('Укажите систему комнаты или явный режим без системы.');
+    const systemId = input.systemId;
+    if (systemId === null) {
+      if (input.version !== undefined && input.version !== null) throw new BoardCommandError('Для режима без системы версия не задаётся.');
+      store.initializeSystem(null, null);
+      return;
+    }
+    if (typeof systemId !== 'string' || !systemId || systemId.length > 64) throw new BoardCommandError('Выберите зарегистрированную систему.');
+    if (typeof input.version !== 'string' || !input.version || input.version.length > 64) throw new BoardCommandError('Укажите версию системного модуля.');
+    const module = findSystemModule(systemId, input.version);
+    if (!module) throw new BoardCommandError('Выберите зарегистрированную системную версию.');
+    const systemConfig = parseSystemConfig(input.config);
+    if (!systemConfig) throw new BoardCommandError('Некорректная конфигурация системного модуля.');
+    store.initializeSystem(module.id, module.version, systemConfig);
+  };
+
   const createDiceRoll = (identity: Identity, command: Record<string, unknown>): DiceRollEntry => {
     if (command.type === 'dice:free') {
       if (Object.keys(command).some((key) => !['type', 'requestId', 'count', 'sides'].includes(key))) throw new BoardCommandError('Некорректная команда броска.');
@@ -171,7 +207,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       catch (error) { throw new BoardCommandError(error instanceof Error ? error.message : 'Некорректный бросок.'); }
       return {
         id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: identity.participantId, actorName: identity.name,
-        createdAt: new Date().toISOString(), kind: 'free', dice: result.dice, keptDice: result.dice, discardedDie: null,
+        createdAt: new Date().toISOString(), kind: 'free', systemId: null, systemVersion: null,
+        dice: result.dice, keptDice: result.dice, discardedDie: null,
         characteristicName: null, characterId: null, characterOwnerId: null, characteristicBonus: null, situationalModifier: 0, disadvantage: false,
         sides: sides as number, total: result.total, category: null, critical: null, rerollOf: null,
         abilityId: null, abilitySheetId: null, abilityCharacterName: null, abilityName: null, abilityAssetId: null,
@@ -201,8 +238,13 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if ((command.characterId !== undefined && (typeof command.characterId !== 'string' || !command.characterId || command.characterId.length > 128)) ||
         (command.characterOwnerId !== undefined && (typeof command.characterOwnerId !== 'string' || command.characterOwnerId.length > 128))) throw new BoardCommandError('Некорректная ссылка на персонажа.');
     if ((characterId === null) !== (characterOwnerId === null)) throw new BoardCommandError('Нужны и ID персонажа, и ID владельца.');
-    const activeSystem = store.activeSystem;
-    if (!activeSystem || activeSystem.id !== 'pbta-2d6' || systemModuleRegistry.get(activeSystem.id)?.version !== activeSystem.version) throw new BoardCommandError('В комнате не выбрана доступная система PbtA.');
+    const activeSystem = store.fixedSystem;
+    if (!activeSystem || activeSystem.id !== pbtaSystemModule.id || findSystemModule(activeSystem.id, activeSystem.version)?.version !== activeSystem.version) {
+      throw new BoardCommandError('В комнате не закреплена доступная система PbtA.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+    }
+    if (original && (original.systemId !== activeSystem.id || original.systemVersion !== activeSystem.version)) {
+      throw new BoardCommandError('Историческую запись нельзя повторить через текущую системную механику.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+    }
     let actor: Identity;
     if (original) {
       actor = { participantId: original.actorId, name: original.actorName, role: 'player' };
@@ -220,7 +262,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!original && characterId && characterOwnerId) {
       const sheet = store.getSheet(characterId);
       if (sheet) {
-        if (sheet.systemId !== pbtaSystemModule.id) throw new BoardCommandError('Лист не относится к активной системе PbtA.');
+        if (sheet.systemId !== activeSystem.id || sheet.systemVersion !== activeSystem.version) throw new BoardCommandError('Лист не относится к закреплённой системе PbtA.', { code: SYSTEM_MISMATCH, statusCode: 409 });
         if (!sheet.assignedPlayerId || sheet.assignedPlayerId !== characterOwnerId || sheet.assignedPlayerId !== actor.participantId) {
           throw new BoardCommandError('Лист персонажа не назначен участнику броска.');
         }
@@ -233,7 +275,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     const result = calculatePbtARoll({ characteristicBonus: bonus as number, situationalModifier: modifier as SituationalModifier, disadvantage }, secureRandomInt);
     return {
       id: randomUUID(), authorId: identity.participantId, authorName: identity.name, actorId: actor.participantId, actorName: actor.name,
-      createdAt: new Date().toISOString(), kind: 'pbta', ...result, characteristicName, characterId, characterOwnerId,
+      createdAt: new Date().toISOString(), kind: 'pbta', systemId: activeSystem.id, systemVersion: activeSystem.version,
+      ...result, characteristicName, characterId, characterOwnerId,
       sides: 6, disadvantage, rerollOf: original?.id ?? null,
       abilityId: null, abilitySheetId: null, abilityCharacterName: null, abilityName: null, abilityAssetId: null,
       abilitySummary: null, abilityDescription: null, abilityFontFamily: null,
@@ -245,6 +288,23 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
     reply.header('Cache-Control', 'no-store');
     return { ...store.snapshot(session.identity), maxUploadBytes: config.maxUploadBytes };
+  });
+
+  /**
+   * The only HTTP entry point for the one-time choice. Once the room is fixed
+   * it always answers 409 ROOM_SYSTEM_IMMUTABLE.
+   */
+  app.put('/api/room/system', async (request, reply) => {
+    if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
+    const session = sessionFor(request.cookies[SESSION_COOKIE]);
+    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+      ? request.body as Record<string, unknown>
+      : {};
+    initializeRoomSystem(session.identity, body);
+    reply.header('Cache-Control', 'no-store');
+    sendState();
+    return { system: store.roomSystem };
   });
 
   app.get('/api/sheets', async (request, reply) => {
@@ -537,23 +597,28 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
           executeSheetCommand(store, liveSession.identity, input);
         } else if (input.type === 'room:background:set') {
           if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может менять фон доски.');
-          if (Object.keys(input).some((key) => !['type', 'requestId', 'background'].includes(key))) throw new BoardCommandError('Некорректные настройки фона.');
+          if (Object.keys(input).some((key) => !['type', 'requestId', 'background', 'scene'].includes(key))) throw new BoardCommandError('Некорректные настройки фона.');
           if (input.background !== 'black' && input.background !== 'gray') throw new BoardCommandError('Доступны только чёрный и серый фон.');
-          store.setBoardBackground(input.background);
+          const scene: BoardScene = input.scene === undefined ? store.activeScene : input.scene === 'battle' ? 'battle' : input.scene === 'board' ? 'board' : (() => { throw new BoardCommandError('Недопустимая сцена.'); })();
+          store.setBackground(scene, input.background);
+        } else if (input.type === 'room:scene:set') {
+          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может переключать сцену комнаты.');
+          if (Object.keys(input).some((key) => !['type', 'requestId', 'scene'].includes(key))) throw new BoardCommandError('Некорректная команда сцены.');
+          if (input.scene !== 'board' && input.scene !== 'battle') throw new BoardCommandError('Доступны только основная доска и боевая карта.');
+          store.setActiveScene(input.scene);
+        } else if (input.type === 'room:system:initialize') {
+          initializeRoomSystem(liveSession.identity, input);
         } else if (input.type === 'room:system:set') {
-          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.');
-          if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version'].includes(key))) throw new BoardCommandError('Некорректные настройки системы.');
-          if (input.systemId === null && input.version === null) store.setActiveSystem(null, null);
-          else if (typeof input.systemId === 'string' && typeof input.version === 'string' && systemModuleRegistry.get(input.systemId)?.version === input.version) store.setActiveSystem(input.systemId, input.version);
-          else throw new BoardCommandError('Выберите зарегистрированную системную версию.');
+          throw immutableSystemError();
         } else {
           executeBoardCommand(store, liveSession.identity, command);
         }
         socket.send(JSON.stringify({ type: 'command:result', requestId, ok: true }));
         sendState();
       } catch (error) {
-        const message = error instanceof BoardCommandError ? error.message : 'Не удалось применить изменение.';
-        socket.send(JSON.stringify({ type: 'command:result', requestId, ok: false, error: message }));
+        const known = error instanceof BoardCommandError;
+        const message = known ? error.message : 'Не удалось применить изменение.';
+        socket.send(JSON.stringify({ type: 'command:result', requestId, ok: false, error: message, ...(known && error.code ? { code: error.code } : {}) }));
       }
     });
     socket.on('close', () => {
@@ -576,7 +641,8 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       : 500;
     if (statusCode >= 500) request.log.error({ err: error }, 'request failed');
     const message = statusCode >= 500 ? 'Внутренняя ошибка сервера.' : error.message || 'Запрос отклонён.';
-    if (request.url.startsWith('/api/')) return reply.code(statusCode).send({ error: message });
+    const code = error instanceof BoardCommandError && error.code ? error.code : undefined;
+    if (request.url.startsWith('/api/')) return reply.code(statusCode).send({ error: message, ...(code ? { code } : {}) });
     return reply.code(statusCode).type('text/plain; charset=utf-8').send(message);
   });
 

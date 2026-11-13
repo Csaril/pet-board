@@ -1,9 +1,12 @@
+import { nechronicaSystemModule } from './system/nechronica/module.js';
 import { pbtaSystemModule } from './system/pbta-2d6/module.js';
 
 export interface SystemModuleDescriptor {
   id: string;
   version: string;
   name: string;
+  /** Version of the persisted character-sheet shape owned by this module. */
+  sheetSchemaVersion: number;
 }
 
 export interface FeatureModuleDescriptor {
@@ -12,9 +15,14 @@ export interface FeatureModuleDescriptor {
   name: string;
 }
 
-export const systemModules = [pbtaSystemModule] as const;
+export const systemModules = [pbtaSystemModule, nechronicaSystemModule] as const;
 export const featureModules: readonly FeatureModuleDescriptor[] = [];
 
 export const systemModuleRegistry = new Map<string, SystemModuleDescriptor>(
   systemModules.map((module) => [module.id, module]),
 );
+
+export function findSystemModule(id: string, version?: string): SystemModuleDescriptor | undefined {
+  const module = systemModuleRegistry.get(id);
+  return module && (version === undefined || module.version === version) ? module : undefined;
+}

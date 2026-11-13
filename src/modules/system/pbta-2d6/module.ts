@@ -6,6 +6,7 @@ export const pbtaSystemModule = {
   id: 'pbta-2d6',
   version: '1.0.0',
   name: 'PbtA',
+  sheetSchemaVersion: 1,
   roll(input: PbtARollInput, randomInt: RandomInt) {
     return calculatePbtARoll(input, randomInt);
   },

@@ -2,8 +2,10 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomSystemState, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
+import { findSystemModule } from '../src/modules/registry.js';
+import { pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -30,7 +32,7 @@ export interface CounterPatch { name?: string; value?: number }
 export interface AbilityInput { id: string; name: string; description: string; assetId: string | null; counterEnabled: boolean; counterName: string; counterValue: number; checkboxEnabled: boolean; checkboxLabel: string; checked: boolean; fontFamily?: BoardFontFamily }
 export interface AbilityPatch { name?: string; description?: string; assetId?: string | null; counterEnabled?: boolean; counterName?: string; counterValue?: number; checkboxEnabled?: boolean; checkboxLabel?: string; checked?: boolean; fontFamily?: BoardFontFamily; orderIndex?: number }
 
-type LayerRow = { id: string; name: string; order_index: number; visible: number; locked: number; audience: LayerAudience };
+type LayerRow = { id: string; name: string; order_index: number; visible: number; locked: number; audience: LayerAudience; scene: BoardScene };
 type ObjectRow = {
   id: string; asset_id: string; layer_id: string; x: number; y: number; width: number; height: number;
   order_index: number; flip_x: number; flip_y: number; crop_json: string | null; allow_player_move: number; free_stretch: number;
@@ -53,7 +55,7 @@ type AbilityRow = {
 };
 
 function toLayer(row: LayerRow): BoardLayer {
-  return { id: row.id, name: row.name, orderIndex: row.order_index, visible: row.visible === 1, locked: row.locked === 1, audience: row.audience };
+  return { id: row.id, name: row.name, orderIndex: row.order_index, visible: row.visible === 1, locked: row.locked === 1, audience: row.audience, scene: row.scene };
 }
 function toObject(row: ObjectRow): BoardImage {
   return {
@@ -125,6 +127,8 @@ export class RoomStore {
         name TEXT NOT NULL,
         allow_player_stickers INTEGER NOT NULL DEFAULT 0 CHECK (allow_player_stickers IN (0, 1)),
         background TEXT NOT NULL DEFAULT 'gray' CHECK (background IN ('black', 'gray')),
+        battle_background TEXT NOT NULL DEFAULT 'gray' CHECK (battle_background IN ('black', 'gray')),
+        active_scene TEXT NOT NULL DEFAULT 'board' CHECK (active_scene IN ('board', 'battle')),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS sessions (
@@ -173,7 +177,8 @@ export class RoomStore {
         order_index INTEGER NOT NULL,
         visible INTEGER NOT NULL CHECK (visible IN (0, 1)),
         locked INTEGER NOT NULL CHECK (locked IN (0, 1)),
-        audience TEXT NOT NULL CHECK (audience IN ('gm-only', 'all-players'))
+        audience TEXT NOT NULL CHECK (audience IN ('gm-only', 'all-players')),
+        scene TEXT NOT NULL DEFAULT 'board' CHECK (scene IN ('board', 'battle'))
       );
       CREATE TABLE IF NOT EXISTS assets (
         id TEXT PRIMARY KEY,
@@ -374,9 +379,24 @@ export class RoomStore {
     }
     if (!roomColumns.some((column) => column.name === 'active_system_id')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_id TEXT');
     if (!roomColumns.some((column) => column.name === 'active_system_version')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_version TEXT');
+    if (!roomColumns.some((column) => column.name === 'system_id')) this.db.exec('ALTER TABLE room ADD COLUMN system_id TEXT');
+    if (!roomColumns.some((column) => column.name === 'system_version')) this.db.exec('ALTER TABLE room ADD COLUMN system_version TEXT');
+    if (!roomColumns.some((column) => column.name === 'module_config_json')) this.db.exec("ALTER TABLE room ADD COLUMN module_config_json TEXT NOT NULL DEFAULT '{}'");
+    if (!roomColumns.some((column) => column.name === 'system_fixed')) this.db.exec('ALTER TABLE room ADD COLUMN system_fixed INTEGER NOT NULL DEFAULT 0 CHECK (system_fixed IN (0, 1))');
     if (!roomColumns.some((column) => column.name === 'background')) {
       this.db.exec("ALTER TABLE room ADD COLUMN background TEXT NOT NULL DEFAULT 'gray' CHECK (background IN ('black', 'gray'))");
     }
+    if (!roomColumns.some((column) => column.name === 'battle_background')) {
+      this.db.exec("ALTER TABLE room ADD COLUMN battle_background TEXT NOT NULL DEFAULT 'gray' CHECK (battle_background IN ('black', 'gray'))");
+    }
+    if (!roomColumns.some((column) => column.name === 'active_scene')) {
+      this.db.exec("ALTER TABLE room ADD COLUMN active_scene TEXT NOT NULL DEFAULT 'board' CHECK (active_scene IN ('board', 'battle'))");
+    }
+    const layerColumns = this.db.pragma('table_info(board_layers)') as Array<{ name: string }>;
+    if (!layerColumns.some((column) => column.name === 'scene')) {
+      this.db.exec("ALTER TABLE board_layers ADD COLUMN scene TEXT NOT NULL DEFAULT 'board' CHECK (scene IN ('board', 'battle'))");
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS board_layers_scene_order ON board_layers(scene, order_index)');
     const noteColumns = this.db.pragma('table_info(notes)') as Array<{ name: string }>;
     if (!noteColumns.some((column) => column.name === 'marker_type')) this.db.exec("ALTER TABLE notes ADD COLUMN marker_type TEXT NOT NULL DEFAULT 'text' CHECK (marker_type IN ('text', 'image'))");
     if (!noteColumns.some((column) => column.name === 'marker_text')) this.db.exec('ALTER TABLE notes ADD COLUMN marker_text TEXT');
@@ -477,43 +497,179 @@ export class RoomStore {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE dice_rolls ADD COLUMN ${name} ${type}`);
       }
     }
+    const diceSystemColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
+    if (!diceSystemColumns.some((column) => column.name === 'system_id')) {
+      // Rows created before system attribution existed are classified only
+      // when their kind is unambiguous. The module version stays NULL because
+      // the old module version was never recorded.
+      this.db.transaction(() => {
+        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_id TEXT');
+        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_version TEXT');
+        this.db.prepare("UPDATE dice_rolls SET system_id = ? WHERE kind IN ('pbta', 'ability-use') AND system_id IS NULL").run(pbtaSystemModule.id);
+      })();
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS dice_rolls_system ON dice_rolls(system_id, system_version)');
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
-    const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers').get() as { count: number }).count;
-    if (layerCount === 0) this.createLayer('Основной слой', 'all-players');
+    this.migrateRoomSystem();
+    this.createRoomSystemTriggers();
+    for (const scene of ['board', 'battle'] as const) {
+      const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers WHERE scene = ?').get(scene) as { count: number }).count;
+      if (layerCount === 0) this.createLayer(scene === 'board' ? 'Основной слой' : 'Боевая карта', 'all-players', scene);
+    }
   }
 
   get roomName(): string {
     return (this.db.prepare('SELECT name FROM room WHERE id = 1').get() as { name: string }).name;
   }
 
-  get boardBackground(): BoardBackground {
-    const row = this.db.prepare('SELECT background FROM room WHERE id = 1').get() as { background: string } | undefined;
+  get background(): BoardBackground {
+    return this.backgroundFor('board');
+  }
+  backgroundFor(scene: BoardScene): BoardBackground {
+    const column = scene === 'battle' ? 'battle_background' : 'background';
+    const row = this.db.prepare(`SELECT ${column} AS background FROM room WHERE id = 1`).get() as { background: string } | undefined;
     return row?.background === 'black' ? 'black' : 'gray';
   }
+  setBackground(scene: BoardScene, background: BoardBackground): void {
+    const column = scene === 'battle' ? 'battle_background' : 'background';
+    this.db.prepare(`UPDATE room SET ${column} = ? WHERE id = 1`).run(background);
+  }
+  /** Backwards-compatible alias for the main board background. */
+  get boardBackground(): BoardBackground {
+    return this.backgroundFor('board');
+  }
   setBoardBackground(background: BoardBackground): void {
-    this.db.prepare('UPDATE room SET background = ? WHERE id = 1').run(background);
+    this.setBackground('board', background);
   }
 
-  get activeSystem(): { id: string; version: string } | null {
-    const row = this.db.prepare('SELECT active_system_id, active_system_version FROM room WHERE id = 1').get() as { active_system_id: string | null; active_system_version: string | null };
-    return row.active_system_id && row.active_system_version ? { id: row.active_system_id, version: row.active_system_version } : null;
+  get activeScene(): BoardScene {
+    const row = this.db.prepare('SELECT active_scene FROM room WHERE id = 1').get() as { active_scene: string } | undefined;
+    return row?.active_scene === 'battle' ? 'battle' : 'board';
   }
-  setActiveSystem(id: string | null, version: string | null): void {
-    if ((id === null) !== (version === null)) throw new Error('System id and version must both be set or cleared.');
-    this.db.prepare('UPDATE room SET active_system_id = ?, active_system_version = ? WHERE id = 1').run(id, version);
+  setActiveScene(scene: BoardScene): void {
+    this.db.prepare('UPDATE room SET active_scene = ? WHERE id = 1').run(scene);
+  }
+
+  get roomSystem(): RoomSystemState {
+    const row = this.db.prepare('SELECT system_id, system_version, module_config_json, system_fixed FROM room WHERE id = 1').get() as
+      { system_id: string | null; system_version: string | null; module_config_json: string | null; system_fixed: number } | undefined;
+    const id = row?.system_id ?? null;
+    const version = row?.system_version ?? null;
+    const fixed = Number(row?.system_fixed) === 1;
+    let config: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(row?.module_config_json || '{}') as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
+    } catch { /* Invalid legacy configuration falls back to an empty object. */ }
+    return {
+      fixed,
+      id,
+      version,
+      name: id ? findSystemModule(id, version ?? undefined)?.name ?? id : null,
+      config,
+    };
+  }
+
+  /** The fixed module pair, or null for "not chosen yet" and "deliberately no system". */
+  get fixedSystem(): { id: string; version: string } | null {
+    const system = this.roomSystem;
+    return system.fixed && system.id && system.version ? { id: system.id, version: system.version } : null;
+  }
+
+  /** One-time initialization. The SQLite trigger rejects any later replacement. */
+  initializeSystem(id: string | null, version: string | null, config: Record<string, unknown> = {}): void {
+    if ((id === null) !== (version === null)) throw new Error('Идентификатор и версия системы должны быть заданы вместе.');
+    const row = this.db.prepare('SELECT system_fixed FROM room WHERE id = 1').get() as { system_fixed: number } | undefined;
+    if (Number(row?.system_fixed) === 1) throw new Error('ROOM_SYSTEM_IMMUTABLE');
+    if (id !== null && version !== null && !findSystemModule(id, version)) {
+      throw new Error('Выберите зарегистрированную системную версию.');
+    }
+    this.db.prepare('UPDATE room SET system_id = ?, system_version = ?, module_config_json = ?, system_fixed = 1 WHERE id = 1')
+      .run(id, version, JSON.stringify(id === null ? {} : config));
+  }
+
+  private migrateRoomSystem(): void {
+    const row = this.db.prepare(`SELECT active_system_id, active_system_version, system_id, system_version, system_fixed
+      FROM room WHERE id = 1`).get() as {
+        active_system_id: string | null; active_system_version: string | null;
+        system_id: string | null; system_version: string | null; system_fixed: number;
+      } | undefined;
+    if (!row || Number(row.system_fixed) === 1) return;
+
+    // New columns already carry a value but were never committed (for example
+    // after an interrupted manual migration): validate and finish the commit.
+    if (row.system_id !== null || row.system_version !== null) {
+      if ((row.system_id === null) !== (row.system_version === null)) {
+        throw new Error('Системные поля комнаты заполнены не полностью. Требуется контролируемая миграция.');
+      }
+      if (row.system_id !== null && row.system_version !== null && !findSystemModule(row.system_id, row.system_version)) {
+        throw new Error(`Неизвестная игровая система комнаты: ${row.system_id}@${row.system_version}.`);
+      }
+      this.db.prepare('UPDATE room SET system_fixed = 1 WHERE id = 1').run();
+      return;
+    }
+
+    const legacyId = row.active_system_id;
+    const legacyVersion = row.active_system_version;
+    if ((legacyId === null) !== (legacyVersion === null)) {
+      throw new Error('В комнате задан только один из параметров active_system_id/active_system_version. Требуется ручная проверка.');
+    }
+    if (legacyId === null || legacyVersion === null) return;
+    if (!findSystemModule(legacyId, legacyVersion)) {
+      throw new Error(`Неизвестная система в active_system_id: ${legacyId}@${legacyVersion}. Требуется ручная проверка.`);
+    }
+    this.db.prepare('UPDATE room SET system_id = ?, system_version = ?, system_fixed = 1 WHERE id = 1').run(legacyId, legacyVersion);
+  }
+
+  /**
+   * The trigger allows the first commit (OLD.system_fixed = 0) and blocks every
+   * later ordinary change. A future controlled version migration must explicitly
+   * drop/recreate the trigger around its own transaction.
+   */
+  private createRoomSystemTriggers(): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS room_system_immutable;
+      CREATE TRIGGER room_system_immutable
+      BEFORE UPDATE OF system_id, system_version ON room
+      WHEN OLD.system_fixed = 1
+        AND (NEW.system_id IS NOT OLD.system_id OR NEW.system_version IS NOT OLD.system_version)
+      BEGIN SELECT RAISE(ABORT, 'ROOM_SYSTEM_IMMUTABLE'); END;
+
+      DROP TRIGGER IF EXISTS room_system_fixed_immutable;
+      CREATE TRIGGER room_system_fixed_immutable
+      BEFORE UPDATE OF system_fixed ON room
+      WHEN OLD.system_fixed = 1 AND NEW.system_fixed <> 1
+      BEGIN SELECT RAISE(ABORT, 'ROOM_SYSTEM_IMMUTABLE'); END;
+
+      DROP TRIGGER IF EXISTS room_legacy_system_immutable;
+      CREATE TRIGGER room_legacy_system_immutable
+      BEFORE UPDATE OF active_system_id, active_system_version ON room
+      WHEN OLD.system_fixed = 1
+        AND (NEW.active_system_id IS NOT OLD.active_system_id OR NEW.active_system_version IS NOT OLD.active_system_version)
+      BEGIN SELECT RAISE(ABORT, 'ROOM_SYSTEM_IMMUTABLE'); END;
+
+      DROP TRIGGER IF EXISTS room_system_pair_update;
+      CREATE TRIGGER room_system_pair_update
+      BEFORE UPDATE OF system_id, system_version, system_fixed ON room
+      WHEN (NEW.system_id IS NULL) <> (NEW.system_version IS NULL)
+      BEGIN SELECT RAISE(ABORT, 'ROOM_SYSTEM_INVALID'); END;
+    `);
   }
   saveDiceRoll(entry: DiceRollEntry): void {
     const insert = this.db.prepare(`INSERT INTO dice_rolls
-      (id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
+      (id, author_id, author_name, actor_id, actor_name, created_at, kind, system_id, system_version,
+       dice_json, kept_dice_json, discarded_die,
        characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage, sides, total, category, critical, reroll_of,
        ability_id, ability_sheet_id, ability_character_name, ability_name, ability_asset_id, ability_summary, ability_description, ability_font_family)
-      VALUES (@id, @authorId, @authorName, @actorId, @actorName, @createdAt, @kind, @dice, @keptDice, @discardedDie,
+      VALUES (@id, @authorId, @authorName, @actorId, @actorName, @createdAt, @kind, @systemId, @systemVersion,
+       @dice, @keptDice, @discardedDie,
        @characteristicName, @characterId, @characterOwnerId, @characteristicBonus, @situationalModifier, @disadvantage, @sides, @total, @category, @critical, @rerollOf,
        @abilityId, @abilitySheetId, @abilityCharacterName, @abilityName, @abilityAssetId, @abilitySummary, @abilityDescription, @abilityFontFamily)`);
     this.db.transaction(() => {
       insert.run({
         id: entry.id, authorId: entry.authorId, authorName: entry.authorName, actorId: entry.actorId, actorName: entry.actorName,
-        createdAt: entry.createdAt, kind: entry.kind, dice: JSON.stringify(entry.dice), keptDice: JSON.stringify(entry.keptDice),
+        createdAt: entry.createdAt, kind: entry.kind, systemId: entry.systemId, systemVersion: entry.systemVersion,
+        dice: JSON.stringify(entry.dice), keptDice: JSON.stringify(entry.keptDice),
         discardedDie: entry.discardedDie, characteristicName: entry.characteristicName, characterId: entry.characterId, characterOwnerId: entry.characterOwnerId, characteristicBonus: entry.characteristicBonus,
         situationalModifier: entry.situationalModifier, disadvantage: Number(entry.disadvantage), sides: entry.sides,
         total: entry.total, category: entry.category, critical: entry.critical, rerollOf: entry.rerollOf,
@@ -528,7 +684,10 @@ export class RoomStore {
     const rows = this.db.prepare('SELECT * FROM dice_rolls ORDER BY created_at DESC, rowid DESC LIMIT 10').all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
       id: String(row.id), authorId: String(row.author_id), authorName: String(row.author_name), actorId: String(row.actor_id), actorName: String(row.actor_name),
-      createdAt: String(row.created_at), kind: row.kind as DiceRollEntry['kind'], dice: JSON.parse(String(row.dice_json)) as number[],
+      createdAt: String(row.created_at), kind: row.kind as DiceRollEntry['kind'],
+      systemId: row.system_id === null || row.system_id === undefined ? null : String(row.system_id),
+      systemVersion: row.system_version === null || row.system_version === undefined ? null : String(row.system_version),
+      dice: JSON.parse(String(row.dice_json)) as number[],
       keptDice: JSON.parse(String(row.kept_dice_json)) as number[], discardedDie: row.discarded_die === null ? null : Number(row.discarded_die),
       characteristicName: row.characteristic_name === null ? null : String(row.characteristic_name),
       characterId: row.character_id === null ? null : String(row.character_id), characterOwnerId: row.character_owner_id === null ? null : String(row.character_owner_id),
@@ -566,18 +725,18 @@ export class RoomStore {
 
   deleteSession(sessionId: string): void { this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId); }
 
-  getLayers(): BoardLayer[] {
-    return (this.db.prepare('SELECT * FROM board_layers ORDER BY order_index ASC').all() as LayerRow[]).map(toLayer);
+  getLayers(scene: BoardScene = 'board'): BoardLayer[] {
+    return (this.db.prepare('SELECT * FROM board_layers WHERE scene = ? ORDER BY order_index ASC').all(scene) as LayerRow[]).map(toLayer);
   }
   getLayer(id: string): BoardLayer | undefined {
     const row = this.db.prepare('SELECT * FROM board_layers WHERE id = ?').get(id) as LayerRow | undefined;
     return row ? toLayer(row) : undefined;
   }
-  createLayer(name: string, audience: LayerAudience = 'all-players'): BoardLayer {
+  createLayer(name: string, audience: LayerAudience = 'all-players', scene: BoardScene = 'board'): BoardLayer {
     const id = randomUUID();
-    const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM board_layers').get() as { next: number }).next;
-    this.db.prepare('INSERT INTO board_layers (id, name, order_index, visible, locked, audience) VALUES (?, ?, ?, 1, 0, ?)')
-      .run(id, name, orderIndex, audience);
+    const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM board_layers WHERE scene = ?').get(scene) as { next: number }).next;
+    this.db.prepare('INSERT INTO board_layers (id, name, order_index, visible, locked, audience, scene) VALUES (?, ?, ?, 1, 0, ?, ?)')
+      .run(id, name, orderIndex, audience, scene);
     return this.getLayer(id)!;
   }
   updateLayer(id: string, patch: LayerPatch): void {
@@ -587,9 +746,9 @@ export class RoomStore {
     this.db.prepare(`UPDATE board_layers SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')} WHERE id = @id`)
       .run({ id, ...Object.fromEntries(entries.map(([key, value]) => [key, typeof value === 'boolean' ? Number(value) : value])) });
   }
-  reorderLayers(ids: string[]): void {
-    const update = this.db.prepare('UPDATE board_layers SET order_index = ? WHERE id = ?');
-    const transaction = this.db.transaction((layerIds: string[]) => layerIds.forEach((id, index) => update.run(index, id)));
+  reorderLayers(ids: string[], scene: BoardScene = 'board'): void {
+    const update = this.db.prepare('UPDATE board_layers SET order_index = ? WHERE id = ? AND scene = ?');
+    const transaction = this.db.transaction((layerIds: string[]) => layerIds.forEach((id, index) => update.run(index, id, scene)));
     transaction(ids);
   }
   countObjectsInLayer(layerId: string): number {
@@ -599,6 +758,7 @@ export class RoomStore {
       (SELECT COUNT(*) FROM note_markers WHERE layer_id = ?) AS count`).get(layerId, layerId, layerId) as { count: number }).count;
   }
   deleteLayer(id: string, targetLayerId?: string, deleteObjects = false): void {
+    const scene = this.getLayer(id)?.scene ?? 'board';
     const transaction = this.db.transaction(() => {
       if (targetLayerId) {
         this.db.prepare('UPDATE board_objects SET layer_id = ? WHERE layer_id = ?').run(targetLayerId, id);
@@ -610,7 +770,7 @@ export class RoomStore {
         this.db.prepare('DELETE FROM note_markers WHERE layer_id = ?').run(id);
       }
       this.db.prepare('DELETE FROM board_layers WHERE id = ?').run(id);
-      const rows = this.db.prepare('SELECT id FROM board_layers ORDER BY order_index ASC').all() as Array<{ id: string }>;
+      const rows = this.db.prepare('SELECT id FROM board_layers WHERE scene = ? ORDER BY order_index ASC').all(scene) as Array<{ id: string }>;
       const update = this.db.prepare('UPDATE board_layers SET order_index = ? WHERE id = ?');
       rows.forEach((row, index) => update.run(index, row.id));
     });
@@ -654,17 +814,19 @@ export class RoomStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(asset.id, asset.sha256, asset.mimeType, asset.originalName, asset.size, asset.width, asset.height, asset.createdAt);
   }
-  isAssetUsedByPublicObject(assetId: string): boolean {
+  isAssetUsedByPublicObject(assetId: string, scene: BoardScene = this.activeScene): boolean {
     return Boolean(this.db.prepare(`
       SELECT 1 FROM board_objects AS object
       JOIN board_layers AS layer ON layer.id = object.layer_id
-      WHERE object.asset_id = ? AND layer.audience = 'all-players' AND layer.visible = 1
+      WHERE object.asset_id = ? AND layer.scene = ? AND layer.audience = 'all-players' AND layer.visible = 1
       LIMIT 1
-    `).get(assetId));
+    `).get(assetId, scene));
   }
 
-  getObjects(): BoardImage[] {
-    return (this.db.prepare('SELECT * FROM board_objects ORDER BY order_index ASC').all() as ObjectRow[]).map(toObject);
+  getObjects(scene: BoardScene = 'board'): BoardImage[] {
+    return (this.db.prepare(`SELECT object.* FROM board_objects AS object
+      JOIN board_layers AS layer ON layer.id = object.layer_id
+      WHERE layer.scene = ? ORDER BY object.order_index ASC`).all(scene) as ObjectRow[]).map(toObject);
   }
   getObject(id: string): BoardImage | undefined {
     const row = this.db.prepare('SELECT * FROM board_objects WHERE id = ?').get(id) as ObjectRow | undefined;
@@ -692,11 +854,11 @@ export class RoomStore {
   nextObjectOrder(layerId: string): number {
     return (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM board_objects WHERE layer_id = ?').get(layerId) as { next: number }).next;
   }
-  getVisibleObjects(): BoardImage[] {
+  getVisibleObjects(scene: BoardScene = 'board'): BoardImage[] {
     return (this.db.prepare(`SELECT object.* FROM board_objects AS object
       JOIN board_layers AS layer ON layer.id = object.layer_id
-      WHERE layer.audience = 'all-players' AND layer.visible = 1
-      ORDER BY object.order_index ASC`).all() as ObjectRow[]).map(toObject);
+      WHERE layer.scene = ? AND layer.audience = 'all-players' AND layer.visible = 1
+      ORDER BY object.order_index ASC`).all(scene) as ObjectRow[]).map(toObject);
   }
   reorderObject(id: string, direction: 'front' | 'back'): void {
     const object = this.getObject(id);
@@ -809,10 +971,10 @@ export class RoomStore {
     const identity = this.getSession(participantId);
     return identity?.role === 'player';
   }
-  canReadAsset(assetId: string, identity: Identity): boolean {
+  canReadAsset(assetId: string, identity: Identity, scene: BoardScene = this.activeScene): boolean {
     if (!this.getAsset(assetId)) return false;
     if (identity.role === 'gm') return true;
-    if (this.isAssetUsedByPublicObject(assetId)) return true;
+    if (this.isAssetUsedByPublicObject(assetId, scene)) return true;
     if (this.isAssetUploadedBy(assetId, identity.participantId)) return true;
     if (this.isAssetUsedBySheet(assetId, identity)) return true;
     const noteIds = this.db.prepare('SELECT note_id FROM note_assets WHERE asset_id = ?').all(assetId) as Array<{ note_id: string }>;
@@ -823,8 +985,13 @@ export class RoomStore {
     const row = this.db.prepare(`SELECT marker.*, note.title, note.marker_type, note.marker_text, note.marker_asset_id, asset.width AS asset_width, asset.height AS asset_height FROM note_markers AS marker JOIN notes AS note ON note.id = marker.note_id LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id WHERE marker.id = ?`).get(id) as NoteMarkerRow | undefined;
     return row ? toNoteMarker(row) : undefined;
   }
-  getNoteMarkers(): NoteMarker[] {
-    return (this.db.prepare(`SELECT marker.*, note.title, note.marker_type, note.marker_text, note.marker_asset_id, asset.width AS asset_width, asset.height AS asset_height FROM note_markers AS marker JOIN notes AS note ON note.id = marker.note_id LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id ORDER BY marker.order_index`).all() as NoteMarkerRow[]).map(toNoteMarker);
+  getNoteMarkers(scene: BoardScene = 'board'): NoteMarker[] {
+    return (this.db.prepare(`SELECT marker.*, note.title, note.marker_type, note.marker_text, note.marker_asset_id, asset.width AS asset_width, asset.height AS asset_height
+      FROM note_markers AS marker
+      JOIN notes AS note ON note.id = marker.note_id
+      JOIN board_layers AS layer ON layer.id = marker.layer_id
+      LEFT JOIN assets AS asset ON asset.id = note.marker_asset_id
+      WHERE layer.scene = ? ORDER BY marker.order_index`).all(scene) as NoteMarkerRow[]).map(toNoteMarker);
   }
   createNoteMarker(marker: NoteMarkerInput): void {
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM note_markers WHERE layer_id = ?').get(marker.layerId) as { next: number }).next;
@@ -850,8 +1017,10 @@ export class RoomStore {
     const row = this.db.prepare('SELECT * FROM stickers WHERE id = ?').get(id) as StickerRow | undefined;
     return row ? toSticker(row) : undefined;
   }
-  getStickers(): BoardSticker[] {
-    return (this.db.prepare('SELECT * FROM stickers ORDER BY order_index').all() as StickerRow[]).map(toSticker);
+  getStickers(scene: BoardScene = 'board'): BoardSticker[] {
+    return (this.db.prepare(`SELECT sticker.* FROM stickers AS sticker
+      JOIN board_layers AS layer ON layer.id = sticker.layer_id
+      WHERE layer.scene = ? ORDER BY sticker.order_index`).all(scene) as StickerRow[]).map(toSticker);
   }
   createSticker(sticker: StickerInput): void {
     const orderIndex = sticker.orderIndex ?? (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM stickers WHERE layer_id = ?').get(sticker.layerId) as { next: number }).next;
@@ -874,10 +1043,17 @@ export class RoomStore {
     return rows.map((row) => this.hydrateSheet(row));
   }
   getSheetsFor(identity: Identity): CharacterSheet[] {
-    if (identity.role === 'gm') return this.getSheets();
+    const active = this.fixedSystem;
+    if (!active) return [];
+    if (identity.role === 'gm') {
+      const rows = this.db.prepare(`SELECT * FROM character_sheets
+        WHERE system_id = ? AND system_version = ?
+        ORDER BY assigned_player_id IS NULL DESC, assigned_player_name COLLATE NOCASE ASC, character_name COLLATE NOCASE ASC, updated_at DESC`).all(active.id, active.version) as SheetRow[];
+      return rows.map((row) => this.hydrateSheet(row));
+    }
     const rows = this.db.prepare(`SELECT * FROM character_sheets
-      WHERE assigned_player_id IS NOT NULL
-      ORDER BY character_name COLLATE NOCASE ASC, updated_at DESC`).all() as SheetRow[];
+      WHERE assigned_player_id IS NOT NULL AND system_id = ? AND system_version = ?
+      ORDER BY character_name COLLATE NOCASE ASC, updated_at DESC`).all(active.id, active.version) as SheetRow[];
     return rows.map((row) => this.hydrateSheet(row));
   }
   getSheet(id: string): CharacterSheet | undefined {
@@ -888,42 +1064,75 @@ export class RoomStore {
   getSheetFor(id: string, identity: Identity): CharacterSheet | undefined {
     const sheet = this.getSheet(id);
     if (!sheet) return undefined;
+    const active = this.fixedSystem;
+    if (!active || sheet.systemId !== active.id || sheet.systemVersion !== active.version) return undefined;
     if (identity.role === 'gm' || sheet.assignedPlayerId) return sheet;
     return undefined;
   }
   getSheetsByAssignedPlayer(participantId: string, systemId?: string): CharacterSheet[] {
-    const rows = systemId
-      ? this.db.prepare('SELECT * FROM character_sheets WHERE assigned_player_id = ? AND system_id = ? ORDER BY created_at ASC').all(participantId, systemId) as SheetRow[]
-      : this.db.prepare('SELECT * FROM character_sheets WHERE assigned_player_id = ? ORDER BY created_at ASC').all(participantId) as SheetRow[];
+    const active = this.fixedSystem;
+    if (!active || (systemId !== undefined && systemId !== active.id)) return [];
+    const rows = this.db.prepare('SELECT * FROM character_sheets WHERE assigned_player_id = ? AND system_id = ? AND system_version = ? ORDER BY created_at ASC')
+      .all(participantId, active.id, active.version) as SheetRow[];
     return rows.map((row) => this.hydrateSheet(row));
   }
   canEditSheet(id: string, identity: Identity): boolean {
-    const row = this.db.prepare('SELECT assigned_player_id FROM character_sheets WHERE id = ?').get(id) as { assigned_player_id: string | null } | undefined;
-    return Boolean(row) && (identity.role === 'gm' || row!.assigned_player_id === identity.participantId);
+    const active = this.fixedSystem;
+    if (!active) return false;
+    const row = this.db.prepare('SELECT assigned_player_id, system_id, system_version FROM character_sheets WHERE id = ?').get(id) as { assigned_player_id: string | null; system_id: string; system_version: string } | undefined;
+    return Boolean(row) && row!.system_id === active.id && row!.system_version === active.version && (identity.role === 'gm' || row!.assigned_player_id === identity.participantId);
   }
   assignSheet(id: string, playerId: string | null, playerName: string | null): void {
+    this.assertSheetInFixedSystem(id);
     this.db.prepare('UPDATE character_sheets SET assigned_player_id = ?, assigned_player_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
       .run(playerId, playerName, id);
   }
   deleteUnassignedSheet(id: string): boolean {
     return this.db.transaction(() => {
       const row = this.db.prepare('SELECT assigned_player_id FROM character_sheets WHERE id = ?').get(id) as { assigned_player_id: string | null } | undefined;
-      if (!row || row.assigned_player_id !== null) return false;
+      if (!row) return false;
+      this.assertSheetInFixedSystem(id);
+      if (row.assigned_player_id !== null) return false;
       this.db.prepare('DELETE FROM character_sheets WHERE id = ? AND assigned_player_id IS NULL').run(id);
       return true;
     })();
   }
+  private fixedSystemOrThrow(): { id: string; version: string } {
+    const active = this.fixedSystem;
+    if (!active) throw new Error('Игровая система комнаты не закреплена.');
+    return active;
+  }
+  private assertSheetInFixedSystem(id: string): void {
+    const active = this.fixedSystemOrThrow();
+    const row = this.db.prepare('SELECT system_id, system_version FROM character_sheets WHERE id = ?').get(id) as
+      { system_id: string; system_version: string } | undefined;
+    if (!row) throw new Error('Лист персонажа не найден.');
+    if (row.system_id !== active.id || row.system_version !== active.version) {
+      throw new Error('Лист относится к другой игровой системе.');
+    }
+  }
   private hydrateSheet(row: SheetRow): CharacterSheet {
-    let characteristics: Record<SheetCharacteristicKey, number> = { might: 0, insight: 0, glory: 0, will: 0 };
-    try {
-      const parsed = JSON.parse(row.characteristics_json) as Partial<Record<SheetCharacteristicKey, unknown>>;
-      if (parsed && typeof parsed === 'object') {
-        for (const key of ['might', 'insight', 'glory', 'will'] as const) {
-          const value = parsed[key];
-          if (typeof value === 'number' && Number.isSafeInteger(value)) characteristics[key] = value;
+    let characteristics: Record<SheetCharacteristicKey, number>;
+    if (row.system_id === pbtaSystemModule.id) {
+      characteristics = { might: 0, insight: 0, glory: 0, will: 0 };
+      try {
+        const parsed = JSON.parse(row.characteristics_json) as Partial<Record<SheetCharacteristicKey, unknown>>;
+        if (parsed && typeof parsed === 'object') {
+          for (const key of ['might', 'insight', 'glory', 'will'] as const) {
+            const value = parsed[key];
+            if (typeof value === 'number' && Number.isSafeInteger(value)) characteristics[key] = value;
+          }
         }
-      }
-    } catch { /* Invalid legacy values fall back to zero. */ }
+      } catch { /* Invalid legacy values fall back to zero. */ }
+    } else {
+      // Other systems own their sheet shape; never inject PbtA characteristics.
+      let parsed: Record<string, unknown> = {};
+      try {
+        const value = JSON.parse(row.characteristics_json) as unknown;
+        if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+      } catch { /* Invalid legacy values fall back to an empty object. */ }
+      characteristics = Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === 'number' && Number.isSafeInteger(value))) as Record<SheetCharacteristicKey, number>;
+    }
     const counters = (this.db.prepare('SELECT * FROM character_counters WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as CounterRow[]).map(toCounter);
     const abilities = (this.db.prepare('SELECT * FROM character_abilities WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as AbilityRow[]).map(toAbility);
     return {
@@ -935,12 +1144,17 @@ export class RoomStore {
     };
   }
   createSheet(sheet: SheetInput): void {
+    const active = this.fixedSystemOrThrow();
+    if (sheet.systemId !== active.id || sheet.systemVersion !== active.version) {
+      throw new Error('Лист относится к другой игровой системе.');
+    }
     this.db.prepare(`INSERT INTO character_sheets
       (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate, font_family)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate, sheet.fontFamily ?? DEFAULT_BOARD_FONT);
   }
   updateSheet(id: string, patch: SheetPatch): void {
+    this.assertSheetInFixedSystem(id);
     const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate', fontFamily: 'font_family' };
     const entries = Object.entries(patch) as Array<[keyof SheetPatch, SheetPatch[keyof SheetPatch]]>;
     if (!entries.length) return;
@@ -948,6 +1162,7 @@ export class RoomStore {
       .run({ id, ...Object.fromEntries(entries.map(([key, value]) => [key, key === 'characteristics' ? JSON.stringify(value) : value])) });
   }
   createCounter(sheetId: string, counter: Omit<CharacterSheetCounter, 'orderIndex'>): CharacterSheetCounter {
+    this.assertSheetInFixedSystem(sheetId);
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM character_counters WHERE sheet_id = ?').get(sheetId) as { next: number }).next;
     this.db.prepare('INSERT INTO character_counters (id, sheet_id, name, value, order_index) VALUES (?, ?, ?, ?, ?)')
       .run(counter.id, sheetId, counter.name, counter.value, orderIndex);
@@ -955,6 +1170,7 @@ export class RoomStore {
     return { ...counter, orderIndex };
   }
   updateCounter(sheetId: string, id: string, patch: CounterPatch): void {
+    this.assertSheetInFixedSystem(sheetId);
     const columns: Record<keyof CounterPatch, string> = { name: 'name', value: 'value' };
     const entries = Object.entries(patch) as Array<[keyof CounterPatch, CounterPatch[keyof CounterPatch]]>;
     if (!entries.length) return;
@@ -963,15 +1179,18 @@ export class RoomStore {
     this.touchSheet(sheetId);
   }
   deleteCounter(sheetId: string, id: string): void {
+    this.assertSheetInFixedSystem(sheetId);
     this.db.prepare('DELETE FROM character_counters WHERE id = ? AND sheet_id = ?').run(id, sheetId);
     this.touchSheet(sheetId);
   }
   reorderCounters(sheetId: string, ids: string[]): void {
+    this.assertSheetInFixedSystem(sheetId);
     const update = this.db.prepare('UPDATE character_counters SET order_index = ? WHERE id = ? AND sheet_id = ?');
     this.db.transaction(() => ids.forEach((id, index) => update.run(index, id, sheetId)))();
     this.touchSheet(sheetId);
   }
   createAbility(sheetId: string, ability: AbilityInput): CharacterSheetAbility {
+    this.assertSheetInFixedSystem(sheetId);
     const orderIndex = (this.db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM character_abilities WHERE sheet_id = ?').get(sheetId) as { next: number }).next;
     this.db.prepare(`INSERT INTO character_abilities
       (id, sheet_id, name, description, asset_id, counter_enabled, counter_name, counter_value, checkbox_enabled, checkbox_label, checked, font_family, order_index)
@@ -981,6 +1200,7 @@ export class RoomStore {
     return { ...ability, fontFamily: ability.fontFamily ?? DEFAULT_BOARD_FONT, orderIndex };
   }
   updateAbility(sheetId: string, id: string, patch: AbilityPatch): void {
+    this.assertSheetInFixedSystem(sheetId);
     const columns: Record<keyof AbilityPatch, string> = {
       name: 'name', description: 'description', assetId: 'asset_id', counterEnabled: 'counter_enabled', counterName: 'counter_name',
       counterValue: 'counter_value', checkboxEnabled: 'checkbox_enabled', checkboxLabel: 'checkbox_label', checked: 'checked',
@@ -997,10 +1217,12 @@ export class RoomStore {
     this.touchSheet(sheetId);
   }
   deleteAbility(sheetId: string, id: string): void {
+    this.assertSheetInFixedSystem(sheetId);
     this.db.prepare('DELETE FROM character_abilities WHERE id = ? AND sheet_id = ?').run(id, sheetId);
     this.touchSheet(sheetId);
   }
   reorderAbilities(sheetId: string, ids: string[]): void {
+    this.assertSheetInFixedSystem(sheetId);
     const update = this.db.prepare('UPDATE character_abilities SET order_index = ? WHERE id = ? AND sheet_id = ?');
     this.db.transaction(() => ids.forEach((id, index) => update.run(index, id, sheetId)))();
     this.touchSheet(sheetId);
@@ -1015,24 +1237,56 @@ export class RoomStore {
     return Boolean(this.db.prepare('SELECT 1 FROM asset_uploaders WHERE asset_id = ? AND participant_id = ?').get(assetId, participantId));
   }
   isAssetUsedBySheet(assetId: string, identity: Identity): boolean {
+    const active = this.fixedSystem;
+    if (!active) return false;
     const assignedFilter = identity.role === 'gm' ? '' : 'AND sheet.assigned_player_id IS NOT NULL';
-    return Boolean(this.db.prepare(`SELECT 1 FROM character_sheets AS sheet WHERE sheet.portrait_asset_id = ? ${assignedFilter}
+    return Boolean(this.db.prepare(`SELECT 1 FROM character_sheets AS sheet
+      WHERE sheet.portrait_asset_id = @assetId AND sheet.system_id = @systemId AND sheet.system_version = @systemVersion ${assignedFilter}
       UNION SELECT 1 FROM character_abilities AS ability JOIN character_sheets AS sheet ON sheet.id = ability.sheet_id
-      WHERE ability.asset_id = ? ${assignedFilter} LIMIT 1`).get(assetId, assetId));
+      WHERE ability.asset_id = @assetId AND sheet.system_id = @systemId AND sheet.system_version = @systemVersion ${assignedFilter} LIMIT 1`)
+      .get({ assetId, systemId: active.id, systemVersion: active.version }));
+  }
+
+  private sceneSnapshot(scene: BoardScene, identity: Identity): BoardSceneSnapshot {
+    const allLayers = this.getLayers(scene);
+    if (identity.role === 'gm') {
+      return {
+        background: this.backgroundFor(scene),
+        layers: allLayers,
+        objects: this.getObjects(scene),
+        stickers: this.getStickers(scene),
+        noteMarkers: this.getNoteMarkers(scene),
+      };
+    }
+    const layers = allLayers.filter((layer) => layer.audience === 'all-players' && layer.visible);
+    const visibleIds = new Set(layers.map((layer) => layer.id));
+    return {
+      background: this.backgroundFor(scene),
+      layers,
+      objects: this.getObjects(scene).filter((object) => visibleIds.has(object.layerId)),
+      stickers: this.getStickers(scene).filter((sticker) => visibleIds.has(sticker.layerId)),
+      noteMarkers: this.getNoteMarkers(scene).filter((marker) => visibleIds.has(marker.layerId) && this.canReadNote(marker.noteId, identity)),
+    };
   }
 
   snapshot(identityOrRole: Identity | Role, participantId = ''): BoardSnapshot {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
-    const allLayers = this.getLayers();
-    const common = { background: this.boardBackground, activeSystem: this.activeSystem, diceRolls: this.getDiceRolls(), sheets: this.getSheetsFor(identity), personalNotes: this.listPersonalNotes(identity) };
-    if (role === 'gm') return { ...common, layers: allLayers, objects: this.getObjects(), stickers: this.getStickers(), noteMarkers: this.getNoteMarkers(), assets: this.getAssets() };
-    const layers = this.getLayers().filter((layer) => layer.audience === 'all-players' && layer.visible);
-    const visibleIds = new Set(layers.map((layer) => layer.id));
-    const stickers = this.getStickers().filter((sticker) => visibleIds.has(sticker.layerId));
-    const noteMarkers = this.getNoteMarkers().filter((marker) => visibleIds.has(marker.layerId) && this.canReadNote(marker.noteId, identity));
-    const availableAssets = this.getAssets().filter((asset) => this.canReadAsset(asset.id, identity));
-    return { ...common, layers, objects: this.getObjects().filter((object) => visibleIds.has(object.layerId)), stickers, noteMarkers, availableAssets };
+    const activeScene = this.activeScene;
+    const scene = this.sceneSnapshot(activeScene, identity);
+    const common = {
+      activeScene,
+      ...scene,
+      system: this.roomSystem,
+      diceRolls: this.getDiceRolls(),
+      sheets: this.getSheetsFor(identity),
+      personalNotes: this.listPersonalNotes(identity),
+    };
+    if (role === 'gm') {
+      return { ...common, battle: this.sceneSnapshot('battle', identity), assets: this.getAssets() };
+    }
+    const availableAssets = this.getAssets().filter((asset) => this.canReadAsset(asset.id, identity, activeScene));
+    return { ...common, availableAssets };
   }
 
   backup(path: string): Promise<Database.BackupMetadata> { return this.db.backup(path); }

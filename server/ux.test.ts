@@ -8,7 +8,7 @@ import Database from 'better-sqlite3';
 import type { DiceRollEntry } from '../src/shared/board.js';
 import { abilityEventSummary } from '../src/shared/ability-history.js';
 import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
-import { overflowGroupCount, placePopover } from '../src/shared/menu.js';
+import { menuIsWithin, overflowGroupCount, placePopover } from '../src/shared/menu.js';
 import { executeBoardCommand } from './board.js';
 import { executeSheetCommand } from './sheets.js';
 import { RoomStore, type Identity } from './store.js';
@@ -20,7 +20,7 @@ const stranger: Identity = { participantId: 'player-stranger', name: 'Bea', role
 function temporaryStore(): { store: RoomStore; dataDir: string; cleanup: () => void } {
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-ux-'));
   const store = new RoomStore(dataDir, 'Campaign');
-  store.setActiveSystem('pbta-2d6', '1.0.0');
+  store.initializeSystem('pbta-2d6', '1.0.0');
   return { store, dataDir, cleanup: () => { store.close(); rmSync(dataDir, { recursive: true, force: true }); } };
 }
 
@@ -47,7 +47,8 @@ function createAssignedSheet(store: RoomStore): { sheetId: string; abilityId: st
 function diceEntry(patch: Partial<DiceRollEntry> & Pick<DiceRollEntry, 'id' | 'createdAt'>): DiceRollEntry {
   return {
     authorId: gm.participantId, authorName: gm.name, actorId: gm.participantId, actorName: gm.name,
-    kind: 'free', dice: [1, 2], keptDice: [1, 2], discardedDie: null, characteristicName: null,
+    kind: 'free', systemId: null, systemVersion: null,
+    dice: [1, 2], keptDice: [1, 2], discardedDie: null, characteristicName: null,
     characterId: null, characterOwnerId: null, characteristicBonus: null, situationalModifier: 0,
     disadvantage: false, sides: 6, total: 3, category: null, critical: null, rerollOf: null,
     abilityId: null, abilitySheetId: null, abilityCharacterName: null, abilityName: null,
@@ -217,6 +218,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       try {
         assert.doesNotThrow(() => fresh.saveDiceRoll(diceEntry({
           id: 'ability-row', createdAt: '2026-04-01T00:00:00.000Z', kind: 'ability-use',
+          systemId: 'pbta-2d6', systemVersion: '1.0.0',
           abilityId: 'a', abilitySheetId: 's', abilityCharacterName: 'Ari', abilityName: 'Skill',
           abilitySummary: 'Short', abilityDescription: 'Long', abilityFontFamily: 'caveat',
         })));
@@ -305,7 +307,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
   } finally { cleanup(); }
 });
 
-test('shared helpers and UI scenarios 23-28', async (t) => {
+test('shared helpers and UI scenarios 23-29', async (t) => {
   const indexSource = readFileSync('src/pages/index.astro', 'utf8');
   const clientSource = readFileSync('src/client/app.ts', 'utf8');
   const styleSource = readFileSync('src/styles/global.css', 'utf8');
@@ -374,5 +376,24 @@ test('shared helpers and UI scenarios 23-28', async (t) => {
     assert.match(clientSource, /placePopover\(/);
     assert.match(clientSource, /sheet:ability:apply/);
     assert.match(clientSource, /document\.fonts\.load\('16px Caveat'\)/);
+  });
+
+  await t.test('29. Вложенное меню не закрывает своего предка', () => {
+    // Minimal stand-in for Element.contains with an explicit parent/child tree.
+    function fakeMenu(children: unknown[] = []): { contains(node: unknown): boolean } {
+      const node = { contains: (target: unknown) => target === node || children.includes(target) };
+      return node;
+    }
+    const child = fakeMenu();
+    const parent = fakeMenu([child]);
+    const sibling = fakeMenu();
+    assert.equal(menuIsWithin(parent, child), true, 'родительское меню должно остаться открытым');
+    assert.equal(menuIsWithin(child, child), true, 'открываемое меню не должно закрываться');
+    assert.equal(menuIsWithin(sibling, child), false, 'соседнее меню должно закрыться');
+    assert.equal(menuIsWithin(undefined, child), false);
+    // The DOM helper must be wired into the menu controller, not just exported.
+    assert.match(clientSource, /function closeMenus\(keep\?: HTMLElement\)/);
+    assert.match(clientSource, /menuIsWithin\(menu, keep\)/);
+    assert.match(clientSource, /closeMenus\(menu\);/);
   });
 });

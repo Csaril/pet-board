@@ -128,7 +128,7 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
     const ownerSocket = await connect(owner.cookie);
     const viewerSocket = await connect(viewer.cookie);
 
-    const system = await command(gmSocket.socket, { type: 'room:system:set', systemId: 'pbta-2d6', version: '1.0.0' }, 'system', viewerSocket.socket);
+    const system = await command(gmSocket.socket, { type: 'room:system:initialize', systemId: 'pbta-2d6', version: '1.0.0' }, 'system', viewerSocket.socket);
     assert.equal(system.ack.ok, true);
 
     await t.test('1. Лист по умолчанию открывается в режиме просмотра', () => {
@@ -509,6 +509,8 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
             assert.equal(new Set(sheets.map((sheet) => sheet.id)).size, 2);
             const schema = migrated.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'character_sheets'").get() as { sql: string };
             assert.doesNotMatch(schema.sql, /UNIQUE\s*\(\s*owner_id/i);
+            assert.equal(migrated.roomSystem.fixed, false);
+            migrated.initializeSystem('pbta-2d6', '1.0.0');
             assert.doesNotThrow(() => migrated.createSheet({
               id: 'legacy-sheet-3', creatorId: 'legacy-owner-1', creatorName: 'Old Ari',
               assignedPlayerId: 'legacy-owner-1', assignedPlayerName: 'Old Ari',

@@ -1,11 +1,12 @@
 import Konva from 'konva';
-import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, PersonalNoteListItem, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, PersonalNoteListItem, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, isBoardFontFamily } from '../shared/fonts.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 import { isImagePickable, isLayerPickable } from '../shared/layer-selection.js';
-import { overflowGroupCount, placePopover } from '../shared/menu.js';
+import { menuIsWithin, overflowGroupCount, placePopover } from '../shared/menu.js';
 import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
+import { findSystemModule } from '../modules/registry.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
 import { shouldHideGmOnlyElement } from '../shared/role-ui.js';
 
@@ -62,9 +63,17 @@ const layersPanel = select<HTMLElement>('#layers-panel');
 const layersExpandButton = select<HTMLButtonElement>('#layers-expand');
 const systemSelect = select<HTMLSelectElement>('#room-system');
 const systemSave = select<HTMLButtonElement>('#room-system-save');
+const systemReadonly = select<HTMLElement>('#room-system-readonly');
+const systemName = select<HTMLElement>('#room-system-name');
+const systemVersion = select<HTMLElement>('#room-system-version');
 const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
+const nechronicaControls = select<HTMLElement>('#nechronica-roll-controls');
 const pbtaActorRow = select<HTMLElement>('#pbta-actor-row');
 const pbtaActor = select<HTMLSelectElement>('#pbta-actor');
+const battlePreviewToggle = select<HTMLButtonElement>('#battle-preview-toggle');
+const battleActivate = select<HTMLButtonElement>('#battle-activate');
+const battleDeactivate = select<HTMLButtonElement>('#battle-deactivate');
+const battlePreviewBanner = select<HTMLElement>('#battle-preview-banner');
 const sheetsPanel = select<HTMLElement>('#sheets-panel');
 const sheetsList = select<HTMLUListElement>('#sheets-list');
 const sheetPanel = select<HTMLElement>('#sheet-panel');
@@ -168,6 +177,8 @@ let uiPreferencesParticipantId: string | undefined;
 let floatingPanelZ = 10;
 let pendingNoteUploads = 0;
 let cropMode = false;
+let viewingBattle = false;
+let lastBoardScene: BoardScene | undefined;
 let camera = { x: 0, y: 0, scale: 1 };
 let hasRestoredCamera = false;
 let panGesture: { x: number; y: number; cameraX: number; cameraY: number } | undefined;
@@ -212,6 +223,25 @@ function applyBoardBackground(background: BoardBackground | undefined): void {
   const selected: BoardBackground = background === 'black' ? 'black' : 'gray';
   canvasWrap.dataset.boardBackground = selected;
   if (boardBackgroundSelect.value !== selected) boardBackgroundSelect.value = selected;
+}
+
+/** Scene currently rendered locally. The GM may preview the battle scene without changing the room. */
+function currentScene(): BoardScene {
+  if (!roomState) return 'board';
+  if (viewingBattle && identity?.role === 'gm' && roomState.battle) return 'battle';
+  return roomState.activeScene;
+}
+
+function sceneView(): BoardSceneSnapshot | undefined {
+  if (!roomState) return undefined;
+  if (currentScene() === 'battle' && roomState.battle) return roomState.battle;
+  return {
+    background: roomState.background,
+    layers: roomState.layers,
+    objects: roomState.objects,
+    stickers: roomState.stickers,
+    noteMarkers: roomState.noteMarkers,
+  };
 }
 
 function applyBoardFont(element: HTMLElement, font: BoardFontFamily | null | undefined): void {
@@ -270,15 +300,19 @@ function positionMenu(trigger: HTMLButtonElement, menu: HTMLElement): void {
   menu.dataset.side = placement.side;
 }
 
-function closeMenus(): void {
+function closeMenus(keep?: HTMLElement): void {
   for (const trigger of document.querySelectorAll<HTMLButtonElement>('[data-menu-trigger]')) {
-    trigger.setAttribute('aria-expanded', 'false');
     const menuId = trigger.getAttribute('aria-controls');
     if (!menuId) continue;
     const menu = document.getElementById(menuId);
-    if (menu) menu.hidden = true;
+    if (!menu) continue;
+    // Keep the new menu and its ancestor chain open: a nested dropdown is
+    // moved into "Ещё" on narrow screens and must not hide its own parent.
+    if (keep && menuIsWithin(menu, keep)) continue;
+    trigger.setAttribute('aria-expanded', 'false');
+    menu.hidden = true;
   }
-  openMenuTrigger = undefined;
+  if (!keep) openMenuTrigger = undefined;
 }
 
 function toggleMenu(trigger: HTMLButtonElement): void {
@@ -286,7 +320,7 @@ function toggleMenu(trigger: HTMLButtonElement): void {
   const menu = menuId ? document.getElementById(menuId) : undefined;
   if (!menu) return;
   if (openMenuTrigger === trigger && !menu.hidden) { closeMenus(); return; }
-  closeMenus();
+  closeMenus(menu);
   menu.hidden = false;
   trigger.setAttribute('aria-expanded', 'true');
   openMenuTrigger = trigger;
@@ -428,8 +462,22 @@ function sendCommand(type: string, data: Record<string, unknown> = {}): Promise<
       reject(new Error('Сервер не ответил на команду.'));
     }, 8000);
     pendingCommands.set(requestId, { resolve, reject, timeout });
-    socket!.send(JSON.stringify({ type, requestId, ...data }));
+    socket!.send(JSON.stringify({ type, requestId, ...withCommandScene(type, data) }));
   });
+}
+
+/**
+ * Board commands default to the room's active scene on the server. While the GM
+ * previews the battle scene locally, the target scene must be sent explicitly.
+ */
+function withCommandScene(type: string, data: Record<string, unknown>): Record<string, unknown> {
+  if (!roomState) return data;
+  const sceneAware = type.startsWith('layer:') || type.startsWith('object:') || type.startsWith('note-marker:')
+    || type.startsWith('sticker:') || type === 'room:background:set';
+  if (!sceneAware) return data;
+  const scene = currentScene();
+  if (scene === roomState.activeScene) return data;
+  return { ...data, scene };
 }
 
 async function runCommand(type: string, data: Record<string, unknown> = {}) {
@@ -447,22 +495,45 @@ async function refreshBoard() {
   } catch { /* Reconnect status covers temporary network failure. */ }
 }
 
-function cameraStorageKey() { return `tabletop-camera:${location.host}`; }
-function saveCamera() {
-  if (!stage) return;
+function cameraStorageKey(scene: BoardScene = currentScene()) { return `tabletop-camera:${location.host}:${scene}`; }
+function saveCamera(scene: BoardScene = currentScene()) {
+  if (!stage || !roomState) return;
   camera = { x: stage.x(), y: stage.y(), scale: stage.scaleX() };
-  try { localStorage.setItem(cameraStorageKey(), JSON.stringify({ version: 2, camera })); } catch { /* Storage can be disabled or full. */ }
+  try { localStorage.setItem(cameraStorageKey(scene), JSON.stringify({ version: 2, camera })); } catch { /* Storage can be disabled or full. */ }
 }
-function restoreCamera() {
+function restoreCamera(scene: BoardScene = currentScene()) {
   camera = { x: 0, y: 0, scale: 1 };
   hasRestoredCamera = false;
   try {
-    const stored = JSON.parse(localStorage.getItem(cameraStorageKey()) || 'null') as { version?: number; camera?: unknown } | null;
+    // The main board keeps reading the legacy key from before scenes existed.
+    const legacy = scene === 'board' ? localStorage.getItem(`tabletop-camera:${location.host}`) : null;
+    const stored = JSON.parse(localStorage.getItem(cameraStorageKey(scene)) || legacy || 'null') as { version?: number; camera?: unknown } | null;
     if (stored?.version === 2 && isValidCamera(stored.camera, MAX_WORLD_COORDINATE * MAX_ZOOM, MIN_ZOOM, MAX_ZOOM)) {
       camera = stored.camera;
       hasRestoredCamera = true;
     }
   } catch { /* Use a centered initial camera when storage is invalid or unavailable. */ }
+}
+
+/** Restore the saved camera of a scene and keep pan/zoom local to this participant. */
+function applySceneCamera(scene: BoardScene): void {
+  if (!stage) return;
+  restoreCamera(scene);
+  if (!hasRestoredCamera) camera = { x: stage.width() / 2, y: stage.height() / 2, scale: 1 };
+  stage.position({ x: camera.x, y: camera.y });
+  stage.scale({ x: camera.scale, y: camera.scale });
+  boardLayer?.batchDraw();
+  interactionLayer?.batchDraw();
+}
+
+/** Save the previous scene camera and switch to the camera of the scene being rendered. */
+function applySceneView(): void {
+  if (!stage || !roomState) return;
+  const scene = currentScene();
+  if (scene === lastBoardScene) return;
+  if (lastBoardScene) saveCamera(lastBoardScene);
+  lastBoardScene = scene;
+  applySceneCamera(scene);
 }
 
 function setupStage() {
@@ -489,7 +560,7 @@ function setupStage() {
     rotateEnabled: false, flipEnabled: false, keepRatio: false, enabledAnchors: ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right'],
     ignoreStroke: true, borderStroke: '#426c59', anchorStroke: '#426c59', anchorFill: '#fff', anchorSize: 8, padding: 1,
     boundBoxFunc: (_oldBox, newBox) => {
-      const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+      const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
       const rendered = selectedObjectId ? renderedObjects.get(selectedObjectId) : undefined;
       if (!cropMode || !item || !rendered) return newBox;
       const inverse = rendered.group.getAbsoluteTransform().copy().invert();
@@ -514,7 +585,7 @@ function setupStage() {
     padding: 2,
     enabledAnchors: ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right'],
     boundBoxFunc: (oldBox, newBox) => {
-      const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+      const marker = sceneView()?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
       if (!markerResizeMode || !marker) return oldBox;
       const scale = stage?.scaleX() || 1;
       const minimumWidth = (marker.type === 'image' ? 24 : 64) * scale;
@@ -549,13 +620,13 @@ function setupStage() {
     if (event.target !== stage) return;
     if (notePlacementId) {
       const pointer = stage!.getPointerPosition();
-      const layer = activeLayerId && roomState?.layers.find((entry) => entry.id === activeLayerId);
+      const layer = activeLayerId && sceneView()?.layers.find((entry) => entry.id === activeLayerId);
       if (!pointer || !layer || layer.locked || identity?.role !== 'gm') { showCanvasMessage('Выберите открытый слой для метки.', true); return; }
       const world = screenToWorld(pointer, { x: stage!.x(), y: stage!.y(), scale: stage!.scaleX() });
       const noteId = notePlacementId;
       notePlacementId = undefined;
       notePlacementHint.hidden = true;
-      const existingMarker = roomState?.noteMarkers.find((marker) => marker.noteId === noteId);
+      const existingMarker = sceneView()?.noteMarkers.find((marker) => marker.noteId === noteId);
       if (existingMarker) void runCommand('note-marker:update', { id: existingMarker.id, changes: { layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) } }).then(refreshNotesListIfVisible);
       else void runCommand('note-marker:create', { noteId, layerId: layer.id, x: Math.round(world.x), y: Math.round(world.y) }).then(refreshNotesListIfVisible);
       canvasContainer.style.cursor = '';
@@ -606,15 +677,16 @@ window.addEventListener('keydown', (event) => {
 });
 
 function fitAllObjects() {
-  if (!stage || !roomState) return;
-  const visibleIds = new Set(roomState.layers.filter((layer) => layer.visible).map((layer) => layer.id));
-  const objects = roomState.objects.filter((item) => visibleIds.has(item.layerId));
+  const view = sceneView();
+  if (!stage || !roomState || !view) return;
+  const visibleIds = new Set(view.layers.filter((layer) => layer.visible).map((layer) => layer.id));
+  const objects = view.objects.filter((item) => visibleIds.has(item.layerId));
   const boundsRects: Rect[] = objects.map((item) => {
     const rect = cropToDisplayRect(item.crop, item.width, item.height, item.flipX, item.flipY);
     return { x: item.x + rect.x, y: item.y + rect.y, width: rect.width, height: rect.height };
   });
-  for (const sticker of roomState.stickers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height });
-  for (const marker of roomState.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: marker.width, height: marker.height });
+  for (const sticker of view.stickers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: sticker.x, y: sticker.y, width: sticker.width, height: sticker.height });
+  for (const marker of view.noteMarkers.filter((item) => visibleIds.has(item.layerId))) boundsRects.push({ x: marker.x, y: marker.y, width: marker.width, height: marker.height });
   const bounds = boundsRects.length ? {
     minX: Math.min(...boundsRects.map((rect) => rect.x)), minY: Math.min(...boundsRects.map((rect) => rect.y)),
     maxX: Math.max(...boundsRects.map((rect) => rect.x + rect.width)), maxY: Math.max(...boundsRects.map((rect) => rect.y + rect.height)),
@@ -670,7 +742,8 @@ function updateCropShades(rendered: RenderedObject, width: number, height: numbe
 }
 
 function drawObjects() {
-  if (!boardLayer || !roomState) return;
+  const view = sceneView();
+  if (!boardLayer || !roomState || !view) return;
   if (!boardFontsLoaded) void loadBoardFonts();
   boardLayer.destroyChildren();
   transformer?.nodes([]);
@@ -678,9 +751,9 @@ function drawObjects() {
   markerTransformer?.nodes([]);
   renderedObjects.clear();
   renderedStickers.clear(); renderedMarkers.clear();
-  const visibleLayers = roomState.layers.filter((layer) => layer.visible).sort((a, b) => a.orderIndex - b.orderIndex);
+  const visibleLayers = view.layers.filter((layer) => layer.visible).sort((a, b) => a.orderIndex - b.orderIndex);
   for (const layer of visibleLayers) {
-    const objects = roomState.objects.filter((object) => object.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex);
+    const objects = view.objects.filter((object) => object.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex);
     for (const item of objects) {
       const editingCrop = cropMode && selectedObjectId === item.id;
       const pickable = isImagePickable(identity?.role, layer.id, activeLayerId, item.allowPlayerMove);
@@ -746,7 +819,7 @@ function drawObjects() {
       boardLayer.add(group);
       renderedObjects.set(item.id, rendered);
     }
-    for (const sticker of (roomState.stickers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
+    for (const sticker of (view.stickers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
       const colors: Record<BoardSticker['bgColor'], string> = { butter: '#fff1b8', rose: '#ffd6df', sky: '#d7efff', sage: '#d9efdc' };
       const textColors: Record<BoardSticker['textColor'], string> = { black: '#000000', white: '#FFFFFF' };
       const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
@@ -759,7 +832,7 @@ function drawObjects() {
       group.on('transformend', () => { const changes = { x: clampWorld(group.x()), y: clampWorld(group.y()), width: Math.max(100, Math.round(group.width() * group.scaleX())), height: Math.max(64, Math.round(group.height() * group.scaleY())) }; group.scale({ x: 1, y: 1 }); void runCommand('sticker:update', { id: sticker.id, changes }); });
       boardLayer.add(group); renderedStickers.set(sticker.id, { group, background, text });
     }
-    for (const marker of (roomState.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
+    for (const marker of (view.noteMarkers || []).filter((entry) => entry.layerId === layer.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
       const markerWidth = marker.width;
       const markerHeight = marker.height;
       const pickable = isLayerPickable(identity?.role, layer.id, activeLayerId);
@@ -813,8 +886,8 @@ function clampWorld(value: number) { return Math.max(-MAX_WORLD_COORDINATE, Math
 
 /** Drop a selection that the current role may no longer pick. */
 function clearSelectionOutsideActiveLayer(): void {
-  const object = roomState?.objects.find((entry) => entry.id === selectedObjectId);
-  const objectLayer = object && roomState?.layers.find((entry) => entry.id === object.layerId);
+  const object = sceneView()?.objects.find((entry) => entry.id === selectedObjectId);
+  const objectLayer = object && sceneView()?.layers.find((entry) => entry.id === object.layerId);
   if (object && objectLayer && !isImagePickable(identity?.role, objectLayer.id, activeLayerId, object.allowPlayerMove)) selectedObjectId = undefined;
   if (identity?.role !== 'gm') {
     if (!selectedObjectId && !selectedStickerId && !selectedMarkerId) {
@@ -824,9 +897,9 @@ function clearSelectionOutsideActiveLayer(): void {
     }
     return;
   }
-  const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
+  const sticker = sceneView()?.stickers?.find((entry) => entry.id === selectedStickerId);
   if (sticker && !isLayerPickable(identity.role, sticker.layerId, activeLayerId)) selectedStickerId = undefined;
-  const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
+  const marker = sceneView()?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
   if (marker && !isLayerPickable(identity.role, marker.layerId, activeLayerId)) selectedMarkerId = undefined;
   if (!selectedObjectId && !selectedStickerId && !selectedMarkerId) {
     cropMode = false;
@@ -837,8 +910,8 @@ function clearSelectionOutsideActiveLayer(): void {
 
 function setSelectedObject(id: string | undefined) {
   if (id) {
-    const item = roomState?.objects.find((object) => object.id === id);
-    const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+    const item = sceneView()?.objects.find((object) => object.id === id);
+    const layer = item && sceneView()?.layers.find((entry) => entry.id === item.layerId);
     if (!item || !layer || !isImagePickable(identity?.role, layer.id, activeLayerId, item.allowPlayerMove)) id = undefined;
   }
   const changed = id !== selectedObjectId;
@@ -851,16 +924,16 @@ function setSelectedObject(id: string | undefined) {
 
 function setSelectedSticker(id: string | undefined) {
   if (id) {
-    const sticker = roomState?.stickers?.find((entry) => entry.id === id);
-    const layer = sticker && roomState?.layers.find((entry) => entry.id === sticker.layerId);
+    const sticker = sceneView()?.stickers?.find((entry) => entry.id === id);
+    const layer = sticker && sceneView()?.layers.find((entry) => entry.id === sticker.layerId);
     if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
   }
   selectedObjectId = undefined; selectedMarkerId = undefined; selectedStickerId = id; cropMode = false; markerResizeMode = false; markerResizeOriginal = undefined; updateSelectionControls(); drawObjects();
 }
 function setSelectedMarker(id: string | undefined) {
   if (id) {
-    const marker = roomState?.noteMarkers?.find((entry) => entry.id === id);
-    const layer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+    const marker = sceneView()?.noteMarkers?.find((entry) => entry.id === id);
+    const layer = marker && sceneView()?.layers.find((entry) => entry.id === marker.layerId);
     if (!layer || !isLayerPickable(identity?.role, layer.id, activeLayerId)) id = undefined;
   }
   const changed = id !== selectedMarkerId;
@@ -870,8 +943,8 @@ function setSelectedMarker(id: string | undefined) {
 }
 
 function setMarkerResizeMode(active: boolean): void {
-  const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
-  const layer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+  const marker = sceneView()?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+  const layer = marker && sceneView()?.layers.find((entry) => entry.id === marker.layerId);
   if (active && (!marker || !layer || layer.locked || identity?.role !== 'gm')) return;
   markerResizeMode = active;
   markerResizeOriginal = active && marker ? { id: marker.id, width: marker.width, height: marker.height } : undefined;
@@ -880,7 +953,7 @@ function setMarkerResizeMode(active: boolean): void {
 }
 
 function cancelMarkerResize(): void {
-  const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
+  const marker = sceneView()?.noteMarkers.find((entry) => entry.id === selectedMarkerId);
   if (marker && markerResizeOriginal?.id === marker.id) {
     marker.width = markerResizeOriginal.width;
     marker.height = markerResizeOriginal.height;
@@ -891,11 +964,11 @@ function cancelMarkerResize(): void {
 }
 
 function updateSelectionControls() {
-  const sticker = roomState?.stickers?.find((entry) => entry.id === selectedStickerId);
-  const stickerLayer = sticker && roomState?.layers.find((entry) => entry.id === sticker.layerId);
+  const sticker = sceneView()?.stickers?.find((entry) => entry.id === selectedStickerId);
+  const stickerLayer = sticker && sceneView()?.layers.find((entry) => entry.id === sticker.layerId);
   const stickerRendered = sticker && renderedStickers.get(sticker.id);
-  const marker = roomState?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
-  const markerLayer = marker && roomState?.layers.find((entry) => entry.id === marker.layerId);
+  const marker = sceneView()?.noteMarkers?.find((entry) => entry.id === selectedMarkerId);
+  const markerLayer = marker && sceneView()?.layers.find((entry) => entry.id === marker.layerId);
   const markerRendered = marker && renderedMarkers.get(marker.id);
   const canEditSticker = !!sticker && !!stickerLayer && !stickerLayer.locked && isLayerPickable(identity?.role, stickerLayer.id, activeLayerId) && (identity?.role === 'gm' || sticker.creatorId === identity?.participantId);
   objectTools.hidden = true;
@@ -928,8 +1001,8 @@ function updateSelectionControls() {
     return;
   }
   markerTransformer?.nodes([]);
-  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
-  const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && sceneView()?.layers.find((entry) => entry.id === item.layerId);
   const rendered = item && renderedObjects.get(item.id);
   objectTools.hidden = !item || !layer || !rendered || identity?.role !== 'gm' || !isLayerPickable(identity?.role, layer.id, activeLayerId);
   if (!item || !layer || !rendered) {
@@ -953,7 +1026,7 @@ function updateSelectionControls() {
       }
     }
   }
-  selectedLayer.replaceChildren(...(roomState?.layers || []).map((entry) => {
+  selectedLayer.replaceChildren(...(sceneView()?.layers || []).map((entry) => {
     const option = document.createElement('option'); option.value = entry.id; option.textContent = entry.name; option.disabled = entry.locked && entry.id !== item.layerId; return option;
   }));
   selectedLayer.value = item.layerId;
@@ -989,8 +1062,8 @@ function updateSelectionControls() {
 
 function confirmCrop() {
   if (!roomState || !selectedObjectId || identity?.role !== 'gm') return;
-  const item = roomState.objects.find((object) => object.id === selectedObjectId);
-  const layer = item && roomState.layers.find((entry) => entry.id === item.layerId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && sceneView()?.layers.find((entry) => entry.id === item.layerId);
   const rendered = renderedObjects.get(selectedObjectId);
   if (!item || !layer || layer.locked || !rendered) return;
   const box = cropBox(rendered.border, item.width, item.height);
@@ -1292,7 +1365,11 @@ function updateBoard(state: RoomMessage) {
   }
   knownDiceRollIds = nextIds;
   roomState = state;
-  applyBoardBackground(state.background);
+  // If another GM session activated the battle map, the local preview is no longer needed.
+  if (state.activeScene === 'battle') viewingBattle = false;
+  const view = sceneView();
+  applyBoardBackground(view?.background);
+  applySceneView();
   if (pendingSheetRestoreId) {
     const restoreId = pendingSheetRestoreId;
     pendingSheetRestoreId = undefined;
@@ -1300,29 +1377,30 @@ function updateBoard(state: RoomMessage) {
     if (sheet) openSheet(sheet);
   }
   if (identity) {
-    const key = `tabletop-active-layer:${location.host}`;
-    if (!state.layers.some((layer) => layer.id === activeLayerId)) {
-      const preferred = localStorage.getItem(key);
-      activeLayerId = state.layers.some((layer) => layer.id === preferred) ? preferred! : state.layers.at(-1)?.id;
+    if (!view?.layers.some((layer) => layer.id === activeLayerId)) {
+      const preferred = localStorage.getItem(activeLayerStorageKey());
+      activeLayerId = view?.layers.some((layer) => layer.id === preferred) ? preferred! : view?.layers.at(-1)?.id;
     }
   }
-  if (!state.objects.some((item) => item.id === selectedObjectId)) selectedObjectId = undefined;
-  if (!state.stickers?.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
-  if (!state.noteMarkers?.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
+  if (!view?.objects.some((item) => item.id === selectedObjectId)) selectedObjectId = undefined;
+  if (!view?.stickers.some((item) => item.id === selectedStickerId)) selectedStickerId = undefined;
+  if (!view?.noteMarkers.some((item) => item.id === selectedMarkerId)) selectedMarkerId = undefined;
   // A layer change (local switch or a server update) must not leave the GM editing an off-layer item.
   clearSelectionOutsideActiveLayer();
   select<HTMLButtonElement>('#sticker-create').hidden = false;
   refreshCreateToggle();
   scheduleTopbarLayout();
+  updateBattleControls();
   renderLayers();
   renderAssets();
   renderDicePanel();
   renderSheetsCatalog();
   if (openSheetId) renderSheetPanel();
   if (openOwnSheetAfterCreate && identity) {
+    const active = state.system;
     const ownSheet = state.sheets
       .filter((sheet) => identity!.role === 'gm' ? !sheet.assignedPlayerId : sheet.assignedPlayerId === identity!.participantId)
-      .filter((sheet) => sheet.systemId === pbtaSystemModule.id)
+      .filter((sheet) => active.id && active.version && sheet.systemId === active.id && sheet.systemVersion === active.version)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     if (ownSheet) {
       openOwnSheetAfterCreate = false;
@@ -1338,15 +1416,58 @@ function updateDiceBadge() {
   diceNewCount.textContent = unseenDiceRolls > 9 ? '9+' : String(unseenDiceRolls);
 }
 
+function updateBattleControls(): void {
+  if (!identity || !roomState || identity.role !== 'gm') {
+    battlePreviewBanner.hidden = true;
+    return;
+  }
+  const active = roomState.activeScene;
+  battlePreviewToggle.hidden = active === 'battle';
+  battlePreviewToggle.textContent = viewingBattle ? 'Выйти из редактирования' : 'Редактировать боевую карту';
+  battlePreviewToggle.setAttribute('aria-pressed', String(viewingBattle));
+  battleActivate.hidden = active === 'battle';
+  battleDeactivate.hidden = active !== 'battle';
+  battlePreviewBanner.hidden = !(viewingBattle && active === 'board');
+  canvasWrap.dataset.battlePreview = String(viewingBattle && active === 'board');
+}
+
+/** Local GM preview: switches the canvas without changing the room's active scene. */
+function setViewingBattle(next: boolean): void {
+  if (identity?.role !== 'gm' || !roomState || next === viewingBattle) return;
+  viewingBattle = next;
+  const view = sceneView();
+  applyBoardBackground(view?.background);
+  applySceneView();
+  if (!view?.layers.some((layer) => layer.id === activeLayerId)) activeLayerId = view?.layers.at(-1)?.id;
+  selectedObjectId = undefined;
+  selectedStickerId = undefined;
+  selectedMarkerId = undefined;
+  cropMode = false;
+  markerResizeMode = false;
+  markerResizeOriginal = undefined;
+  updateBattleControls();
+  renderLayers();
+  drawObjects();
+}
+
 function renderDicePanel() {
   if (!roomState || !identity) return;
-  const active = roomState.activeSystem;
-  const nextSystem = active?.id ?? 'none';
-  if (document.activeElement !== systemSelect) systemSelect.value = nextSystem;
-  systemSelect.disabled = identity.role !== 'gm';
-  systemSave.hidden = identity.role !== 'gm' || systemSelect.value === nextSystem;
-  pbtaControls.hidden = nextSystem !== 'pbta-2d6';
-  if (nextSystem !== 'pbta-2d6' && !sheetRollPanel.hidden) closeSheetRollPanel();
+  const system = roomState.system;
+  const activeId = system.id ?? 'none';
+  systemSelect.hidden = system.fixed;
+  systemReadonly.hidden = !system.fixed;
+  if (system.fixed) {
+    systemName.textContent = system.name ?? 'Без системы';
+    systemVersion.textContent = system.version ? `версия ${system.version}` : 'Системные механики отключены';
+    systemSave.hidden = true;
+  } else {
+    if (document.activeElement !== systemSelect) systemSelect.value = 'none';
+    systemSave.hidden = identity.role !== 'gm';
+    systemSave.textContent = 'Закрепить систему';
+  }
+  pbtaControls.hidden = activeId !== 'pbta-2d6';
+  nechronicaControls.hidden = activeId !== 'nechronica';
+  if (activeId !== 'pbta-2d6' && !sheetRollPanel.hidden) closeSheetRollPanel();
   pbtaActorRow.hidden = identity.role !== 'gm';
   pbtaActor.hidden = identity.role !== 'gm';
   const actorValue = pbtaActor.value;
@@ -1361,6 +1482,23 @@ function renderDicePanel() {
   for (const roll of roomState.diceRolls) diceHistory.append(renderDiceEntry(roll));
 }
 
+function rollBelongsToFixedSystem(roll: DiceRollEntry): boolean {
+  const system = roomState?.system;
+  return Boolean(system?.fixed && system.id && system.version && roll.systemId === system.id && roll.systemVersion === system.version);
+}
+
+/** System events without complete, matching attribution are legacy history. */
+function isHistoricalRoll(roll: DiceRollEntry): boolean {
+  return roll.kind !== 'free' && !rollBelongsToFixedSystem(roll);
+}
+
+function appendHistoricalBadge(container: HTMLElement): void {
+  const badge = document.createElement('span');
+  badge.className = 'dice-entry-historical';
+  badge.textContent = 'Историческая запись';
+  container.append(badge);
+}
+
 function renderAbilityEntry(roll: DiceRollEntry): HTMLLIElement {
   const item = document.createElement('li'); item.className = 'dice-entry dice-entry-ability';
   const title = document.createElement('div'); title.className = 'dice-entry-top';
@@ -1369,7 +1507,9 @@ function renderAbilityEntry(roll: DiceRollEntry): HTMLLIElement {
   heading.textContent = `${actor} · ${roll.abilityCharacterName || 'Персонаж'}`;
   const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt;
   time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  title.append(heading, time);
+  title.append(heading);
+  if (isHistoricalRoll(roll)) appendHistoricalBadge(title);
+  title.append(time);
 
   const abilityRow = document.createElement('div'); abilityRow.className = 'dice-entry-ability-row';
   const image = makeSheetPortrait(roll.abilityAssetId, roll.abilityName || 'Способность', 'dice-ability-image');
@@ -1411,7 +1551,9 @@ function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
   const label = roll.kind === 'free' ? `${roll.actorName} · свободный бросок` : roll.authorId === roll.actorId ? `${roll.actorName} · PbtA` : `${roll.authorName} за ${roll.actorName} · PbtA`;
   const heading = document.createElement('span'); heading.textContent = label;
   const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt; time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  title.append(heading, time);
+  title.append(heading);
+  if (isHistoricalRoll(roll)) appendHistoricalBadge(title);
+  title.append(time);
   const detail = document.createElement('div'); detail.className = 'dice-entry-detail';
   if (roll.kind === 'free') detail.textContent = `${roll.dice.length}d${roll.sides}: ${roll.dice.join(' + ')} = ${roll.total}`;
   else {
@@ -1425,7 +1567,7 @@ function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
     if (roll.critical) detail.classList.add('dice-entry-critical');
   }
   item.append(title, detail);
-  if (roll.kind === 'pbta' && (roll.authorId === identity?.participantId || identity?.role === 'gm')) {
+  if (roll.kind === 'pbta' && !isHistoricalRoll(roll) && (roll.authorId === identity?.participantId || identity?.role === 'gm')) {
     const reroll = document.createElement('button'); reroll.type = 'button'; reroll.className = 'secondary'; reroll.textContent = 'Повторить · Сила Судьбы';
     reroll.addEventListener('click', () => void runCommand('dice:reroll', { rollId: roll.id })); item.append(reroll);
   }
@@ -1493,8 +1635,8 @@ function makeCreateSheetButton(): HTMLButtonElement {
   create.type = 'button';
   create.className = 'sheet-catalog-action';
   create.textContent = '＋ Создать';
-  create.disabled = roomState?.activeSystem?.id !== pbtaSystemModule.id;
-  create.title = create.disabled ? 'Сначала включите систему PbtA.' : 'Создать лист персонажа';
+  create.disabled = !(roomState?.system.fixed && roomState.system.id);
+  create.title = create.disabled ? 'Сначала закрепите игровую систему.' : 'Создать лист персонажа';
   create.addEventListener('click', createOwnSheet);
   return create;
 }
@@ -1606,7 +1748,8 @@ function renderSheetsCatalog() {
 }
 
 function createOwnSheet() {
-  if (!identity || !roomState || roomState.activeSystem?.id !== pbtaSystemModule.id) return;
+  const system = roomState?.system;
+  if (!identity || !system?.fixed || !system.id) return;
   const name = window.prompt('Имя персонажа', identity.name);
   if (name === null) return;
   openOwnSheetAfterCreate = true;
@@ -1683,9 +1826,9 @@ function moveIds<T extends { id: string; orderIndex: number }>(items: T[], id: s
 
 function prepareSheetRoll(sheet: CharacterSheet, key: SheetCharacteristicKey, characteristicName: string) {
   if (!identity || !roomState || !canPrepareSheetRoll(sheet)) return;
-  const active = roomState.activeSystem;
-  if (!active || active.id !== pbtaSystemModule.id || active.version !== pbtaSystemModule.version) {
-    showCanvasMessage('В комнате не выбрана система PbtA.', true);
+  const active = roomState.system;
+  if (!active.fixed || active.id !== pbtaSystemModule.id || active.version !== pbtaSystemModule.version) {
+    showCanvasMessage('В комнате не закреплена система PbtA.', true);
     return;
   }
   const assignedPlayerId = sheet.assignedPlayerId;
@@ -1719,7 +1862,8 @@ function renderSheetPanel() {
   sheetNameHeading.textContent = sheet.characterName || 'Без имени';
   applyBoardFont(sheetNameHeading, sheet.fontFamily);
   sheetOwnerLabel.textContent = sheet.assignedPlayerName ? `Игрок: ${sheet.assignedPlayerName}` : 'Не назначен';
-  sheetSystemLabel.textContent = `${pbtaSystemModule.name} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
+  const systemModule = findSystemModule(sheet.systemId, sheet.systemVersion);
+  sheetSystemLabel.textContent = `${systemModule?.name ?? sheet.systemId} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
   if (sheet.portraitAssetId) {
     sheetPortrait.src = `/api/assets/${encodeURIComponent(sheet.portraitAssetId)}`;
     sheetPortrait.alt = `Портрет ${sheet.characterName || sheet.assignedPlayerName || sheet.creatorName}`;
@@ -1763,6 +1907,18 @@ function renderSheetPanel() {
     fields.append(fontLabel);
     identitySection.append(fields);
     sheetContent.append(identitySection);
+  }
+
+  if (sheet.systemId !== pbtaSystemModule.id) {
+    // Other systems share the floating panel shell and common identity fields,
+    // but never render PbtA characteristics, counters or abilities.
+    const placeholder = sheetSection('Лист персонажа', 'sheet-placeholder-section');
+    const note = document.createElement('p');
+    note.className = 'panel-note sheet-placeholder';
+    note.textContent = 'Лист персонажа Nechronica — находится в разработке';
+    placeholder.append(note);
+    sheetContent.append(placeholder);
+    return;
   }
 
   const characteristics = sheetSection('Характеристики', 'sheet-characteristics-section');
@@ -2389,7 +2545,7 @@ async function saveNote() {
 
 function startNotePlacement(id: string) {
   if (identity?.role !== 'gm') return;
-  if (!activeLayerId || !roomState?.layers.some((layer) => layer.id === activeLayerId && !layer.locked)) { showCanvasMessage('Выберите открытый слой для метки.', true); return; }
+  if (!activeLayerId || !sceneView()?.layers.some((layer) => layer.id === activeLayerId && !layer.locked)) { showCanvasMessage('Выберите открытый слой для метки.', true); return; }
   notePlacementId = id; notePlacementHint.hidden = false; canvasContainer.style.cursor = 'crosshair';
 }
 
@@ -2506,10 +2662,14 @@ async function refreshNotesList() {
   } catch { /* Keep the current list during a brief network failure. */ }
 }
 
+function activeLayerStorageKey(): string {
+  return `tabletop-active-layer:${location.host}:${currentScene()}`;
+}
+
 function setActiveLayer(layerId: string): void {
   if (layerId === activeLayerId) return;
   activeLayerId = layerId;
-  localStorage.setItem(`tabletop-active-layer:${location.host}`, layerId);
+  localStorage.setItem(activeLayerStorageKey(), layerId);
   clearSelectionOutsideActiveLayer();
   renderLayers();
   // Rebuild hit areas: only items on the new active layer stay pickable.
@@ -2519,7 +2679,7 @@ function setActiveLayer(layerId: string): void {
 function renderLayers() {
   layersList.replaceChildren();
   if (!roomState || identity?.role !== 'gm') return;
-  const topFirst = [...roomState.layers].sort((a, b) => b.orderIndex - a.orderIndex);
+  const topFirst = [...(sceneView()?.layers ?? [])].sort((a, b) => b.orderIndex - a.orderIndex);
   for (const layer of topFirst) {
     const item = document.createElement('li');
     item.className = `layer-item${layer.id === activeLayerId ? ' active' : ''}`;
@@ -2564,14 +2724,14 @@ function renderLayers() {
     });
     const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'layer-action'; remove.textContent = '×'; remove.title = 'Удалить слой';
     remove.addEventListener('click', () => {
-      const objectCount = (roomState?.objects.filter((object) => object.layerId === layer.id).length || 0) + (roomState?.stickers.filter((object) => object.layerId === layer.id).length || 0) + (roomState?.noteMarkers.filter((object) => object.layerId === layer.id).length || 0);
+      const objectCount = (sceneView()?.objects.filter((object) => object.layerId === layer.id).length || 0) + (sceneView()?.stickers.filter((object) => object.layerId === layer.id).length || 0) + (sceneView()?.noteMarkers.filter((object) => object.layerId === layer.id).length || 0);
       const deleteObjects = objectCount > 0 && window.confirm(`В слое ${objectCount} объектов. Удалить слой вместе с объектами?`);
       if (objectCount > 0 && !deleteObjects) return;
       void runCommand('layer:delete', { id: layer.id, deleteObjects });
     });
     meta.append(access, rename, remove);
     const state = document.createElement('div'); state.className = 'layer-state';
-    const layerCount = roomState.objects.filter((object) => object.layerId === layer.id).length + roomState.stickers.filter((object) => object.layerId === layer.id).length + roomState.noteMarkers.filter((object) => object.layerId === layer.id).length;
+    const layerCount = (sceneView()?.objects ?? []).filter((object) => object.layerId === layer.id).length + (sceneView()?.stickers ?? []).filter((object) => object.layerId === layer.id).length + (sceneView()?.noteMarkers ?? []).filter((object) => object.layerId === layer.id).length;
     state.textContent = `${layerCount} объектов`;
     item.append(main, meta, state);
     layersList.append(item);
@@ -2594,7 +2754,7 @@ function renderAssets() {
     const actions = document.createElement('div');
     actions.className = 'asset-actions';
     const add = document.createElement('button'); add.type = 'button'; add.className = 'asset-add'; add.textContent = 'Добавить';
-    add.disabled = !activeLayerId || !roomState?.layers.some((layer) => layer.id === activeLayerId && !layer.locked);
+    add.disabled = !activeLayerId || !sceneView()?.layers.some((layer) => layer.id === activeLayerId && !layer.locked);
     add.addEventListener('click', () => {
       const world = stage ? { x: (stage.width() / 2 - stage.x()) / stage.scaleX(), y: (stage.height() / 2 - stage.y()) / stage.scaleY() } : { x: 0, y: 0 };
       const scale = Math.min(1, 320 / asset.width, 240 / asset.height);
@@ -2780,13 +2940,33 @@ window.addEventListener('resize', () => {
 });
 select<HTMLButtonElement>('#layers-collapse').addEventListener('click', () => setLayersCollapsed(true));
 layersExpandButton.addEventListener('click', () => setLayersCollapsed(false));
-systemSelect.addEventListener('change', () => { systemSave.hidden = systemSelect.value === (roomState?.activeSystem?.id ?? 'none'); });
+systemSelect.addEventListener('change', () => { systemSave.hidden = identity?.role !== 'gm'; });
 systemSave.addEventListener('click', () => {
-  if (identity?.role !== 'gm') return;
+  if (identity?.role !== 'gm' || roomState?.system.fixed) return;
   const systemId = systemSelect.value;
-  const message = 'При смене основной системы сохранённые результаты бросков останутся в истории. Данные персонажей не преобразуются автоматически. Продолжить?';
-  if (!window.confirm(message)) { systemSelect.value = roomState?.activeSystem?.id ?? 'none'; systemSave.hidden = true; return; }
-  void runCommand('room:system:set', { systemId: systemId === 'none' ? null : systemId, version: systemId === 'none' ? null : '1.0.0' });
+  const message = 'Игровая система закрепляется за комнатой навсегда. После подтверждения сменить её будет нельзя. Продолжить?';
+  if (!window.confirm(message)) return;
+  if (systemId === 'none') { void runCommand('room:system:initialize', { systemId: null }); return; }
+  const module = findSystemModule(systemId);
+  if (!module) { showCanvasMessage('Выбранная система недоступна.', true); return; }
+  void runCommand('room:system:initialize', { systemId: module.id, version: module.version });
+});
+battlePreviewToggle.addEventListener('click', () => {
+  if (identity?.role !== 'gm' || !roomState) return;
+  if (roomState.activeScene === 'battle') {
+    showCanvasMessage('Боевая карта уже активна.', true);
+    return;
+  }
+  setViewingBattle(!viewingBattle);
+});
+battleActivate.addEventListener('click', () => {
+  if (identity?.role !== 'gm') return;
+  void runCommand('room:scene:set', { scene: 'battle' });
+});
+battleDeactivate.addEventListener('click', () => {
+  if (identity?.role !== 'gm') return;
+  viewingBattle = false;
+  void runCommand('room:scene:set', { scene: 'board' });
 });
 select<HTMLButtonElement>('#pbta-roll').addEventListener('click', () => {
   const characteristicBonus = Number(select<HTMLInputElement>('#pbta-bonus').value);
@@ -2809,7 +2989,7 @@ select<HTMLButtonElement>('#free-roll').addEventListener('click', () => {
 });
 
 boardBackgroundSelect.addEventListener('change', () => {
-  if (identity?.role !== 'gm') { applyBoardBackground(roomState?.background); return; }
+  if (identity?.role !== 'gm') { applyBoardBackground(sceneView()?.background); return; }
   const background: BoardBackground = boardBackgroundSelect.value === 'black' ? 'black' : 'gray';
   applyBoardBackground(background);
   void runCommand('room:background:set', { background });
@@ -2850,20 +3030,20 @@ select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
   } else editingAssetIds = [...new Set([...editingAssetIds, ...values])];
   renderNoteAttachments(); assetPickerDialog.close();
 });
-select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = roomState?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
+select<HTMLButtonElement>('#marker-edit').addEventListener('click', () => { const marker = sceneView()?.noteMarkers.find((entry) => entry.id === selectedMarkerId); if (marker) void openNote(marker.noteId); });
 select<HTMLButtonElement>('#marker-resize').addEventListener('click', () => setMarkerResizeMode(!markerResizeMode));
 select<HTMLButtonElement>('#marker-delete').addEventListener('click', () => { if (selectedMarkerId) void runCommand('note-marker:delete', { id: selectedMarkerId }).then(refreshNotesListIfVisible); });
 select<HTMLButtonElement>('#sticker-create').addEventListener('click', () => { select<HTMLTextAreaElement>('#sticker-new-text').value = ''; stickerCreateDialog.showModal(); });
 select<HTMLButtonElement>('#sticker-create-cancel').addEventListener('click', () => stickerCreateDialog.close());
 select<HTMLButtonElement>('#sticker-create-confirm').addEventListener('click', () => {
   const text = select<HTMLTextAreaElement>('#sticker-new-text').value.trim(); if (!text || !roomState) return;
-  const layer = identity?.role === 'gm' ? roomState.layers.find((entry) => entry.id === activeLayerId && !entry.locked) : undefined;
+  const layer = identity?.role === 'gm' ? (sceneView()?.layers ?? []).find((entry) => entry.id === activeLayerId && !entry.locked) : undefined;
   if (identity?.role === 'gm' && !layer) { showCanvasMessage('Выберите незаблокированный слой для стикера.', true); return; }
   const x = stage ? clampWorld((stage.width() / 2 - stage.x()) / stage.scaleX()) : 0; const y = stage ? clampWorld((stage.height() / 2 - stage.y()) / stage.scaleY()) : 0;
   void runCommand('sticker:create', { ...(layer ? { layerId: layer.id } : {}), text, x, y, fontSize: Number(select<HTMLSelectElement>('#sticker-new-size').value), fontFamily: select<HTMLSelectElement>('#sticker-new-font').value, textColor: select<HTMLSelectElement>('#sticker-new-color').value });
   stickerCreateDialog.close();
 });
-select<HTMLButtonElement>('#sticker-edit').addEventListener('click', () => { const sticker = roomState?.stickers.find((entry) => entry.id === selectedStickerId); if (!sticker) return; const text = window.prompt('Текст стикера', sticker.text); if (text?.trim()) void runCommand('sticker:update', { id: sticker.id, changes: { text: text.trim() } }); });
+select<HTMLButtonElement>('#sticker-edit').addEventListener('click', () => { const sticker = sceneView()?.stickers.find((entry) => entry.id === selectedStickerId); if (!sticker) return; const text = window.prompt('Текст стикера', sticker.text); if (text?.trim()) void runCommand('sticker:update', { id: sticker.id, changes: { text: text.trim() } }); });
 select<HTMLSelectElement>('#sticker-bg').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { bgColor: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLSelectElement>('#sticker-text-color').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { textColor: (event.currentTarget as HTMLSelectElement).value } }));
 select<HTMLSelectElement>('#sticker-font-size').addEventListener('change', (event) => selectedStickerId && void runCommand('sticker:update', { id: selectedStickerId, changes: { fontSize: Number((event.currentTarget as HTMLSelectElement).value) } }));
@@ -2879,16 +3059,16 @@ select<HTMLButtonElement>('#delete-object').addEventListener('click', () => sele
 select<HTMLButtonElement>('#object-front').addEventListener('click', () => selectedObjectId && void runCommand('object:order', { id: selectedObjectId, direction: 'front' }));
 select<HTMLButtonElement>('#object-back').addEventListener('click', () => selectedObjectId && void runCommand('object:order', { id: selectedObjectId, direction: 'back' }));
 select<HTMLButtonElement>('#flip-x').addEventListener('click', () => {
-  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
   if (item) void runCommand('object:update', { id: item.id, changes: { flipX: !item.flipX } });
 });
 select<HTMLButtonElement>('#flip-y').addEventListener('click', () => {
-  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
   if (item) void runCommand('object:update', { id: item.id, changes: { flipY: !item.flipY } });
 });
 select<HTMLButtonElement>('#crop-toggle').addEventListener('click', () => {
-  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
-  const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && sceneView()?.layers.find((entry) => entry.id === item.layerId);
   if (identity?.role !== 'gm' || !item || !layer || layer.locked) return;
   cropMode = !cropMode;
   drawObjects();
@@ -2899,8 +3079,8 @@ select<HTMLButtonElement>('#crop-cancel').addEventListener('click', () => {
 select<HTMLButtonElement>('#crop-confirm').addEventListener('click', confirmCrop);
 select<HTMLButtonElement>('#crop-reset').addEventListener('click', () => selectedObjectId && void runCommand('object:update', { id: selectedObjectId, changes: { crop: null } }));
 stretchControl.addEventListener('change', () => {
-  const item = roomState?.objects.find((object) => object.id === selectedObjectId);
-  const layer = item && roomState?.layers.find((entry) => entry.id === item.layerId);
+  const item = sceneView()?.objects.find((object) => object.id === selectedObjectId);
+  const layer = item && sceneView()?.layers.find((entry) => entry.id === item.layerId);
   if (!item || identity?.role !== 'gm' || layer?.locked) return;
   item.freeStretch = stretchControl.checked;
   const changes: Record<string, unknown> = { freeStretch: item.freeStretch };

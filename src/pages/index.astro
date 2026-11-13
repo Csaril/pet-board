@@ -59,6 +59,19 @@ import '../styles/global.css';
               <button id="dice-history-toggle" class="tool-button" type="button" aria-controls="dice-history-panel" aria-expanded="false">История <span id="dice-new-count" class="dice-new-count" hidden></span></button>
             </div>
           </section>
+          <section class="topbar-group gm-only" data-topbar-group="battle" aria-label="Боевая карта" hidden>
+            <span class="topbar-group-label">Боевая карта</span>
+            <div class="topbar-group-actions">
+              <div class="menu-anchor">
+                <button id="battle-map-toggle" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="battle-map-menu" data-menu-trigger="battle-map-menu">Боевая карта <span class="menu-caret" aria-hidden="true">▾</span></button>
+                <div id="battle-map-menu" class="dropdown-menu" role="menu" aria-label="Боевая карта" hidden>
+                  <button id="battle-preview-toggle" class="menu-item" type="button" role="menuitem" aria-pressed="false"><span aria-hidden="true">✎</span> Редактировать боевую карту</button>
+                  <button id="battle-activate" class="menu-item" type="button" role="menuitem"><span aria-hidden="true">▶</span> Вызвать боевую карту</button>
+                  <button id="battle-deactivate" class="menu-item" type="button" role="menuitem" hidden><span aria-hidden="true">◀</span> Вернуться на основную доску</button>
+                </div>
+              </div>
+            </div>
+          </section>
           <section class="topbar-group" data-topbar-group="sheets" aria-label="Персонажи">
             <span class="topbar-group-label">Персонажи</span>
             <div class="topbar-group-actions">
@@ -96,6 +109,7 @@ import '../styles/global.css';
       <div class="workspace-body">
         <section class="canvas-wrap" aria-label="Игровая доска">
           <div id="board-canvas"></div>
+          <div id="battle-preview-banner" class="battle-preview-banner gm-only" data-manual-visibility="true" role="status" hidden>Предпросмотр боевой карты · изменения не переключают игроков</div>
           <div class="canvas-hint">Колесо мыши — масштаб · перетаскивайте пустое место — перемещение доски</div>
           <div id="canvas-message" class="canvas-message" role="status" aria-live="polite"></div>
           <div id="lock-indicator" class="lock-indicator canvas-lock-indicator" hidden>🔒 Слой заблокирован</div>
@@ -134,7 +148,7 @@ import '../styles/global.css';
           <div id="note-place-hint" class="canvas-message" role="status" hidden>Нажмите на доске, чтобы поставить метку заметки · Esc — отмена</div>
           <aside id="dice-tools-panel" class="floating-dice-panel dice-tools-panel" aria-label="Инструменты бросков" hidden>
             <div class="dice-panel-heading" data-panel-drag-handle><span class="panel-grip" aria-hidden="true">⠿</span><div class="panel-title"><p class="eyebrow">Игровые броски</p><h2>Инструменты</h2></div><button id="dice-tools-reset" class="icon-button panel-reset" type="button" title="Вернуть панель на место" aria-label="Вернуть панель инструментов на место">⌖</button><button id="dice-tools-close" class="icon-button" type="button" aria-label="Закрыть инструменты бросков">×</button></div>
-            <div class="dice-room-system"><label for="room-system">Система комнаты</label><select id="room-system" disabled><option value="none">Без системы</option><option value="pbta-2d6">PbtA</option></select><button id="room-system-save" type="button" hidden>Применить</button></div>
+            <div class="dice-room-system"><span class="dice-room-system-label">Система комнаты</span><div id="room-system-readonly" class="room-system-readonly" hidden><strong id="room-system-name"></strong><span id="room-system-version" class="panel-note"></span></div><select id="room-system" hidden><option value="none">Без системы</option><option value="pbta-2d6">PbtA</option><option value="nechronica">Nechronica</option></select><button id="room-system-save" type="button" hidden>Закрепить систему</button></div>
             <div id="pbta-controls-home">
               <section id="pbta-roll-controls" class="dice-roll-controls" hidden aria-label="Проверка PbtA">
                 <h3>Проверка PbtA</h3>
@@ -145,6 +159,10 @@ import '../styles/global.css';
                 <button id="pbta-roll" type="button">Бросить 2d6</button>
               </section>
             </div>
+            <section id="nechronica-roll-controls" class="dice-roll-controls" hidden aria-label="Броски Nechronica">
+              <h3>Броски Nechronica</h3>
+              <p class="panel-note">Система бросков Nechronica — находится в разработке.</p>
+            </section>
             <section class="dice-roll-controls" aria-label="Свободный бросок">
               <h3>Свободный бросок</h3>
               <div class="free-dice-fields"><label for="free-count">Кубиков</label><input id="free-count" type="number" min="1" max="20" value="1" /><label for="free-sides">Тип</label><select id="free-sides"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>12</option><option>20</option><option>100</option></select></div>

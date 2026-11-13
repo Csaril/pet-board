@@ -62,11 +62,13 @@ test('dice commands use server randomness, enforce roles, synchronize, reroll an
       return { ack: await ack, state: state ? await state : undefined };
     };
 
-    const setSystem = await command(gm.socket, { type: 'room:system:set', systemId: 'pbta-2d6', version: '1.0.0' }, 'system', player.socket);
+    const setSystem = await command(gm.socket, { type: 'room:system:initialize', systemId: 'pbta-2d6', version: '1.0.0' }, 'system', player.socket);
     assert.equal(setSystem.ack.ok, true);
-    assert.deepEqual(setSystem.state!.activeSystem, { id: 'pbta-2d6', version: '1.0.0' });
+    const fixed = setSystem.state!.system as Record<string, unknown>;
+    assert.deepEqual({ fixed: fixed.fixed, id: fixed.id, version: fixed.version }, { fixed: true, id: 'pbta-2d6', version: '1.0.0' });
     const deniedSetting = await command(player.socket, { type: 'room:system:set', systemId: null, version: null }, 'player-system', player.socket, false);
     assert.equal(deniedSetting.ack.ok, false);
+    assert.equal(deniedSetting.ack.code, 'ROOM_SYSTEM_IMMUTABLE');
 
     const forged = await command(player.socket, { type: 'dice:pbta', characteristicBonus: 0, situationalModifier: 0, disadvantage: false, dice: [6, 6], total: 12 }, 'forged', player.socket, false);
     assert.equal(forged.ack.ok, false);
@@ -116,7 +118,7 @@ test('dice commands use server randomness, enforce roles, synchronize, reroll an
     if (completed) {
       reopenedStore = new RoomStore(dataDir, config.roomName);
       assert.equal(reopenedStore.getDiceRolls().length, 10);
-      assert.deepEqual(reopenedStore.activeSystem, { id: 'pbta-2d6', version: '1.0.0' });
+      assert.deepEqual(reopenedStore.fixedSystem, { id: 'pbta-2d6', version: '1.0.0' });
       reopenedStore.close(); reopenedStore = undefined;
     }
     rmSync(dataDir, { recursive: true, force: true });

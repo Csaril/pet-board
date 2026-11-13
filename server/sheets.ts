@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { BoardFontFamily, CharacterSheet, DiceRollEntry, SheetCharacteristicKey } from '../src/shared/board.js';
 import { abilityEventSummary } from '../src/shared/ability-history.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
-import { defaultPbtACharacteristics, isPbtACharacteristicKey, pbtaSheetSchema, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
-import { BoardCommandError } from './board.js';
+import { findSystemModule, type SystemModuleDescriptor } from '../src/modules/registry.js';
+import { defaultPbtACharacteristics, isPbtACharacteristicKey, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
+import { BoardCommandError, SYSTEM_MISMATCH } from './board.js';
 import type { RoomStore, Identity } from './store.js';
 
 type Command = Record<string, unknown> & { type?: string; requestId?: unknown };
@@ -42,18 +43,29 @@ function fontFamilyValue(value: unknown): BoardFontFamily {
   return value;
 }
 
-function activePbtASystem(store: RoomStore): { id: string; version: string } {
-  const active = store.activeSystem;
-  if (!active || active.id !== pbtaSystemModule.id || active.version !== pbtaSystemModule.version) {
-    throw new BoardCommandError('Листы доступны при активной системе PbtA.');
+export function activeSystemModule(store: RoomStore): SystemModuleDescriptor {
+  const active = store.fixedSystem;
+  const module = active ? findSystemModule(active.id, active.version) : undefined;
+  if (!module) throw new BoardCommandError('Игровая система комнаты не закреплена.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+  return module;
+}
+
+function requirePbtASheet(sheet: CharacterSheet): void {
+  if (sheet.systemId !== pbtaSystemModule.id) throw new BoardCommandError('Действие доступно только для листов PbtA.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+}
+
+function requireSheetSystem(sheet: CharacterSheet, active: SystemModuleDescriptor): void {
+  if (sheet.systemId !== active.id || sheet.systemVersion !== active.version) {
+    throw new BoardCommandError('Лист относится к другой игровой системе.', { code: SYSTEM_MISMATCH, statusCode: 409 });
   }
-  return active;
 }
 
 function editableSheet(store: RoomStore, identity: Identity, value: unknown): CharacterSheet {
+  const active = activeSystemModule(store);
   const id = text(value, 'ID листа', 64);
   const sheet = store.getSheet(id);
   if (!sheet) throw new BoardCommandError('Лист персонажа не найден.');
+  requireSheetSystem(sheet, active);
   if (identity.role !== 'gm' && sheet.assignedPlayerId !== identity.participantId) {
     throw new BoardCommandError('Можно изменять только назначенный вам лист персонажа.');
   }
@@ -115,22 +127,27 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
   switch (command.type) {
     case 'sheet:create': {
       if (Object.keys(command).some((key) => !['type', 'requestId', 'characterName'].includes(key))) throw new BoardCommandError('Некорректная команда создания листа.');
-      const active = activePbtASystem(store);
+      const active = activeSystemModule(store);
       const characterName = command.characterName === undefined ? '' : text(command.characterName, 'Имя персонажа', 80, true);
       const assignedPlayerId = identity.role === 'player' ? identity.participantId : null;
+      const characteristics = active.id === pbtaSystemModule.id
+        ? defaultPbtACharacteristics()
+        : ({} as Record<SheetCharacteristicKey, number>);
       store.createSheet({
         id: randomUUID(), creatorId: identity.participantId, creatorName: identity.name,
         assignedPlayerId, assignedPlayerName: assignedPlayerId ? identity.name : null,
-        systemId: active.id, systemVersion: active.version, schemaVersion: pbtaSheetSchema.version,
-        characterName, portraitAssetId: null, characteristics: defaultPbtACharacteristics(), fate: 0,
+        systemId: active.id, systemVersion: active.version, schemaVersion: active.sheetSchemaVersion,
+        characterName, portraitAssetId: null, characteristics, fate: 0,
       });
       return;
     }
     case 'sheet:delete': {
       if (identity.role !== 'gm') throw new BoardCommandError('Удалять листы может только ведущий.');
       if (Object.keys(command).some((key) => !['type', 'requestId', 'id'].includes(key))) throw new BoardCommandError('Некорректная команда удаления листа.');
+      const active = activeSystemModule(store);
       const sheet = store.getSheet(text(command.id, 'ID листа', 64));
       if (!sheet) throw new BoardCommandError('Лист персонажа не найден.');
+      requireSheetSystem(sheet, active);
       if (sheet.assignedPlayerId !== null) throw new BoardCommandError('Нельзя удалить лист, назначенный игроку. Сначала снимите назначение.');
       if (!store.deleteUnassignedSheet(sheet.id)) throw new BoardCommandError('Лист не удалось удалить: он уже назначен или отсутствует.');
       return;
@@ -138,8 +155,10 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     case 'sheet:assign': {
       if (identity.role !== 'gm') throw new BoardCommandError('Назначать листы может только ведущий.');
       if (Object.keys(command).some((key) => !['type', 'requestId', 'id', 'playerId'].includes(key))) throw new BoardCommandError('Некорректная команда назначения листа.');
+      const active = activeSystemModule(store);
       const sheet = store.getSheet(text(command.id, 'ID листа', 64));
       if (!sheet) throw new BoardCommandError('Лист персонажа не найден.');
+      requireSheetSystem(sheet, active);
       if (command.playerId === null) {
         store.assignSheet(sheet.id, null, null);
         return;
@@ -153,6 +172,8 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     case 'sheet:update': {
       const sheet = editableSheet(store, identity, command.id);
       const changes = changesObject(command.changes, new Set(['characterName', 'portraitAssetId', 'characteristics', 'fate', 'fontFamily']), 'Изменения листа');
+      // PbtA-specific fields are only valid for PbtA sheets; other systems keep the shared columns untouched.
+      if (owns(changes, 'characteristics') || owns(changes, 'fate')) requirePbtASheet(sheet);
       const patch: Parameters<RoomStore['updateSheet']>[1] = {};
       if (owns(changes, 'characterName')) patch.characterName = text(changes.characterName, 'Имя персонажа', 80, true);
       if (owns(changes, 'portraitAssetId')) patch.portraitAssetId = accessibleAssetId(changes.portraitAssetId, store, identity, 'Портрет');
@@ -164,12 +185,14 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:fate:update': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'value'].includes(key))) throw new BoardCommandError('Некорректная команда изменения Силы Судьбы.');
       store.updateSheet(sheet.id, { fate: integer(command.value, 'Сила Судьбы', -MAX_VALUE, MAX_VALUE) });
       return;
     }
     case 'sheet:counter:value': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'id', 'value'].includes(key))) throw new BoardCommandError('Некорректная команда изменения счётчика.');
       const counter = requireCounter(sheet, command.id);
       store.updateCounter(sheet.id, counter.id, { value: integer(command.value, 'значение счётчика', -MAX_VALUE, MAX_VALUE) });
@@ -177,6 +200,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:ability:value': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'id', 'counterValue', 'checked'].includes(key))) throw new BoardCommandError('Некорректная команда значения способности.');
       if (!owns(command, 'counterValue') && !owns(command, 'checked')) throw new BoardCommandError('Укажите значение счётчика или состояние чекбокса.');
       const ability = requireAbility(sheet, command.id);
@@ -188,6 +212,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:counter:create': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'name', 'value'].includes(key))) throw new BoardCommandError('Некорректная команда счётчика.');
       const value = command.value === undefined ? 0 : integer(command.value, 'значение счётчика', -MAX_VALUE, MAX_VALUE);
       store.createCounter(sheet.id, { id: randomUUID(), name: text(command.name, 'Название счётчика', 80), value });
@@ -195,6 +220,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:counter:update': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       const counter = requireCounter(sheet, command.id);
       const changes = changesObject(command.changes, new Set(['name', 'value']), 'Изменения счётчика');
       store.updateCounter(sheet.id, counter.id, {
@@ -205,17 +231,20 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:counter:delete': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       const counter = requireCounter(sheet, command.id);
       store.deleteCounter(sheet.id, counter.id);
       return;
     }
     case 'sheet:counter:reorder': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       store.reorderCounters(sheet.id, orderedIds(command.ids, sheet.counters.map((counter) => counter.id), 'Порядок счётчиков'));
       return;
     }
     case 'sheet:ability:create': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       const allowed = new Set(['type', 'requestId', 'sheetId', 'name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked', 'fontFamily']);
       if (Object.keys(command).some((key) => !allowed.has(key))) throw new BoardCommandError('Некорректная команда способности.');
       const id = randomUUID();
@@ -236,6 +265,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:ability:update': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       const ability = requireAbility(sheet, command.id);
       const changes = changesObject(command.changes, new Set(['name', 'description', 'assetId', 'counterEnabled', 'counterName', 'counterValue', 'checkboxEnabled', 'checkboxLabel', 'checked', 'fontFamily']), 'Изменения способности');
       const patch: Parameters<RoomStore['updateAbility']>[2] = {};
@@ -253,7 +283,9 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
       return;
     }
     case 'sheet:ability:apply': {
+      const active = activeSystemModule(store);
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       if (Object.keys(command).some((key) => !['type', 'requestId', 'sheetId', 'id'].includes(key))) throw new BoardCommandError('Некорректная команда применения способности.');
       const ability = requireAbility(sheet, command.id);
       const characterName = sheet.characterName || sheet.assignedPlayerName || sheet.creatorName || 'Без имени';
@@ -262,6 +294,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
         actorId: sheet.assignedPlayerId ?? identity.participantId,
         actorName: sheet.assignedPlayerName ?? identity.name,
         createdAt: new Date().toISOString(), kind: 'ability-use',
+        systemId: active.id, systemVersion: active.version,
         dice: [], keptDice: [], discardedDie: null, characteristicName: null, characterId: sheet.id,
         characterOwnerId: sheet.assignedPlayerId, characteristicBonus: null, situationalModifier: 0,
         disadvantage: false, sides: null, total: 0, category: null, critical: null, rerollOf: null,
@@ -275,12 +308,14 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
     }
     case 'sheet:ability:delete': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       const ability = requireAbility(sheet, command.id);
       store.deleteAbility(sheet.id, ability.id);
       return;
     }
     case 'sheet:ability:reorder': {
       const sheet = editableSheet(store, identity, command.sheetId);
+      requirePbtASheet(sheet);
       store.reorderAbilities(sheet.id, orderedIds(command.ids, sheet.abilities.map((ability) => ability.id), 'Порядок способностей'));
       return;
     }

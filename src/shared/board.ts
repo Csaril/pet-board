@@ -1,6 +1,7 @@
 export type LayerAudience = 'gm-only' | 'all-players';
 export type BoardBackground = 'black' | 'gray';
 export type BoardFontFamily = 'default' | 'caveat';
+export type BoardScene = 'board' | 'battle';
 
 export interface BoardLayer {
   id: string;
@@ -9,6 +10,7 @@ export interface BoardLayer {
   visible: boolean;
   locked: boolean;
   audience: LayerAudience;
+  scene: BoardScene;
 }
 
 export interface CropRect {
@@ -175,18 +177,42 @@ export interface CharacterSheet {
   updatedAt: string;
 }
 
+/**
+ * Fixed system ownership of a room. `fixed = false` means the room has not
+ * chosen a system yet and a one-time initialization is still possible.
+ * `fixed = true` with `id = null` is the deliberate "no game system" mode.
+ */
+export interface RoomSystemState {
+  fixed: boolean;
+  id: string | null;
+  version: string | null;
+  name: string | null;
+  config: Record<string, unknown>;
+}
+
 export interface BoardSnapshot {
+  activeScene: BoardScene;
   background: BoardBackground;
   layers: BoardLayer[];
   objects: BoardImage[];
   stickers: BoardSticker[];
   noteMarkers: NoteMarker[];
+  /** The GM receives the battle scene even while it is not active, for local preview. */
+  battle?: BoardSceneSnapshot;
   personalNotes?: PersonalNoteListItem[];
   assets?: BoardAsset[];
   availableAssets?: BoardAsset[];
   sheets: CharacterSheet[];
-  activeSystem: { id: string; version: string } | null;
+  system: RoomSystemState;
   diceRolls: DiceRollEntry[];
+}
+
+export interface BoardSceneSnapshot {
+  background: BoardBackground;
+  layers: BoardLayer[];
+  objects: BoardImage[];
+  stickers: BoardSticker[];
+  noteMarkers: NoteMarker[];
 }
 
 export type DiceRollEntry = {
@@ -197,6 +223,9 @@ export type DiceRollEntry = {
   actorName: string;
   createdAt: string;
   kind: 'pbta' | 'free' | 'ability-use';
+  /** System ownership recorded by the server. Free core rolls keep both values null. */
+  systemId: string | null;
+  systemVersion: string | null;
   dice: number[];
   keptDice: number[];
   discardedDie: number | null;
@@ -229,5 +258,4 @@ export interface BoardStateMessage extends BoardSnapshot {
   participants?: RoomParticipant[];
   maxUploadBytes?: number;
   diceRolls: DiceRollEntry[];
-  activeSystem: { id: string; version: string } | null;
 }
