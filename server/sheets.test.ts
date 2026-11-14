@@ -269,19 +269,21 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
     await t.test('15. Положение сохраняется локально', () => {
       const values = new Map<string, string>();
       const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-      writeSheetPanelPreference(storage, 'participant-a', { version: 1, open: true, collapsed: true, x: 120, y: 80, sheetId: 'sheet-1' });
-      assert.deepEqual(readSheetPanelPreference(storage, 'participant-a'), { version: 1, open: true, collapsed: true, x: 120, y: 80, sheetId: 'sheet-1' });
+      writeSheetPanelPreference(storage, 'default', 'participant-a', { version: 1, open: true, collapsed: true, x: 120, y: 80, sheetId: 'sheet-1' });
+      assert.deepEqual(readSheetPanelPreference(storage, 'default', 'participant-a'), { version: 1, open: true, collapsed: true, x: 120, y: 80, sheetId: 'sheet-1' });
       assert.deepEqual(clampFloatingPosition(900, 700, 300, 200, 1000, 800), { x: 700, y: 600 });
     });
 
     await t.test('16. Настройки двух разных участников не пересекаются', () => {
       const values = new Map<string, string>();
       const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-      writeSheetPanelPreference(storage, 'participant-a', { version: 1, open: true, collapsed: false, x: 10, y: 20, sheetId: 'sheet-a' });
-      writeSheetPanelPreference(storage, 'participant-b', { version: 1, open: false, collapsed: true, x: 30, y: 40, sheetId: 'sheet-b' });
-      assert.notEqual(sheetPanelStorageKey('participant-a'), sheetPanelStorageKey('participant-b'));
-      assert.equal(readSheetPanelPreference(storage, 'participant-a')!.x, 10);
-      assert.equal(readSheetPanelPreference(storage, 'participant-b')!.y, 40);
+      writeSheetPanelPreference(storage, 'default', 'participant-a', { version: 1, open: true, collapsed: false, x: 10, y: 20, sheetId: 'sheet-a' });
+      writeSheetPanelPreference(storage, 'default', 'participant-b', { version: 1, open: false, collapsed: true, x: 30, y: 40, sheetId: 'sheet-b' });
+      assert.notEqual(sheetPanelStorageKey('default', 'participant-a'), sheetPanelStorageKey('default', 'participant-b'));
+      assert.notEqual(sheetPanelStorageKey('default', 'participant-a'), sheetPanelStorageKey('room-b', 'participant-a'));
+      assert.equal(readSheetPanelPreference(storage, 'default', 'participant-a')!.x, 10);
+      assert.equal(readSheetPanelPreference(storage, 'default', 'participant-b')!.y, 40);
+      assert.equal(readSheetPanelPreference(storage, 'room-b', 'participant-a'), undefined);
     });
 
     await t.test('16a. Окно броска перетаскивается, сбрасывается и хранит позицию отдельно для каждого пользователя', () => {
@@ -291,12 +293,13 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
       assert.match(styleSource, /\.sheet-roll-heading\[data-panel-drag-handle\]/);
       const values = new Map<string, string>();
       const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-      assert.equal(readSheetRollPanelPreference(storage, 'participant-a'), undefined);
-      writeSheetRollPanelPreference(storage, 'participant-a', 210, 140);
-      assert.deepEqual(readSheetRollPanelPreference(storage, 'participant-a'), { x: 210, y: 140 });
-      writeSheetRollPanelPreference(storage, 'participant-a', null, null);
-      assert.equal(readSheetRollPanelPreference(storage, 'participant-a'), undefined);
-      assert.notEqual(sheetRollPanelStorageKey('participant-a'), sheetRollPanelStorageKey('participant-b'));
+      assert.equal(readSheetRollPanelPreference(storage, 'default', 'participant-a'), undefined);
+      writeSheetRollPanelPreference(storage, 'default', 'participant-a', 210, 140);
+      assert.deepEqual(readSheetRollPanelPreference(storage, 'default', 'participant-a'), { x: 210, y: 140 });
+      writeSheetRollPanelPreference(storage, 'default', 'participant-a', null, null);
+      assert.equal(readSheetRollPanelPreference(storage, 'default', 'participant-a'), undefined);
+      assert.notEqual(sheetRollPanelStorageKey('default', 'participant-a'), sheetRollPanelStorageKey('default', 'participant-b'));
+      assert.notEqual(sheetRollPanelStorageKey('default', 'participant-a'), sheetRollPanelStorageKey('room-b', 'participant-a'));
     });
 
     await t.test('16b. Поля характеристик имеют достаточную ширину и не сжимаются', () => {
@@ -562,10 +565,13 @@ test('local sheet panel preferences and ability collapse are per participant', (
   assert.equal(formatSigned(4), '+4');
   assert.equal(formatSigned(0), '0');
   assert.equal(formatSigned(-3), '-3');
-  setAbilityCollapsed(storage, 'participant-a', 'sheet-1', 'ability-1', true);
-  setAbilityCollapsed(storage, 'participant-b', 'sheet-1', 'ability-2', true);
-  assert.deepEqual([...readCollapsedAbilities(storage, 'participant-a', 'sheet-1')], ['ability-1']);
-  assert.deepEqual([...readCollapsedAbilities(storage, 'participant-b', 'sheet-1')], ['ability-2']);
-  setAbilityCollapsed(storage, 'participant-a', 'sheet-1', 'ability-1', false);
-  assert.deepEqual([...readCollapsedAbilities(storage, 'participant-a', 'sheet-1')], []);
+  setAbilityCollapsed(storage, 'default', 'participant-a', 'sheet-1', 'ability-1', true);
+  setAbilityCollapsed(storage, 'default', 'participant-b', 'sheet-1', 'ability-2', true);
+  assert.deepEqual([...readCollapsedAbilities(storage, 'default', 'participant-a', 'sheet-1')], ['ability-1']);
+  assert.deepEqual([...readCollapsedAbilities(storage, 'default', 'participant-b', 'sheet-1')], ['ability-2']);
+  setAbilityCollapsed(storage, 'default', 'participant-a', 'sheet-1', 'ability-1', false);
+  assert.deepEqual([...readCollapsedAbilities(storage, 'default', 'participant-a', 'sheet-1')], []);
+  setAbilityCollapsed(storage, 'room-b', 'participant-a', 'sheet-1', 'ability-3', true);
+  assert.deepEqual([...readCollapsedAbilities(storage, 'room-b', 'participant-a', 'sheet-1')], ['ability-3']);
+  assert.deepEqual([...readCollapsedAbilities(storage, 'default', 'participant-a', 'sheet-1')], []);
 });

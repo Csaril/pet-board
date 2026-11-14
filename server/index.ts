@@ -11,9 +11,9 @@ import { randomInt, randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
 import type { BoardFontFamily, BoardScene, NoteAccess } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
-import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
-import { resolveRoomDirectory } from './room-storage.js';
+import { authenticateRoom, sessionCookieName, sessionDigest, SESSION_COOKIE_PREFIX } from './auth.js';
 import { executeBoardCommand, BoardCommandError, ROOM_SYSTEM_IMMUTABLE, SYSTEM_MISMATCH } from './board.js';
+import { CatalogNotInitializedError, RoomCatalog, type CatalogRoom } from './catalog.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { AssetInUseError, AssetNotFoundError, deleteImageAsset, saveImageAsset, UnsupportedImageError } from './assets.js';
 import { RoomStore, type Identity } from './store.js';
@@ -22,11 +22,14 @@ import { findSystemModule } from '../src/modules/registry.js';
 import { pbtaSheetSchema, pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
 import { calculatePbtARoll, rollFreeDice, type SituationalModifier } from '../src/modules/system/pbta-2d6/roll.js';
 import { executeSheetCommand } from './sheets.js';
+import { CatalogRoomAccess, RoomManager, RoomUnavailableError, SingleRoomAccess, type RoomAccess, type RoomLease } from './room-manager.js';
 
 const COOKIE_PATH = '/';
 const ASSET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** Migrated participants keep their old 64-hex ID; new participants are UUIDs. */
 const PARTICIPANT_ID_PATTERN = /^(?:[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const ROOM_ID_HEADER = 'x-room-id';
+const LEASES = Symbol('room-leases');
 
 function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string; fontFamily: BoardFontFamily } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -123,13 +126,35 @@ function isAllowedOrigin(
   return (config.publicOrigins ?? []).includes(normalized);
 }
 
-export async function buildServer(options?: { config?: AppConfig; store?: RoomStore; logger?: boolean; randomInt?: (min: number, max: number) => number }): Promise<FastifyInstance> {
-  const config = options?.config ?? loadConfig();
-  const store = options?.store ?? new RoomStore(resolveRoomDirectory(config.dataDir), config.roomName);
-  const app = Fastify({ logger: options?.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024, trustProxy: config.trustProxy === true });
+export interface ServerOptions {
+  config?: AppConfig;
+  /** One-room test harness. Production passes a RoomManager instead. */
+  store?: RoomStore;
+  roomManager?: RoomManager;
+  /** Explicitly constructed access adapter (catalog or harness). */
+  roomAccess?: RoomAccess;
+  logger?: boolean;
+  randomInt?: (min: number, max: number) => number;
+}
+
+interface RequestContext {
+  room: CatalogRoom;
+  store: RoomStore;
+  lease: RoomLease;
+  sessionId: string;
+  identity: Identity;
+}
+
+export async function buildServer(options: ServerOptions = {}): Promise<FastifyInstance> {
+  const config = options.config ?? loadConfig();
+  const roomAccess: RoomAccess = options.roomAccess
+    ?? (options.roomManager ? new CatalogRoomAccess(options.roomManager) : options.store ? new SingleRoomAccess(options.store, config) : undefined as never);
+  if (!roomAccess) throw new Error('Для запуска сервера нужен каталог комнат или тестовый RoomStore.');
+  const app = Fastify({ logger: options.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024, trustProxy: config.trustProxy === true });
   const originAllowed = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }): boolean =>
     isAllowedOrigin(request.headers.origin, request.headers, request.protocol, config);
-  const sockets = new Map<string, Set<WebSocket>>();
+  /** roomId -> sessionId -> sockets. Broadcasts never cross a room boundary. */
+  const sockets = new Map<string, Map<string, Set<WebSocket>>>();
   const secureRandomInt = options?.randomInt ?? randomInt;
   const distDir = resolve(process.cwd(), 'dist');
   mkdirSync(distDir, { recursive: true });
@@ -140,12 +165,6 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   await app.register(multipart, { limits: { fileSize: config.maxUploadBytes, files: 1, fields: 0 } });
   await app.register(fastifyStatic, { root: distDir, prefix: '/', wildcard: false });
 
-  const sessionFor = (raw: string | undefined): { sessionId: string; identity: Identity } | undefined => {
-    if (!raw || raw.length > 100) return undefined;
-    const sessionId = sessionDigest(raw);
-    const identity = store.getSession(sessionId);
-    return identity ? { sessionId, identity } : undefined;
-  };
   const cookieOptions = { path: COOKIE_PATH, httpOnly: true, sameSite: 'strict' as const, secure: config.cookieSecure };
   const requestIsSecure = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }): boolean => {
     if (request.protocol === 'https') return true;
@@ -157,21 +176,116 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     ...cookieOptions,
     secure: config.cookieSecure && requestIsSecure(request),
   });
-  const sendState = (): void => {
-    // Several sessions may belong to one participant; the room exposes each
-    // person once, even when they are connected from two browsers.
-    const connected = [...sockets.keys()].flatMap((sessionId) => {
-      const identity = store.getSession(sessionId);
-      return identity ? [identity] : [];
-    });
-    const participants = [...new Map(connected.map((identity) => [identity.participantId, identity])).values()];
-    for (const [sessionId, connections] of sockets) {
-      const identity = store.getSession(sessionId);
-      if (!identity) continue;
-      const snapshot = store.snapshot(identity);
-      const payload = JSON.stringify({ type: 'room:state', roomName: store.roomName, identity, participants, maxUploadBytes: config.maxUploadBytes, ...snapshot });
-      for (const socket of connections) if (socket.readyState === 1) socket.send(payload);
+
+  const addLease = (request: object, lease: RoomLease): void => {
+    const target = request as { [LEASES]?: RoomLease[] };
+    const leases = target[LEASES] ?? [];
+    leases.push(lease);
+    target[LEASES] = leases;
+  };
+  app.addHook('onResponse', async (request) => {
+    const leases = (request as { [LEASES]?: RoomLease[] })[LEASES];
+    if (!leases) return;
+    for (const lease of leases) lease.release();
+    delete (request as { [LEASES]?: RoomLease[] })[LEASES];
+  });
+
+  const requestedRoomId = (request: { headers: Record<string, string | string[] | undefined>; query?: unknown }): string | undefined => {
+    const header = firstHeader(request.headers[ROOM_ID_HEADER]);
+    if (header) return header;
+    const query = request.query as Record<string, unknown> | undefined;
+    const value = query?.roomId;
+    return typeof value === 'string' ? value : undefined;
+  };
+
+  /** Harness requests have no room header; legacy cookies also identify the only room. */
+  const fallbackRoomId = (request: { cookies: Record<string, string | undefined> }): string | undefined => {
+    if (roomAccess.legacyCookie) return 'default';
+    const names = Object.keys(request.cookies).filter((name) => name.startsWith(SESSION_COOKIE_PREFIX));
+    if (names.length !== 1) return undefined;
+    return names[0]!.slice(SESSION_COOKIE_PREFIX.length);
+  };
+
+  const resolveContext = (request: {
+    headers: Record<string, string | string[] | undefined>;
+    query?: unknown;
+    cookies: Record<string, string | undefined>;
+    protocol: string;
+  }): RequestContext | { error: number; code?: string; message: string } => {
+    const roomId = requestedRoomId(request) ?? fallbackRoomId(request);
+    if (!roomId) return { error: 401, message: 'Сессия не найдена.' };
+    const room = roomAccess.getRoom(roomId);
+    if (!room) return { error: 401, message: 'Сессия не найдена.' };
+    if (room.status !== 'active') {
+      return { error: 403, code: room.status === 'disabled' ? 'ROOM_DISABLED' : 'ROOM_ARCHIVED', message: 'Комната недоступна.' };
     }
+    const raw = request.cookies[sessionCookieName(room.id, roomAccess.legacyCookie)];
+    if (!raw || raw.length > 100) return { error: 401, message: 'Сессия не найдена.' };
+    let lease: RoomLease;
+    try { lease = roomAccess.acquire(room.id); }
+    catch (error) {
+      if (error instanceof RoomUnavailableError) return { error: 403, code: error.code, message: 'Комната недоступна.' };
+      return { error: 503, code: 'ROOM_CAPACITY', message: error instanceof Error ? error.message : 'Комната недоступна.' };
+    }
+    const sessionId = sessionDigest(raw);
+    const identity = lease.store.getSession(sessionId);
+    if (!identity) {
+      lease.release();
+      return { error: 401, message: 'Сессия не найдена.' };
+    }
+    addLease(request, lease);
+    return { room, store: lease.store, lease, sessionId, identity };
+  };
+
+  const roomSocketMap = (roomId: string): Map<string, Set<WebSocket>> => {
+    let map = sockets.get(roomId);
+    if (!map) { map = new Map(); sockets.set(roomId, map); }
+    return map;
+  };
+
+  const closeRoomSockets = (roomId: string, reason: string): void => {
+    const map = sockets.get(roomId);
+    if (!map) return;
+    for (const connections of map.values()) {
+      for (const socket of connections) {
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: 'room:closed', reason }));
+          socket.close(1008, 'Room unavailable');
+        }
+      }
+    }
+    sockets.delete(roomId);
+    if (options.roomManager) options.roomManager.requestClose(roomId);
+  };
+
+  const sendStateToRoom = (roomId: string): void => {
+    const map = sockets.get(roomId);
+    if (!map || map.size === 0) return;
+    let lease: RoomLease;
+    try { lease = roomAccess.acquire(roomId); }
+    catch {
+      closeRoomSockets(roomId, 'unavailable');
+      return;
+    }
+    try {
+      const store = lease.store;
+      const room = lease.room;
+      const connected = [...map.keys()].flatMap((sessionId) => {
+        const identity = store.getSession(sessionId);
+        return identity ? [identity] : [];
+      });
+      const participants = [...new Map(connected.map((identity) => [identity.participantId, identity])).values()];
+      for (const [sessionId, connections] of map) {
+        const identity = store.getSession(sessionId);
+        if (!identity) continue;
+        const snapshot = store.snapshot(identity);
+        const payload = JSON.stringify({
+          type: 'room:state', roomId: room.id, roomName: room.name, identity, participants,
+          maxUploadBytes: config.maxUploadBytes, ...snapshot,
+        });
+        for (const socket of connections) if (socket.readyState === 1) socket.send(payload);
+      }
+    } finally { lease.release(); }
   };
 
   const immutableSystemError = (): BoardCommandError => new BoardCommandError(
@@ -180,7 +294,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   );
 
   /** One-time system commit shared by WebSocket and the HTTP API. */
-  const initializeRoomSystem = (identity: Identity, input: Record<string, unknown>): void => {
+  const initializeRoomSystem = (store: RoomStore, identity: Identity, input: Record<string, unknown>): void => {
     if (store.roomSystem.fixed) throw immutableSystemError();
     if (identity.role !== 'gm') throw new BoardCommandError('Только ведущий может выбрать игровую систему.', { statusCode: 403 });
     if (Object.keys(input).some((key) => !['type', 'requestId', 'systemId', 'version', 'config'].includes(key))) {
@@ -202,7 +316,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     store.initializeSystem(module.id, module.version, systemConfig);
   };
 
-  const createDiceRoll = (identity: Identity, command: Record<string, unknown>): DiceRollEntry => {
+  const createDiceRoll = (store: RoomStore, identity: Identity, command: Record<string, unknown>): DiceRollEntry => {
     if (command.type === 'dice:free') {
       if (Object.keys(command).some((key) => !['type', 'requestId', 'count', 'sides'].includes(key))) throw new BoardCommandError('Некорректная команда броска.');
       const count = command.count;
@@ -289,11 +403,20 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     };
   };
 
+  const withContext = (request: Parameters<typeof resolveContext>[0], reply: { code: (status: number) => { send: (body: unknown) => unknown } }): RequestContext | undefined => {
+    const context = resolveContext(request);
+    if ('error' in context) {
+      reply.code(context.error).send({ error: context.message, ...(context.code ? { code: context.code } : {}) });
+      return undefined;
+    }
+    return context;
+  };
+
   app.get('/api/board', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     reply.header('Cache-Control', 'no-store');
-    return { ...store.snapshot(session.identity), maxUploadBytes: config.maxUploadBytes };
+    return { ...context.store.snapshot(context.identity), maxUploadBytes: config.maxUploadBytes };
   });
 
   /**
@@ -302,151 +425,151 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
    */
   app.put('/api/room/system', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
       ? request.body as Record<string, unknown>
       : {};
-    initializeRoomSystem(session.identity, body);
+    initializeRoomSystem(context.store, context.identity, body);
     reply.header('Cache-Control', 'no-store');
-    sendState();
-    return { system: store.roomSystem };
+    sendStateToRoom(context.room.id);
+    return { system: context.store.roomSystem };
   });
 
   app.get('/api/sheets', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     reply.header('Cache-Control', 'no-store');
-    return { sheets: store.getSheetsFor(session.identity) };
+    return { sheets: context.store.getSheetsFor(context.identity) };
   });
 
   app.get('/api/sheets/:id', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
-    const sheet = store.getSheetFor(id, session.identity);
+    const sheet = context.store.getSheetFor(id, context.identity);
     if (!sheet) return reply.code(404).send({ error: 'Лист персонажа не найден.' });
     reply.header('Cache-Control', 'no-store');
     return { sheet };
   });
 
   app.get('/api/notes', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Список заметок доступен только ведущему.' });
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Список заметок доступен только ведущему.' });
     reply.header('Cache-Control', 'no-store');
-    return { notes: store.listNotes() };
+    return { notes: context.store.listNotes() };
   });
 
   app.post('/api/notes', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может создавать только ведущий.' });
-    const input = parseNotePayload(request.body, store);
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может создавать только ведущий.' });
+    const input = parseNotePayload(request.body, context.store);
     if (!input) return reply.code(400).send({ error: 'Проверьте заголовок, текст, доступ, участников и изображения заметки.' });
     const id = randomUUID();
-    store.createNote({ id, ...input, creatorId: session.identity.participantId });
+    context.store.createNote({ id, ...input, creatorId: context.identity.participantId });
     reply.header('Cache-Control', 'no-store');
-    sendState();
-    return { note: store.getNote(id) };
+    sendStateToRoom(context.room.id);
+    return { note: context.store.getNote(id) };
   });
 
   app.get('/api/notes/:id', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
-    const note = store.getNote(id);
-    if (!note || note.noteType !== 'board' || !store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    const note = context.store.getNote(id);
+    if (!note || note.noteType !== 'board' || !context.store.canReadNote(id, context.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
     reply.header('Cache-Control', 'no-store');
     return { note };
   });
 
   app.put('/api/notes/:id', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может редактировать только ведущий.' });
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Заметки может редактировать только ведущий.' });
     const { id } = request.params as { id: string };
-    if (store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
-    const input = parseNotePayload(request.body, store);
+    if (context.store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    const input = parseNotePayload(request.body, context.store);
     if (!input) return reply.code(400).send({ error: 'Проверьте заголовок, текст, доступ, участников и изображения заметки.' });
-    store.updateNote(id, input);
+    context.store.updateNote(id, input);
     reply.header('Cache-Control', 'no-store');
-    sendState();
-    return { note: store.getNote(id) };
+    sendStateToRoom(context.room.id);
+    return { note: context.store.getNote(id) };
   });
 
   app.delete('/api/notes/:id', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять заметки может только ведущий.' });
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять заметки может только ведущий.' });
     const { id } = request.params as { id: string };
-    if (store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
-    store.deleteNote(id);
-    sendState();
+    if (context.store.getNoteType(id) !== 'board') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    context.store.deleteNote(id);
+    sendStateToRoom(context.room.id);
     return reply.code(204).send();
   });
 
   app.get('/api/personal-notes', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     reply.header('Cache-Control', 'no-store');
-    return { notes: store.listPersonalNotes(session.identity) };
+    return { notes: context.store.listPersonalNotes(context.identity) };
   });
 
   app.post('/api/personal-notes', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'player') return reply.code(403).send({ error: 'Личные заметки создают игроки.' });
-    const input = parsePersonalNotePayload(request.body, store, session.identity);
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'player') return reply.code(403).send({ error: 'Личные заметки создают игроки.' });
+    const input = parsePersonalNotePayload(request.body, context.store, context.identity);
     if (!input) return reply.code(400).send({ error: 'Проверьте название, текст и изображения личной заметки.' });
     const id = randomUUID();
-    store.createNote({
-      id, ...input, access: 'gm-only', selectedParticipantIds: [], creatorId: session.identity.participantId,
+    context.store.createNote({
+      id, ...input, access: 'gm-only', selectedParticipantIds: [], creatorId: context.identity.participantId,
       markerType: 'text', markerText: '', noteType: 'personal',
-      ownerId: session.identity.participantId, ownerName: session.identity.name,
+      ownerId: context.identity.participantId, ownerName: context.identity.name,
     });
     reply.header('Cache-Control', 'no-store');
-    sendState();
-    return { note: store.getNote(id) };
+    sendStateToRoom(context.room.id);
+    return { note: context.store.getNote(id) };
   });
 
   app.get('/api/personal-notes/:id', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
-    if (store.getNoteType(id) !== 'personal' || !store.canReadNote(id, session.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (context.store.getNoteType(id) !== 'personal' || !context.store.canReadNote(id, context.identity)) return reply.code(404).send({ error: 'Заметка не найдена.' });
     reply.header('Cache-Control', 'no-store');
-    return { note: store.getNote(id) };
+    return { note: context.store.getNote(id) };
   });
 
   app.put('/api/personal-notes/:id', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
-    if (store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
-    if (!store.canEditPersonalNote(id, session.identity)) return reply.code(403).send({ error: 'Можно редактировать только собственную личную заметку.' });
-    const input = parsePersonalNotePayload(request.body, store, session.identity);
+    if (context.store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (!context.store.canEditPersonalNote(id, context.identity)) return reply.code(403).send({ error: 'Можно редактировать только собственную личную заметку.' });
+    const input = parsePersonalNotePayload(request.body, context.store, context.identity);
     if (!input) return reply.code(400).send({ error: 'Проверьте название, текст и изображения личной заметки.' });
-    store.updatePersonalNote(id, input);
+    context.store.updatePersonalNote(id, input);
     reply.header('Cache-Control', 'no-store');
-    sendState();
-    return { note: store.getNote(id) };
+    sendStateToRoom(context.room.id);
+    return { note: context.store.getNote(id) };
   });
 
   app.delete('/api/personal-notes/:id', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
-    if (store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
-    if (!store.canEditPersonalNote(id, session.identity)) return reply.code(403).send({ error: 'Можно удалять только собственную личную заметку.' });
-    store.deleteNote(id);
-    sendState();
+    if (context.store.getNoteType(id) !== 'personal') return reply.code(404).send({ error: 'Заметка не найдена.' });
+    if (!context.store.canEditPersonalNote(id, context.identity)) return reply.code(403).send({ error: 'Можно удалять только собственную личную заметку.' });
+    context.store.deleteNote(id);
+    sendStateToRoom(context.room.id);
     return reply.code(204).send();
   });
 
@@ -456,39 +579,55 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     if (!originAllowed(request)) {
       return reply.code(403).send({ error: 'Origin not allowed.' });
     }
-    const result = authenticate(request.body, config, store);
-    if (!result) return reply.code(401).send({ error: 'Неверный код комнаты или пароль, либо ведущий уже подключён.' });
-    reply.setCookie(SESSION_COOKIE, result.sessionId, {
+    const result = authenticateRoom(request.body, roomAccess, config.sessionDays);
+    if (!result) return reply.code(401).send({ error: 'Неверный код комнаты или пароль, либо комната недоступна.' });
+    reply.setCookie(sessionCookieName(result.room.id, roomAccess.legacyCookie), result.sessionId, {
       ...sessionCookieOptions(request),
       expires: new Date(Date.now() + config.sessionDays * 24 * 60 * 60 * 1000),
     });
-    sendState();
-    return { identity: result.identity };
+    sendStateToRoom(result.room.id);
+    return {
+      identity: result.identity,
+      room: {
+        id: result.room.id,
+        name: result.room.name,
+        systemId: result.room.systemId,
+        systemVersion: result.room.systemVersion,
+      },
+    };
   });
 
   app.get('/api/session', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    return { identity: session.identity };
+    const context = withContext(request, reply);
+    if (!context) return;
+    return {
+      identity: context.identity,
+      room: { id: context.room.id, name: context.room.name, systemId: context.room.systemId, systemVersion: context.room.systemVersion },
+    };
   });
 
   app.delete('/api/session', async (request, reply) => {
     if (!originAllowed(request)) {
       return reply.code(403).send({ error: 'Origin not allowed.' });
     }
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (session) {
-      sockets.get(session.sessionId)?.forEach((socket) => {
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: 'session:ended' }));
-          socket.close();
-        }
-      });
-      store.deleteSession(session.sessionId);
-      sockets.delete(session.sessionId);
+    const resolved = resolveContext(request);
+    if ('error' in resolved) {
+      reply.clearCookie(sessionCookieName(requestedRoomId(request) ?? 'default', roomAccess.legacyCookie), sessionCookieOptions(request));
+      return reply.code(204).send();
     }
-    reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(request));
-    sendState();
+    const context = resolved;
+    const map = sockets.get(context.room.id);
+    map?.get(context.sessionId)?.forEach((socket) => {
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'session:ended' }));
+        socket.close();
+      }
+    });
+    map?.delete(context.sessionId);
+    if (map && map.size === 0) sockets.delete(context.room.id);
+    context.store.deleteSession(context.sessionId);
+    reply.clearCookie(sessionCookieName(context.room.id, roomAccess.legacyCookie), sessionCookieOptions(request));
+    sendStateToRoom(context.room.id);
     return reply.code(204).send();
   });
 
@@ -496,15 +635,15 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     config: { rateLimit: { max: 12, timeWindow: '1 minute' } },
   }, async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     try {
       const file = await request.file({ limits: { fileSize: config.maxUploadBytes, files: 1, fields: 0 } });
       if (!file || file.fieldname !== 'image') return reply.code(400).send({ error: 'Выберите файл изображения.' });
       const bytes = await file.toBuffer();
       if (file.file.truncated) return reply.code(413).send({ error: 'Файл превышает установленный лимит.' });
-      const result = await saveImageAsset(store, store.assetsDir, bytes, file.mimetype, file.filename, config.maxUploadBytes, session.identity.participantId);
-      sendState();
+      const result = await saveImageAsset(context.store, context.store.assetsDir, bytes, file.mimetype, file.filename, config.maxUploadBytes, context.identity.participantId);
+      sendStateToRoom(context.room.id);
       return { asset: result.asset, deduplicated: result.deduplicated };
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -515,48 +654,48 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
   });
 
   app.get('/api/assets/:id/usage', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Информация об использовании доступна только ведущему.' });
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Информация об использовании доступна только ведущему.' });
     const { id } = request.params as { id: string };
-    if (!ASSET_ID_PATTERN.test(id) || !store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
+    if (!ASSET_ID_PATTERN.test(id) || !context.store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
     reply.header('Cache-Control', 'no-store');
-    return { usage: store.getAssetUsage(id) };
+    return { usage: context.store.getAssetUsage(id) };
   });
 
   app.delete('/api/assets/:id', async (request, reply) => {
     if (!originAllowed(request)) return reply.code(403).send({ error: 'Origin not allowed.' });
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
-    if (session.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять изображения может только ведущий.' });
+    const context = withContext(request, reply);
+    if (!context) return;
+    if (context.identity.role !== 'gm') return reply.code(403).send({ error: 'Удалять изображения может только ведущий.' });
     const { id } = request.params as { id: string };
-    if (!ASSET_ID_PATTERN.test(id) || !store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
-    const usage = store.getAssetUsage(id);
+    if (!ASSET_ID_PATTERN.test(id) || !context.store.getAsset(id)) return reply.code(404).send({ error: 'Изображение не найдено.' });
+    const usage = context.store.getAssetUsage(id);
     if (usage.length > 0) return reply.code(409).send({ error: 'Изображение используется и не может быть удалено.', usage });
     try {
-      await deleteImageAsset(store, store.assetsDir, id);
+      await deleteImageAsset(context.store, context.store.assetsDir, id);
     } catch (error) {
       if (error instanceof AssetInUseError) return reply.code(409).send({ error: error.message, usage: error.usage });
       if (error instanceof AssetNotFoundError) return reply.code(404).send({ error: error.message });
       throw error;
     }
-    sendState();
+    sendStateToRoom(context.room.id);
     return reply.code(204).send();
   });
 
   app.get('/api/assets/:id', async (request, reply) => {
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) return reply.code(401).send({ error: 'Сессия не найдена.' });
+    const context = withContext(request, reply);
+    if (!context) return;
     const { id } = request.params as { id: string };
     if (!ASSET_ID_PATTERN.test(id)) {
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
-    const asset = store.getAsset(id);
-    if (!asset || !store.canReadAsset(id, session.identity)) {
+    const asset = context.store.getAsset(id);
+    if (!asset || !context.store.canReadAsset(id, context.identity)) {
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
     reply.type(asset.mimeType).header('Cache-Control', 'private, no-store').header('X-Content-Type-Options', 'nosniff');
-    return reply.send(createReadStream(join(store.assetsDir, id)));
+    return reply.send(createReadStream(join(context.store.assetsDir, id)));
   });
 
   app.get('/ws', { websocket: true }, (socket, request) => {
@@ -564,24 +703,40 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       socket.close(1008, 'Origin not allowed');
       return;
     }
-    const session = sessionFor(request.cookies[SESSION_COOKIE]);
-    if (!session) {
-      socket.close(1008, 'Authentication required');
-      return;
-    }
-    const connections = sockets.get(session.sessionId) ?? new Set();
+    const url = new URL(request.url, 'http://localhost');
+    const roomId = requestedRoomId({ headers: request.headers, query: Object.fromEntries(url.searchParams) })
+      ?? (roomAccess.legacyCookie ? 'default' : undefined);
+    if (!roomId) { socket.close(1008, 'Authentication required'); return; }
+    const room = roomAccess.getRoom(roomId);
+    if (!room || room.status !== 'active') { socket.close(1008, 'Room unavailable'); return; }
+    const rawToken = request.cookies[sessionCookieName(roomId, roomAccess.legacyCookie)];
+    if (!rawToken || rawToken.length > 100) { socket.close(1008, 'Authentication required'); return; }
+    let lease: RoomLease;
+    try { lease = roomAccess.acquire(roomId); }
+    catch { socket.close(1008, 'Room unavailable'); return; }
+    const sessionId = sessionDigest(rawToken);
+    const identity = lease.store.getSession(sessionId);
+    if (!identity) { lease.release(); socket.close(1008, 'Authentication required'); return; }
+
+    const map = roomSocketMap(roomId);
+    const connections = map.get(sessionId) ?? new Set();
     connections.add(socket);
-    sockets.set(session.sessionId, connections);
-    sendState();
-    const rawToken = request.cookies[SESSION_COOKIE];
+    map.set(sessionId, connections);
+    sendStateToRoom(roomId);
+
     socket.on('message', (data, isBinary) => {
+      const liveRoom = roomAccess.getRoom(roomId);
+      if (!liveRoom || liveRoom.status !== 'active') {
+        closeRoomSockets(roomId, liveRoom?.status ?? 'missing');
+        return;
+      }
       const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
       if (isBinary || bytes.byteLength > 16 * 1024) {
         socket.close(1009, 'Message too large');
         return;
       }
-      const liveSession = sessionFor(rawToken);
-      if (!liveSession) {
+      const liveIdentity = lease.store.getSession(sessionId);
+      if (!liveIdentity) {
         socket.close(1008, 'Authentication required');
         return;
       }
@@ -597,32 +752,32 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
         if (!command || typeof command !== 'object' || Array.isArray(command)) throw new BoardCommandError('Некорректная команда.');
         const input = command as Record<string, unknown>;
         if (input.type === 'dice:pbta' || input.type === 'dice:free' || input.type === 'dice:reroll') {
-          const entry = createDiceRoll(liveSession.identity, input);
-          store.saveDiceRoll(entry);
+          const entry = createDiceRoll(lease.store, liveIdentity, input);
+          lease.store.saveDiceRoll(entry);
         } else if (typeof input.type === 'string' && input.type.startsWith('sheet:')) {
-          executeSheetCommand(store, liveSession.identity, input);
+          executeSheetCommand(lease.store, liveIdentity, input);
         } else if (input.type === 'room:background:set') {
-          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может менять фон доски.');
+          if (liveIdentity.role !== 'gm') throw new BoardCommandError('Только ведущий может менять фон доски.');
           if (Object.keys(input).some((key) => !['type', 'requestId', 'background', 'scene'].includes(key))) throw new BoardCommandError('Некорректные настройки фона.');
           if (input.background !== 'black' && input.background !== 'gray') throw new BoardCommandError('Доступны только чёрный и серый фон.');
-          const scene: BoardScene = input.scene === undefined ? store.activeScene : input.scene === 'battle' ? 'battle' : input.scene === 'board' ? 'board' : (() => { throw new BoardCommandError('Недопустимая сцена.'); })();
-          if (scene === 'battle' && !store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
-          store.setBackground(scene, input.background);
+          const scene: BoardScene = input.scene === undefined ? lease.store.activeScene : input.scene === 'battle' ? 'battle' : input.scene === 'board' ? 'board' : (() => { throw new BoardCommandError('Недопустимая сцена.'); })();
+          if (scene === 'battle' && !lease.store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+          lease.store.setBackground(scene, input.background);
         } else if (input.type === 'room:scene:set') {
-          if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может переключать сцену комнаты.');
+          if (liveIdentity.role !== 'gm') throw new BoardCommandError('Только ведущий может переключать сцену комнаты.');
           if (Object.keys(input).some((key) => !['type', 'requestId', 'scene'].includes(key))) throw new BoardCommandError('Некорректная команда сцены.');
           if (input.scene !== 'board' && input.scene !== 'battle') throw new BoardCommandError('Доступны только основная доска и боевая карта.');
-          if (input.scene === 'battle' && !store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
-          store.setActiveScene(input.scene);
+          if (input.scene === 'battle' && !lease.store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+          lease.store.setActiveScene(input.scene);
         } else if (input.type === 'room:system:initialize') {
-          initializeRoomSystem(liveSession.identity, input);
+          initializeRoomSystem(lease.store, liveIdentity, input);
         } else if (input.type === 'room:system:set') {
           throw immutableSystemError();
         } else {
-          executeBoardCommand(store, liveSession.identity, command);
+          executeBoardCommand(lease.store, liveIdentity, command);
         }
         socket.send(JSON.stringify({ type: 'command:result', requestId, ok: true }));
-        sendState();
+        sendStateToRoom(roomId);
       } catch (error) {
         const known = error instanceof BoardCommandError;
         const message = known ? error.message : 'Не удалось применить изменение.';
@@ -631,10 +786,26 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     });
     socket.on('close', () => {
       connections.delete(socket);
-      if (connections.size === 0) sockets.delete(session.sessionId);
-      sendState();
+      if (connections.size === 0) {
+        map.delete(sessionId);
+        if (map.size === 0) {
+          sockets.delete(roomId);
+          if (options.roomManager) options.roomManager.requestClose(roomId);
+        }
+      }
+      lease.release();
+      sendStateToRoom(roomId);
     });
   });
+
+  /** CLI status changes are picked up without restarting the server. */
+  const statusTimer = setInterval(() => {
+    for (const roomId of [...sockets.keys()]) {
+      const room = roomAccess.getRoom(roomId);
+      if (!room || room.status !== 'active') closeRoomSockets(roomId, room?.status ?? 'missing');
+    }
+  }, 2000);
+  statusTimer.unref();
 
   app.addHook('onSend', async (_request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
@@ -659,17 +830,21 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       return reply.code(404).send({ error: 'Ресурс не найден.' });
     }
     const pathname = request.url.split('?')[0] ?? '';
+    if (pathname.startsWith('/room/') && /^[a-z0-9][a-z0-9-]{0,63}$/.test(pathname.slice('/room/'.length))) {
+      return reply.sendFile('index.html');
+    }
     if (/\.[^/]+$/.test(pathname)) return reply.code(404).type('text/plain; charset=utf-8').send('Ресурс не найден.');
     return reply.sendFile('index.html');
   });
   app.addHook('onClose', async () => {
-    const openConnections = [...sockets.values()].flatMap((connections) => [...connections]);
+    clearInterval(statusTimer);
+    const openConnections = [...sockets.values()].flatMap((map) => [...map.values()].flatMap((connections) => [...connections]));
     await Promise.all(openConnections.map((connection) => new Promise<void>((resolve) => {
       if (connection.readyState === 3) return resolve();
       connection.on('close', resolve);
       connection.close();
     })));
-    store.close();
+    if (options.roomManager) options.roomManager.close();
   });
   return app;
 }
@@ -680,7 +855,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (config.cookieSecure && !existsSync(resolve(process.cwd(), 'dist', 'index.html'))) {
       throw new Error('Frontend build not found. Run "npm run build" before starting the production server.');
     }
-    const app = await buildServer({ config });
+    let roomManager: RoomManager;
+    try {
+      const catalog = RoomCatalog.open(config.dataDir);
+      roomManager = new RoomManager({ dataDir: resolve(config.dataDir), catalog, maxOpenRooms: config.maxOpenRooms ?? 8 });
+    } catch (error) {
+      if (error instanceof CatalogNotInitializedError) throw error;
+      throw error;
+    }
+    const app = await buildServer({ config, roomManager });
     await app.listen({ host: config.host, port: config.port });
     app.log.info(`Room server listening on ${config.host}:${config.port}`);
   } catch (error) {

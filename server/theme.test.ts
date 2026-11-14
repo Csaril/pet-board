@@ -42,7 +42,7 @@ test('theme: local light/dark interface theme', async (t) => {
     assert.ok(loginBody.indexOf('setupTheme(nextIdentity.participantId)') >= 0);
     assert.ok(loginBody.indexOf('setupTheme(nextIdentity.participantId)') < loginBody.indexOf('workspace.hidden = false'));
     assert.match(clientSource, /function uiStorageKey\(participantId: string, panel: 'dice-tools' \| 'dice-history' \| 'layers' \| 'theme'\)/);
-    assert.match(clientSource, /`tabletop:ui:v1:\$\{participantId\}:\$\{panel\}`/);
+    assert.match(clientSource, /`tabletop:ui:v1:\$\{roomStorageScope\(\)\}:\$\{participantId\}:\$\{panel\}`/);
     assert.match(clientSource, /localStorage\.getItem\(uiStorageKey\(participantId, 'theme'\)\) === 'dark'/);
     assert.match(clientSource, /function setThemePreference\(theme: ThemePreference\)/);
     assert.match(clientSource, /setupParticipantUi[\s\S]*?setupTheme\(participantId\)/);

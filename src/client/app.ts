@@ -112,6 +112,28 @@ const MAX_WORLD_COORDINATE = 10_000_000;
 const MAX_ZOOM = 4;
 const MIN_ZOOM = 0.00001;
 
+function roomIdFromLocation(): string | undefined {
+  const match = /^\/room\/([a-z0-9][a-z0-9-]{0,63})\/?$/.exec(location.pathname);
+  return match?.[1];
+}
+
+let currentRoomId: string | undefined = roomIdFromLocation();
+
+function roomStorageScope(): string {
+  return currentRoomId ?? 'default';
+}
+
+/** Every room-scoped API call carries the room explicitly; the cookie alone is not proof. */
+function apiUrl(path: string): string {
+  if (!currentRoomId) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}roomId=${encodeURIComponent(currentRoomId)}`;
+}
+
+function assetUrl(assetId: string): string {
+  return apiUrl(`/api/assets/${encodeURIComponent(assetId)}`);
+}
+
 type AppIdentity = BoardStateMessage['identity'];
 interface RoomMessage extends BoardStateMessage {
   participants: RoomParticipant[];
@@ -388,7 +410,11 @@ function refreshCreateToggle(): void {
   createToggle.hidden = note.hidden && personalNote.hidden && sticker.hidden;
 }
 
-function login(nextIdentity: AppIdentity) {
+function login(nextIdentity: AppIdentity, nextRoomId?: string) {
+  if (nextRoomId) currentRoomId = nextRoomId;
+  if (currentRoomId && location.pathname !== `/room/${currentRoomId}`) {
+    history.replaceState(null, '', `/room/${encodeURIComponent(currentRoomId)}`);
+  }
   identity = nextIdentity;
   setupTheme(nextIdentity.participantId);
   loginShell.hidden = true;
@@ -403,7 +429,9 @@ function login(nextIdentity: AppIdentity) {
 function connect() {
   window.clearTimeout(reconnectTimer);
   showConnection('Подключение…', 'reconnecting');
-  const connection = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+  const wsUrl = new URL('/ws', `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`);
+  if (currentRoomId) wsUrl.searchParams.set('roomId', currentRoomId);
+  const connection = new WebSocket(wsUrl);
   socket = connection;
   connection.addEventListener('open', () => {
     reconnectDelay = 500;
@@ -488,7 +516,7 @@ async function runCommand(type: string, data: Record<string, unknown> = {}) {
 
 async function refreshBoard() {
   try {
-    const response = await fetch('/api/board', { cache: 'no-store' });
+    const response = await fetch(apiUrl('/api/board'), { cache: 'no-store' });
     if (!response.ok) return;
     const snapshot = await response.json() as BoardSnapshot;
     if (!roomState || !identity) return;
@@ -496,7 +524,7 @@ async function refreshBoard() {
   } catch { /* Reconnect status covers temporary network failure. */ }
 }
 
-function cameraStorageKey(scene: BoardScene = currentScene()) { return `tabletop-camera:${location.host}:${scene}`; }
+function cameraStorageKey(scene: BoardScene = currentScene()) { return `tabletop-camera:${roomStorageScope()}:${location.host}:${scene}`; }
 function saveCamera(scene: BoardScene = currentScene()) {
   if (!stage || !roomState) return;
   camera = { x: stage.x(), y: stage.y(), scale: stage.scaleX() };
@@ -506,8 +534,10 @@ function restoreCamera(scene: BoardScene = currentScene()) {
   camera = { x: 0, y: 0, scale: 1 };
   hasRestoredCamera = false;
   try {
-    // The main board keeps reading the legacy key from before scenes existed.
-    const legacy = scene === 'board' ? localStorage.getItem(`tabletop-camera:${location.host}`) : null;
+    // Rooms created before the multi-room layout keep reading their legacy keys.
+    const legacy = roomStorageScope() === 'default'
+      ? localStorage.getItem(scene === 'board' ? `tabletop-camera:${location.host}` : `tabletop-camera:${location.host}:${scene}`)
+      : null;
     const stored = JSON.parse(localStorage.getItem(cameraStorageKey(scene)) || legacy || 'null') as { version?: number; camera?: unknown } | null;
     if (stored?.version === 2 && isValidCamera(stored.camera, MAX_WORLD_COORDINATE * MAX_ZOOM, MIN_ZOOM, MAX_ZOOM)) {
       camera = stored.camera;
@@ -705,7 +735,7 @@ function cachedImage(assetId: string): HTMLImageElement {
   if (cached) return cached;
   const image = new Image();
   image.crossOrigin = 'use-credentials';
-  image.src = `/api/assets/${encodeURIComponent(assetId)}`;
+  image.src = assetUrl(assetId);
   image.onload = () => { if (roomState) drawObjects(); };
   image.onerror = () => showCanvasMessage('Не удалось загрузить изображение. Проверьте доступ к ресурсу.', true);
   imageCache.set(assetId, image);
@@ -1080,7 +1110,7 @@ function confirmCrop() {
 interface PanelPreference { version: 1; open: boolean; x: number | null; y: number | null }
 
 function uiStorageKey(participantId: string, panel: 'dice-tools' | 'dice-history' | 'layers' | 'theme'): string {
-  return `tabletop:ui:v1:${participantId}:${panel}`;
+  return `tabletop:ui:v1:${roomStorageScope()}:${participantId}:${panel}`;
 }
 
 function readPanelPreference(participantId: string, panel: 'dice-tools' | 'dice-history'): PanelPreference | undefined {
@@ -1186,7 +1216,7 @@ function saveSheetPanelPreference(): void {
     y: Number.isFinite(storedY) ? storedY : rect.top,
     sheetId: openSheetId ?? null,
   };
-  writeSheetPanelPreference(localStorage, identity.participantId, preference);
+  writeSheetPanelPreference(localStorage, roomStorageScope(), identity.participantId, preference);
 }
 
 function setSheetCollapsed(collapsed: boolean, persist = true): void {
@@ -1201,7 +1231,7 @@ function setSheetCollapsed(collapsed: boolean, persist = true): void {
 }
 
 function restoreSheetPanelPreference(participantId: string): void {
-  const preference = readSheetPanelPreference(localStorage, participantId);
+  const preference = readSheetPanelPreference(localStorage, roomStorageScope(), participantId);
   const oldVisibility = sheetPanel.style.visibility;
   sheetPanel.hidden = false;
   sheetPanel.style.visibility = 'hidden';
@@ -1236,14 +1266,14 @@ function saveSheetRollPanelPreference(): void {
   const rect = sheetRollPanel.getBoundingClientRect();
   const storedX = Number.parseFloat(sheetRollPanel.style.left);
   const storedY = Number.parseFloat(sheetRollPanel.style.top);
-  writeSheetRollPanelPreference(localStorage, identity.participantId,
+  writeSheetRollPanelPreference(localStorage, roomStorageScope(), identity.participantId,
     Number.isFinite(storedX) ? storedX : rect.left,
     Number.isFinite(storedY) ? storedY : rect.top);
 }
 
 function positionSheetRollPanel(useStoredPosition = true): void {
   const stored = useStoredPosition && identity
-    ? readSheetRollPanelPreference(localStorage, identity.participantId)
+    ? readSheetRollPanelPreference(localStorage, roomStorageScope(), identity.participantId)
     : undefined;
   const fallback = defaultSheetRollPosition();
   const position = stored
@@ -1256,7 +1286,7 @@ function positionSheetRollPanel(useStoredPosition = true): void {
 }
 
 function resetSheetRollPanelPosition(): void {
-  if (identity) writeSheetRollPanelPreference(localStorage, identity.participantId, null, null);
+  if (identity) writeSheetRollPanelPreference(localStorage, roomStorageScope(), identity.participantId, null, null);
   positionSheetRollPanel(false);
   raiseSheetRollPanel();
 }
@@ -1603,7 +1633,7 @@ function makeSheetPortrait(assetId: string | null, name: string, className: stri
   if (assetId) {
     const image = document.createElement('img');
     image.className = className;
-    image.src = `/api/assets/${encodeURIComponent(assetId)}`;
+    image.src = assetUrl(assetId);
     image.alt = `Портрет ${name}`;
     image.loading = 'lazy';
     return image;
@@ -1872,7 +1902,7 @@ function renderSheetPanel() {
   const systemModule = findSystemModule(sheet.systemId, sheet.systemVersion);
   sheetSystemLabel.textContent = `${systemModule?.name ?? sheet.systemId} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
   if (sheet.portraitAssetId) {
-    sheetPortrait.src = `/api/assets/${encodeURIComponent(sheet.portraitAssetId)}`;
+    sheetPortrait.src = assetUrl(sheet.portraitAssetId);
     sheetPortrait.alt = `Портрет ${sheet.characterName || sheet.assignedPlayerName || sheet.creatorName}`;
     sheetPortrait.hidden = false;
     sheetPortraitFallback.hidden = true;
@@ -2023,7 +2053,7 @@ function renderSheetPanel() {
   sheetContent.append(counters);
 
   const abilities = sheetSection('Особые способности', 'sheet-abilities-section');
-  const collapsed = readCollapsedAbilities(localStorage, identity.participantId, sheet.id);
+  const collapsed = readCollapsedAbilities(localStorage, roomStorageScope(), identity.participantId, sheet.id);
   const sortedAbilities = [...sheet.abilities].sort((left, right) => left.orderIndex - right.orderIndex);
   if (!sortedAbilities.length) {
     const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Особых способностей нет.';
@@ -2055,7 +2085,7 @@ function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbilit
   const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'sheet-ability-expand'; expand.textContent = collapsed ? '▸' : '▾'; expand.setAttribute('aria-expanded', String(!collapsed)); expand.setAttribute('aria-label', collapsed ? 'Развернуть способность' : 'Свернуть способность');
   expand.addEventListener('click', () => {
     if (!identity) return;
-    setAbilityCollapsed(localStorage, identity.participantId, sheet.id, ability.id, !collapsed);
+    setAbilityCollapsed(localStorage, roomStorageScope(), identity.participantId, sheet.id, ability.id, !collapsed);
     renderSheetPanel();
   });
   const image = makeSheetPortrait(ability.assetId, ability.name, 'sheet-ability-image');
@@ -2202,11 +2232,11 @@ function clearNoteContent() { select<HTMLElement>('#note-view-body').textContent
 function closeNoteDialog() { noteRequestSequence += 1; noteDialog.close(); openNoteId = undefined; editingNoteId = undefined; clearNoteContent(); }
 
 function noteEndpoint(kind: 'board' | 'personal', id: string): string {
-  return `${kind === 'personal' ? '/api/personal-notes' : '/api/notes'}/${encodeURIComponent(id)}`;
+  return apiUrl(`${kind === 'personal' ? '/api/personal-notes' : '/api/notes'}/${encodeURIComponent(id)}`);
 }
 
 function noteCollectionEndpoint(kind: 'board' | 'personal'): string {
-  return kind === 'personal' ? '/api/personal-notes' : '/api/notes';
+  return apiUrl(kind === 'personal' ? '/api/personal-notes' : '/api/notes');
 }
 
 async function openNote(id: string, kind: 'board' | 'personal' = 'board') {
@@ -2240,7 +2270,7 @@ async function openNote(id: string, kind: 'board' | 'personal' = 'board') {
     const body = select<HTMLElement>('#note-view-body'); body.textContent = note.body; body.hidden = false;
     applyBoardFont(body, note.fontFamily);
     const images = select<HTMLElement>('#note-view-images'); images.replaceChildren(); images.hidden = note.images.length === 0;
-    for (const asset of note.images) { const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
+    for (const asset of note.images) { const image = document.createElement('img'); image.src = assetUrl(asset.id); image.alt = asset.originalName; image.loading = 'lazy'; images.append(image); }
     select<HTMLButtonElement>('#note-save').hidden = true;
     select<HTMLButtonElement>('#note-place-marker').hidden = kind === 'personal';
     const canEdit = kind === 'personal'
@@ -2327,7 +2357,7 @@ function renderNoteAttachments() {
   for (const id of editingAssetIds) {
     const asset = roomState?.assets?.find((entry) => entry.id === id); if (!asset) continue;
     const item = document.createElement('div'); item.className = 'note-attachment-thumb';
-    const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(id)}`; image.alt = asset.originalName; image.title = asset.originalName;
+    const image = document.createElement('img'); image.src = assetUrl(id); image.alt = asset.originalName; image.title = asset.originalName;
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Убрать из заметки'; remove.addEventListener('click', () => { editingAssetIds = editingAssetIds.filter((entry) => entry !== id); renderNoteAttachments(); });
     item.append(image, remove); selected.append(item);
   }
@@ -2343,7 +2373,7 @@ function renderAssetPicker() {
       : assetPickerMode === 'sheet-portrait' ? asset.id === selectedSheetPortraitAssetId
         : assetPickerMode === 'ability' ? asset.id === selectedAbilityAssetId
           : editingAssetIds.includes(asset.id);
-    const image = document.createElement('img'); image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = ''; image.loading = 'lazy';
+    const image = document.createElement('img'); image.src = assetUrl(asset.id); image.alt = ''; image.loading = 'lazy';
     const name = document.createElement('span'); name.textContent = asset.originalName; name.title = asset.originalName;
     label.append(input, image, name); grid.append(label);
   }
@@ -2382,7 +2412,7 @@ function setUploadRow(row: NoteUploadRow, message: string, state?: 'success' | '
 function uploadNoteAsset(file: File, onProgress: (percent: number) => void): Promise<{ asset: NonNullable<BoardSnapshot['assets']>[number]; deduplicated: boolean }> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open('POST', '/api/assets');
+    request.open('POST', apiUrl('/api/assets'));
     request.withCredentials = true;
     request.timeout = 120_000;
     request.upload.addEventListener('progress', (event) => {
@@ -2654,23 +2684,23 @@ function refreshNotesListIfVisible(): void {
 async function refreshNotesList() {
   if (identity?.role !== 'gm') return;
   try {
-    const response = await fetch('/api/notes', { cache: 'no-store' }); if (!response.ok) return;
+    const response = await fetch(apiUrl('/api/notes'), { cache: 'no-store' }); if (!response.ok) return;
     const notes = (await response.json() as { notes: NoteListItem[] }).notes; notesList.replaceChildren();
     for (const note of notes) {
       const item = document.createElement('li'); item.className = 'note-entry';
       const title = document.createElement('span'); title.className = 'note-entry-title'; title.textContent = `${note.title} · ${note.access === 'gm-only' ? 'только ведущий' : note.access === 'selected-players' ? 'выбранные игроки' : 'все игроки'}`; title.title = note.title;
       const actions = document.createElement('div'); actions.className = 'note-entry-actions';
       const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Просмотр'; open.addEventListener('click', () => void openNote(note.id));
-      const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Править'; edit.addEventListener('click', async () => { try { const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { cache: 'no-store' }); if (res.ok) openNoteEditor((await res.json() as { note: NoteRecord }).note); } catch { showCanvasMessage('Не удалось загрузить заметку.', true); } });
+      const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Править'; edit.addEventListener('click', async () => { try { const res = await fetch(apiUrl(`/api/notes/${encodeURIComponent(note.id)}`), { cache: 'no-store' }); if (res.ok) openNoteEditor((await res.json() as { note: NoteRecord }).note); } catch { showCanvasMessage('Не удалось загрузить заметку.', true); } });
       const place = document.createElement('button'); place.type = 'button'; place.textContent = note.markerId ? 'Переместить метку' : 'Поставить метку'; place.addEventListener('click', () => startNotePlacement(note.id));
-      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Удалить'; remove.addEventListener('click', async () => { if (!window.confirm(`Удалить заметку «${note.title}»?`)) return; const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' }); if (res.ok) void refreshNotesList(); });
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Удалить'; remove.addEventListener('click', async () => { if (!window.confirm(`Удалить заметку «${note.title}»?`)) return; const res = await fetch(apiUrl(`/api/notes/${encodeURIComponent(note.id)}`), { method: 'DELETE' }); if (res.ok) void refreshNotesList(); });
       actions.append(open, edit, place, remove); item.append(title, actions); notesList.append(item);
     }
   } catch { /* Keep the current list during a brief network failure. */ }
 }
 
 function activeLayerStorageKey(): string {
-  return `tabletop-active-layer:${location.host}:${currentScene()}`;
+  return `tabletop-active-layer:${roomStorageScope()}:${location.host}:${currentScene()}`;
 }
 
 function setActiveLayer(layerId: string): void {
@@ -2753,7 +2783,7 @@ function renderAssets() {
   if (limit) select<HTMLElement>('#upload-limit').textContent = `${Math.round(limit / 1024 / 1024)}`;
   for (const asset of assets) {
     const item = document.createElement('li'); item.className = 'asset-item';
-    const image = document.createElement('img'); image.className = 'asset-thumb'; image.src = `/api/assets/${encodeURIComponent(asset.id)}`; image.alt = '';
+    const image = document.createElement('img'); image.className = 'asset-thumb'; image.src = assetUrl(asset.id); image.alt = '';
     const text = document.createElement('div'); text.className = 'asset-copy';
     const name = document.createElement('div'); name.className = 'asset-name'; name.textContent = asset.originalName; name.title = asset.originalName;
     const size = document.createElement('div'); size.className = 'asset-size'; size.textContent = `${asset.width} × ${asset.height} · ${formatSize(asset.size)}`;
@@ -2803,14 +2833,14 @@ function renderAssetUsage(usage: BoardAssetUsage[]): void {
 
 async function openAssetDeleteDialog(asset: BoardAsset): Promise<void> {
   pendingAssetDeleteId = asset.id;
-  select<HTMLImageElement>('#asset-delete-thumb').src = `/api/assets/${encodeURIComponent(asset.id)}`;
+  select<HTMLImageElement>('#asset-delete-thumb').src = assetUrl(asset.id);
   select<HTMLImageElement>('#asset-delete-thumb').alt = asset.originalName;
   select<HTMLElement>('#asset-delete-name').textContent = asset.originalName;
   select<HTMLElement>('#asset-delete-message').textContent = '';
   renderAssetUsage([]);
   if (!assetDeleteDialog.open) assetDeleteDialog.showModal();
   try {
-    const response = await fetch(`/api/assets/${encodeURIComponent(asset.id)}/usage`, { cache: 'no-store' });
+    const response = await fetch(apiUrl(`/api/assets/${encodeURIComponent(asset.id)}/usage`), { cache: 'no-store' });
     const result = await response.json() as { usage?: BoardAssetUsage[]; error?: string };
     if (!response.ok) throw new Error(result.error || 'Не удалось проверить использование изображения.');
     renderAssetUsage(result.usage || []);
@@ -2826,7 +2856,7 @@ async function confirmAssetDelete(): Promise<void> {
   const button = select<HTMLButtonElement>('#asset-delete-confirm');
   button.disabled = true;
   try {
-    const response = await fetch(`/api/assets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const response = await fetch(apiUrl(`/api/assets/${encodeURIComponent(id)}`), { method: 'DELETE' });
     const result = response.status === 204 ? undefined : await response.json() as { usage?: BoardAssetUsage[]; error?: string };
     if (response.status === 409 && result?.usage?.length) {
       renderAssetUsage(result.usage);
@@ -2879,10 +2909,10 @@ form.addEventListener('submit', async (event) => {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: fields.get('name'), roomCode: fields.get('roomCode'), role: fields.get('role'), gmPassword: fields.get('gmPassword') }),
     });
-    const result = await response.json() as { identity?: AppIdentity; error?: string };
-    if (!response.ok || !result.identity) throw new Error(result.error || 'Не удалось подключиться.');
+    const result = await response.json() as { identity?: AppIdentity; room?: { id: string }; error?: string };
+    if (!response.ok || !result.identity || !result.room) throw new Error(result.error || 'Не удалось подключиться.');
     leaving = false;
-    login(result.identity);
+    login(result.identity, result.room.id);
   } catch (error) { loginMessage.textContent = error instanceof Error ? error.message : 'Не удалось подключиться.'; }
 });
 
@@ -2890,8 +2920,10 @@ select<HTMLButtonElement>('#leave').addEventListener('click', async () => {
   leaving = true;
   window.clearTimeout(reconnectTimer);
   socket?.close();
-  await fetch('/api/session', { method: 'DELETE' });
+  await fetch(apiUrl('/api/session'), { method: 'DELETE' });
   closeWorkspace('Вы вышли из комнаты.');
+  currentRoomId = undefined;
+  history.replaceState(null, '', '/');
 });
 
 select<HTMLButtonElement>('#dice-tools-toggle').addEventListener('click', () => setFloatingPanelOpen(diceToolsPanel, 'dice-tools', diceToolsPanel.hidden));
@@ -3116,7 +3148,7 @@ async function uploadFiles(files: File[]) {
       if (current.file.size > limit) continue;
       const body = new FormData(); body.append('image', current.file);
       try {
-        const response = await fetch('/api/assets', { method: 'POST', body });
+        const response = await fetch(apiUrl('/api/assets'), { method: 'POST', body });
         const result = await response.json() as { deduplicated?: boolean; error?: string };
         if (!response.ok) throw new Error(result.error || 'Не удалось загрузить файл.');
         current.result = result.deduplicated ? 'Уже есть в библиотеке (дубликат).' : 'Загружено.';
@@ -3159,11 +3191,11 @@ window.addEventListener('drop', (event) => {
 
 async function restoreSession() {
   try {
-    const response = await fetch('/api/session');
+    const response = await fetch(apiUrl('/api/session'));
     if (!response.ok) return;
-    const result = await response.json() as { identity: AppIdentity };
+    const result = await response.json() as { identity: AppIdentity; room: { id: string } };
     leaving = false;
-    login(result.identity);
+    login(result.identity, result.room.id);
   } catch { loginMessage.textContent = 'Нет соединения с сервером.'; }
 }
 
