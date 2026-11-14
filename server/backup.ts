@@ -13,11 +13,13 @@ function printUsage(): void {
     'Использование:',
     '  npm run backup -- --room <room-id>',
     '  npm run backup:list -- --room <room-id>',
-    '  npm run backup:restore -- --room <room-id> <имя> [--yes]',
+    '  npm run backup:restore -- --room <room-id> <имя> [--yes] [--accept-room-mismatch]',
     '',
     'Комната указывается всегда: резервная копия относится только к ней.',
     'Перед восстановлением остановите сервер. Приложение сначала создаст',
     'дополнительную копию текущего состояния комнаты.',
+    '--accept-room-mismatch нужен только для копии удалённой комнаты,',
+    'восстанавливаемой в новую комнату с той же системой.',
   ].join('\n'));
 }
 
@@ -26,6 +28,7 @@ interface Parsed {
   roomId?: string;
   name?: string;
   yes: boolean;
+  acceptRoomMismatch: boolean;
 }
 
 function parse(args: string[]): Parsed {
@@ -33,16 +36,18 @@ function parse(args: string[]): Parsed {
   let roomId: string | undefined;
   let name: string | undefined;
   let yes = false;
+  let acceptRoomMismatch = false;
   const positional: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index]!;
     if (value === '--yes') { yes = true; continue; }
+    if (value === '--accept-room-mismatch') { acceptRoomMismatch = true; continue; }
     if (value === '--room') { roomId = rest[index + 1]; index += 1; continue; }
     if (value.startsWith('--room=')) { roomId = value.slice('--room='.length); continue; }
     positional.push(value);
   }
   if (positional[0]) name = positional[0];
-  return { command, roomId, name, yes };
+  return { command, roomId, name, yes, acceptRoomMismatch };
 }
 
 async function confirm(prompt: string): Promise<boolean> {
@@ -89,7 +94,9 @@ try {
     } else {
       const backupPath = resolveBackupDirectory(roomDir, parsed.name);
       const verified = await verifyBackup(backupPath);
-      if (verified.roomId && verified.roomId !== room.id) throw new Error(`Копия принадлежит комнате ${verified.roomId}, а не ${room.id}.`);
+      if (!parsed.acceptRoomMismatch && verified.roomId && verified.roomId !== room.id) {
+        throw new Error(`Копия принадлежит комнате ${verified.roomId}, а не ${room.id}. Для копии удалённой комнаты добавьте --accept-room-mismatch.`);
+      }
       if (verified.systemId && (verified.systemId !== room.systemId || verified.systemVersion !== room.systemVersion)) {
         throw new Error('Системная принадлежность копии не совпадает с целевой комнатой.');
       }
@@ -101,7 +108,7 @@ try {
         console.log('Восстановление отменено.');
       } else {
         const result = await restoreBackup(roomDir, room.name, parsed.name, {
-          roomId: room.id,
+          ...(parsed.acceptRoomMismatch ? { allowRoomMismatch: true } : { roomId: room.id }),
           systemId: room.systemId,
           systemVersion: room.systemVersion,
         });

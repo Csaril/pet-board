@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
-import { RoomAdminError, archiveRoom, createRoom, initializeDefaultRoom, openCatalogForAdmin, setRoomStatus } from './room-admin.js';
+import { RoomAdminError, archiveRoom, createRoom, deleteRoom, initializeDefaultRoom, openCatalogForAdmin, setRoomStatus } from './room-admin.js';
 import { statusLabel } from './room-manager.js';
 
 interface ParsedArguments {
@@ -88,6 +88,18 @@ async function confirm(prompt: string): Promise<boolean> {
   }
 }
 
+/** Destructive action: the exact room id must be typed unless --yes is used. */
+async function confirmDeletion(roomId: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const line = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await line.question(`Удалить комнату ${roomId} безвозвратно? Введите ID комнаты: `)).trim();
+    return answer === roomId;
+  } finally {
+    line.close();
+  }
+}
+
 function printUsage(): void {
   console.log([
     'Управление игровыми комнатами:',
@@ -97,10 +109,13 @@ function printUsage(): void {
     '  npm run rooms:disable -- <room-id>',
     '  npm run rooms:enable -- <room-id>',
     '  npm run rooms:archive -- <room-id>',
+    '  npm run rooms:delete -- <room-id> [--force] [--yes] [--no-backup]',
     '',
     'Пароль ведущего вводится скрыто в терминале. При запуске без TTY',
     'передайте его одной строкой в stdin.',
     'Код комнаты показывается только один раз при создании.',
+    'Удаление активной или отключённой комнаты требует --force; финальная',
+    'копия по умолчанию сохраняется в data/deleted-rooms/.',
   ].join('\n'));
 }
 
@@ -158,6 +173,36 @@ async function main(): Promise<void> {
     } finally {
       catalog.close();
     }
+    return;
+  }
+
+  if (command === 'delete') {
+    const roomId = positional[0];
+    if (!roomId) throw new RoomAdminError('Укажите ID комнаты: npm run rooms:delete -- <room-id>');
+    const catalog = openCatalogForAdmin(config.dataDir);
+    let room;
+    try { room = catalog.getRoom(roomId); } finally { catalog.close(); }
+    if (!room) throw new RoomAdminError(`Комната ${roomId} не найдена.`);
+    const force = flags.has('force');
+    if (room.status !== 'archived' && !force) {
+      throw new RoomAdminError(
+        `Комната ${room.id} не архивирована. Сначала выполните npm run rooms:archive -- ${room.id} или добавьте --force.`,
+      );
+    }
+    const keepBackup = !flags.has('no-backup');
+    let confirmed = flags.has('yes');
+    if (!confirmed) confirmed = await confirmDeletion(room.id);
+    if (!confirmed) {
+      console.log('Удаление отменено.');
+      return;
+    }
+    const result = await deleteRoom({ dataDir: config.dataDir, roomId: room.id, force, keepBackup });
+    console.log(`Комната ${result.room.id} удалена из каталога.`);
+    console.log(`  Название: ${result.room.name}`);
+    if (result.preservedBackup) console.log(`  Финальная копия: ${result.preservedBackup}`);
+    else if (!keepBackup) console.log('  Финальная копия не создавалась (--no-backup).');
+    if (result.preservedRoot) console.log(`  Сохранённые копии: ${result.preservedRoot}`);
+    if (result.leftoverDirectory) console.log(`  Каталог не удалён полностью: ${result.leftoverDirectory}`);
     return;
   }
 

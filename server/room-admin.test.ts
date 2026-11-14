@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { RoomCatalog } from './catalog.js';
 import { listBackups, verifyBackup } from './backup-lib.js';
-import { adminRoomDirectory, archiveRoom, createRoom, initializeDefaultRoom, setRoomStatus } from './room-admin.js';
+import { adminRoomDirectory, archiveRoom, createRoom, deleteRoom, initializeDefaultRoom, setRoomStatus } from './room-admin.js';
 import { RoomManager, RoomUnavailableError } from './room-manager.js';
 import { RoomStore } from './store.js';
 
@@ -158,6 +158,105 @@ test('room admin: defaults are migrated idempotently and new rooms are atomic', 
       const archived = RoomCatalog.open(dataDir);
       try { assert.equal(archived.getRoom('default')?.status, 'archived'); } finally { archived.close(); }
       assert.match(cli(dataDir, ['enable', 'default']).stderr, /нельзя включить/);
+    });
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('room deletion keeps a final backup outside the deleted directory', async (t) => {
+  const dataDir = tempDir();
+  try {
+    RoomCatalog.initialize(dataDir).close();
+    const created = await createRoom({ dataDir, name: 'Delete me', systemId: 'pbta-2d6', gmPassword: 'password-12345' });
+    const directory = adminRoomDirectory(dataDir, created.room.id);
+    const store = new RoomStore(directory, 'Delete me');
+    store.createLayer('Keep in backup', 'all-players');
+    store.close();
+
+    await t.test('1. A non-archived room is refused without force or archive', async () => {
+      await assert.rejects(() => deleteRoom({ dataDir, roomId: created.room.id }), /не архивирована/);
+      assert.equal(existsSync(directory), true);
+      const catalog = RoomCatalog.open(dataDir);
+      try { assert.ok(catalog.getRoom(created.room.id)); } finally { catalog.close(); }
+    });
+
+    await t.test('2. Unknown and invalid identifiers are rejected', async () => {
+      await assert.rejects(() => deleteRoom({ dataDir, roomId: 'missing-room', force: true }), /не найдена/);
+      await assert.rejects(() => deleteRoom({ dataDir, roomId: '../escape', force: true }), /не найдена/);
+    });
+
+    await t.test('3. Archived rooms are deleted with backups preserved in data/deleted-rooms', async () => {
+      const archived = await archiveRoom(dataDir, created.room.id);
+      assert.equal(archived.room.status, 'archived');
+      const result = await deleteRoom({ dataDir, roomId: created.room.id });
+      assert.equal(result.room.id, created.room.id);
+      assert.equal(existsSync(directory), false);
+      assert.ok(result.preservedRoot);
+      assert.ok(result.preservedBackup);
+      assert.ok(result.preservedBackup!.startsWith(result.preservedRoot!));
+
+      const catalog = RoomCatalog.open(dataDir);
+      try {
+        assert.equal(catalog.getRoom(created.room.id), undefined);
+        assert.equal(catalog.findRoomByCode(created.code), undefined);
+        assert.equal(catalog.listRooms().length, 0);
+      } finally { catalog.close(); }
+
+      const record = JSON.parse(readFileSync(join(result.preservedRoot!, 'room.json'), 'utf8')) as Record<string, unknown>;
+      assert.equal(record.id, created.room.id);
+      assert.equal(record.name, 'Delete me');
+      assert.equal(record.systemId, 'pbta-2d6');
+      assert.equal(record.statusAtDeletion, 'archived');
+
+      const backups = await listBackups(result.preservedRoot!);
+      assert.ok(backups.some((backup) => backup.name === archived.backup));
+      const finalName = result.preservedBackup!.split('/').pop()!;
+      assert.ok(backups.some((backup) => backup.name === finalName));
+      const verified = await verifyBackup(backups.find((backup) => backup.name === finalName)!.path);
+      assert.equal(verified.roomId, created.room.id);
+      assert.equal(verified.systemId, 'pbta-2d6');
+    });
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('rooms CLI deletes an active room only with force and confirmation', async (t) => {
+  const dataDir = tempDir();
+  try {
+    RoomCatalog.initialize(dataDir).close();
+    const created = await createRoom({ dataDir, name: 'CLI delete', systemId: 'nechronica', gmPassword: 'password-12345' });
+    const directory = adminRoomDirectory(dataDir, created.room.id);
+
+    await t.test('1. Without --yes the non-TTY CLI cancels deletion', () => {
+      const cancel = cli(dataDir, ['delete', created.room.id, '--force']);
+      assert.equal(cancel.status, 0, cancel.stderr);
+      assert.match(cancel.stdout, /Удаление отменено/);
+      assert.equal(existsSync(directory), true);
+    });
+
+    await t.test('2. An active room without --force is refused', () => {
+      const refused = cli(dataDir, ['delete', created.room.id, '--yes']);
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /--force/);
+      assert.equal(existsSync(directory), true);
+    });
+
+    await t.test('3. --force --yes removes the room and keeps a backup copy', () => {
+      const removed = cli(dataDir, ['delete', created.room.id, '--force', '--yes']);
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.match(removed.stdout, /удалена из каталога/);
+      assert.match(removed.stdout, /Финальная копия/);
+      assert.equal(existsSync(directory), false);
+      const catalog = RoomCatalog.open(dataDir);
+      try {
+        assert.equal(catalog.getRoom(created.room.id), undefined);
+        assert.equal(catalog.findRoomByCode(created.code), undefined);
+      } finally { catalog.close(); }
+      const preserved = readdirSync(join(dataDir, 'deleted-rooms'));
+      assert.equal(preserved.length, 1);
+      assert.ok(existsSync(join(dataDir, 'deleted-rooms', preserved[0]!, 'backups')));
     });
   } finally {
     rmSync(dataDir, { recursive: true, force: true });

@@ -20,6 +20,7 @@
     "rooms:disable": "node dist-server/server/rooms.js disable",
     "rooms:enable": "node dist-server/server/rooms.js enable",
     "rooms:archive": "node dist-server/server/rooms.js archive",
+    "rooms:delete": "node dist-server/server/rooms.js delete",
     "catalog:backup": "node dist-server/server/catalog-cli.js backup",
     "catalog:list": "node dist-server/server/catalog-cli.js list",
     "catalog:restore": "node dist-server/server/catalog-cli.js restore",

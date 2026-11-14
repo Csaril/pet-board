@@ -53,6 +53,8 @@ export interface RestoreExpectation {
   roomId?: string;
   systemId?: string | null;
   systemVersion?: string | null;
+  /** Allows restoring a backup of a deleted room into a newly created one. */
+  allowRoomMismatch?: boolean;
 }
 
 export class BackupRoomMismatchError extends Error {
@@ -314,7 +316,7 @@ export async function restoreBackup(
 ): Promise<{ safetyBackup: string }> {
   const backupPath = resolveBackupDirectory(roomDir, name);
   const verified = await verifyBackup(backupPath);
-  if (expected.roomId && verified.roomId && expected.roomId !== verified.roomId) {
+  if (!expected.allowRoomMismatch && expected.roomId && verified.roomId && expected.roomId !== verified.roomId) {
     throw new BackupRoomMismatchError(`Копия принадлежит комнате ${verified.roomId}, а не ${expected.roomId}.`);
   }
   if (expected.systemId && verified.systemId && (expected.systemId !== verified.systemId || expected.systemVersion !== verified.systemVersion)) {

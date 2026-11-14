@@ -317,4 +317,13 @@ export class RoomCatalog {
     this.db.prepare('UPDATE rooms SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, roomId);
     return this.getRoom(roomId)!;
   }
+
+  /** Removes the discovery/auth record. Game data lives outside the catalog. */
+  deleteRoom(roomId: string): CatalogRoom {
+    assertValidRoomId(roomId);
+    const room = this.getRoom(roomId);
+    if (!room) throw new Error(`Комната ${roomId} не найдена.`);
+    this.db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
+    return room;
+  }
 }

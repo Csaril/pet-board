@@ -155,6 +155,18 @@ test('room backup manifests carry room and system identity and restore verifies 
       () => restoreBackup(dataDir, roomName, backup.name, { roomId: 'room-a', systemId: 'nechronica', systemVersion: '1.0.0' }),
       /Системная принадлежность/,
     );
+    await assert.rejects(
+      () => restoreBackup(dataDir, roomName, backup.name, {
+        roomId: 'room-b', systemId: 'nechronica', systemVersion: '1.0.0', allowRoomMismatch: true,
+      }),
+      /Системная принадлежность/,
+    );
+
+    // A deleted room's backup can be restored into a new room of the same system.
+    const mismatched = await restoreBackup(dataDir, roomName, backup.name, {
+      roomId: 'room-b', systemId: 'pbta-2d6', systemVersion: '1.0.0', allowRoomMismatch: true,
+    });
+    assert.match(mismatched.safetyBackup, /^pre-restore-/);
 
     const changed = new RoomStore(dataDir, roomName);
     changed.updateNote('note-1', { title: 'Changed', body: '', access: 'gm-only', selectedParticipantIds: [], assetIds: [], markerType: 'text', markerText: '', fontFamily: 'default' });
