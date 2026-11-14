@@ -1,9 +1,10 @@
 # Многокомнатная архитектура Tabletop Board
 
 Статус документа: **проект, не реализовано** в части нескольких комнат. Реализованы
-подготовительные этапы 1–2: исправление вложенного меню боевой карты и однократное
-закрепление игровой системы за существующей единственной комнатой. Многокомнатное
-хранение, каталог комнат, CLI и отложенная загрузка модулей остаются проектом.
+подготовительные этапы 1–3: боевая карта как возможность Nechronica, однократное
+закрепление игровой системы за существующей единственной комнатой и изоляция данных
+комнаты в `data/rooms/default/`. Многокомнатное хранение, каталог комнат, CLI комнат
+и отложенная загрузка модулей остаются проектом.
 
 Документ фиксирует текущее состояние, аудит загрузки системных модулей, сравнение
 вариантов хранения и поэтапный план перехода. Он не описывает уже существующую
@@ -17,13 +18,20 @@
 - Параметры комнаты берутся из `.env`: `ROOM_NAME`, `ROOM_CODE`, `GM_PASSWORD`.
 - `AppConfig` содержит `roomName`, `roomCode`, `gmPassword`; аутентификация сравнивает
   введённые значения с конфигом.
-- `RoomStore` открывает `dataDir/room.sqlite`; ресурсы лежат в `dataDir/assets`;
-  резервные копии — в `dataDir/backups`.
+- `RoomStore` получает **каталог конкретной комнаты**; в текущей сборке это
+  `data/rooms/default/`, а глобальный `APP_DATA_DIR` остаётся корнем приложения.
+  База лежит в `<roomDir>/room.sqlite`, ресурсы — в `<roomDir>/assets`, копии — в
+  `<roomDir>/backups`. Постоянный ID `default` записан в `data/storage.json`.
+- Старая раскладка `data/room.sqlite` + `data/assets` + `data/backups` не
+  открывается сервером: требуется однократная команда `npm run room:migrate`.
 - Кука `tb_session` содержит непрозрачный токен, сервер хранит только его SHA-256
   (`sessionDigest`) в таблице `sessions`.
-- `sessions.id` одновременно является `participantId`. На этот ID ссылаются
-  `character_sheets.assigned_player_id`, `notes.owner_id`, `asset_uploaders.participant_id`,
-  `dice_rolls.author_id/actor_id`.
+- Участник и сессия разделены: `participants(id, name, role)` — стабильная
+  сущность, `sessions(id, participant_id, expires_at)` — браузерный вход. На
+  `participants.id` ссылаются `character_sheets.assigned_player_id`,
+  `notes.owner_id`, `asset_uploaders.participant_id`, `dice_rolls.author_id/actor_id`.
+  Один участник может иметь несколько сессий; старые `sessions.id` сохранены как
+  `participants.id`.
 - Система комнаты закрепляется один раз. Новые поля `room.system_id`,
   `room.system_version`, `room.module_config_json`, `room.system_fixed` заменяют
   изменяемую пару `active_system_id/version`. Одноразовая команда —
@@ -42,7 +50,8 @@
 | Таблица | Назначение | Ключевые связи |
 | --- | --- | --- |
 | `room` | единственная строка `id = 1`: имя, фон, сцена, закреплённая система | — |
-| `sessions` | сессии/участники | `id` = `participantId` |
+| `sessions` | браузерные сессии | `participant_id` (`CASCADE`), `expires_at` |
+| `participants` | стабильные участники комнаты | `name`, `role` |
 | `dice_rolls` | последние 10 бросков (общая история) | `author_id`, `actor_id`, `character_id`, `ability_*`, `system_id/version` |
 | `board_layers` | слои основной доски и боя | `scene` |
 | `assets` | библиотека изображений | `UNIQUE(sha256, mime_type)` |
@@ -61,10 +70,10 @@
 
 ### Существующий backup/restore
 
-`server/backup-lib.ts` копирует `room.sqlite` и `assets/` в `dataDir/backups/<name>`,
+`server/backup-lib.ts` копирует `room.sqlite` и `assets/` в `<roomDir>/backups/<name>`,
 манифест `version: 1` содержит имя комнаты и счётчики. Restore заменяет файлы в
-`dataDir`. Всё это уже привязано к одному `dataDir`, поэтому при переходе на
-`data/rooms/<room-id>/` те же функции естественно становятся комнатными.
+`<roomDir>`. Старые копии в формате `version: 1` остаются совместимыми и после
+миграции лежат в `data/rooms/default/backups/`.
 
 ---
 
@@ -113,7 +122,7 @@
 
 Плюсы:
 - Изоляция на уровне файла: забытый `WHERE room_id = ?` не может отдать чужие данные.
-- `RoomStore` уже принимает `dataDir`; достаточно передавать каталог комнаты.
+- `RoomStore` уже принимает каталог комнаты (`roomDir`); достаточно передать ему каталог другой комнаты.
 - Backup/restore, удаление и перенос комнаты — операции над каталогом.
 - Ресурсы и резервные копии лежат рядом с БД комнаты.
 - Падение/повреждение одной БД не блокирует остальные комнаты.
@@ -144,6 +153,10 @@
 `assets/`, `backups/`. Он лучше соответствует текущему коду, даёт сильную изоляцию
 и позволяет сохранить существующие backup/restore и `RoomStore` с минимальными
 изменениями. Глобальную дедупликацию ресурсов не вводить в первой версии.
+
+Этап 3 реализовал левую часть схемы без каталога: единственная комната имеет
+постоянный ID `default`, который хранится в `data/storage.json`. Каталог комнат
+сможет сослаться на этот же ID и каталог без повторного переноса базы.
 
 ---
 
@@ -179,9 +192,12 @@ CREATE TABLE rooms (
 
 ### 4.2 Комната
 
-`data/rooms/<room-id>/room.sqlite` — все игровые данные. Уже реализовано в
-единственной комнате и переносится как есть:
+`data/rooms/default/room.sqlite` — все игровые данные. Изоляция каталога и
+разделение участников уже выполнены в единственной комнате:
 
+- `participants(id, name, role, created_at)` и
+  `sessions(id, participant_id REFERENCES participants(id) ON DELETE CASCADE,
+  expires_at, created_at)`. Старые ID участников сохранены при миграции.
 - `room.system_id`, `room.system_version`, `room.module_config_json`,
   `room.system_fixed`; триггеры `room_system_immutable`,
   `room_system_fixed_immutable`, `room_legacy_system_immutable`,
@@ -194,10 +210,7 @@ CREATE TABLE rooms (
 Остаётся добавить при переходе на несколько комнат:
 
 - `room_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)`.
-- `participants(id TEXT PRIMARY KEY, name TEXT, role TEXT, created_at TEXT)`,
-  отдельно от `sessions(id TEXT PRIMARY KEY, participant_id TEXT, token_hash TEXT, ...)`.
-  Это устраняет текущую связку «ID сессии = ID участника», из-за которой нельзя
-  безопасно инвалидировать сессии.
+- `rooms/<id>/room-config.json` с кодом/именем/секретом комнаты вместо `.env`.
 - `payload_json` для листов только если понадобится формат, не выражаемый
   текущими колонками.
 
@@ -304,19 +317,41 @@ CLI работает с теми же модулями каталога/хран
 - Готово: `systemId/version` нельзя изменить ни командой, ни обычным UPDATE;
   данные и ID сохраняются.
 
-### Этап 3. Изоляция данных комнаты
+### Этап 3. Изоляция данных комнаты (выполнено)
 
-Файлы: `server/store.ts`, `server/assets.ts`, `server/index.ts`,
-`server/backup-lib.ts`, `server/sheets.ts`, `src/client/app.ts`.
+Файлы: `server/room-storage.ts` (новый), `server/room-migrate.ts` (новый),
+`server/store.ts`, `server/assets.ts`, `server/index.ts`, `server/auth.ts`,
+`server/backup-lib.ts`, `server/backup.ts`, `server/sheets.ts`,
+`src/modules/registry.ts`, `src/modules/system/*/module.ts`, `src/shared/board.ts`,
+`src/client/app.ts`, `package.json` и тесты.
 
-- БД: `participants`, `sessions.participant_id`, `room_schema_migrations`;
-  `dice_rolls.system_id/version`.
-- Ресурсы: пути `rooms/<id>/assets`; проверка принадлежности перед выдачей.
-- WS: ключи `roomId + sessionId`.
-- Риски: ID участников; ссылки на ресурсы; удаление.
-- Тесты: доступ к чужому asset ID → 404; удаление занятого ресурса; листы/заметки
-  только своей комнаты; броски не смешиваются; рассылка не уходит чужим сокетам.
-- Готово: ни один запрос не может вернуть данные другой комнаты.
+- БД: `participants`, `sessions.participant_id`; старые `sessions.id` стали
+  `participants.id`. Один участник может иметь несколько сессий.
+- Хранилище: `data/rooms/default/{room.sqlite,assets,backups}`; постоянный ID
+  `default` и версия раскладки — в `data/storage.json`. `APP_DATA_DIR` остаётся
+  корнем. Сервер отказывается стартовать со старой раскладкой.
+- Миграция: `npm run room:migrate` при остановленном сервере. Создаёт полную
+  копию `data/`, переносит БД через SQLite backup API, копирует assets и backups,
+  проверяет `integrity_check`, `foreign_key_check`, количество строк, размеры и
+  SHA-256, открывает `RoomStore` и создаёт проверочную копию. Маркер пишется
+  последним; старые файлы не удаляются. Повторный запуск идемпотентен.
+- Ресурсы: `RoomStore.assetsDir` и `RoomStore.backupsDir` принадлежат экземпляру;
+  SHA-256-дедупликация и проверка ссылок — в пределах комнаты.
+- WS: соединения по-прежнему ключуются `sessionId`, но рассылка и `participants`
+  дедуплицируются по `participantId`; закрытие одной сессии не затрагивает другие.
+- Боевая карта: `capabilities.battleMap` в `SystemModuleDescriptor`; Nechronica —
+  `true`, PbtA — `false`. Сервер проверяет capability через `RoomStore`, а не
+  доверяет клиентскому `systemId`/полям команды. Старая PbtA-сцена `battle`
+  переводится на `board` при открытии, данные сцены сохраняются.
+- Не реализовано намеренно: `catalog.sqlite`, CLI комнат, многокомнатная cookie-
+  модель и авторизация, LRU, динамическая загрузка модулей, перенос листов между
+  комнатами. `ROOM_CODE`, `GM_PASSWORD`, `ROOM_NAME` остаются в `.env`.
+- Тесты: `server/room-store.test.ts`, `server/participants.test.ts`,
+  `server/room-storage.test.ts`, `server/battle-capability.test.ts` и обновлённые
+  регрессионные наборы.
+- Готово для следующего этапа: можно создать второй `RoomStore` с другим каталогом
+  без изменения глобальных настроек; маршрутизация нескольких комнат ещё не
+  реализована.
 
 ### Этап 4. Несколько комнат на одном сервере
 
@@ -349,7 +384,7 @@ CLI работает с теми же модулями каталога/хран
 - Тесты: модуль не грузится до входа; грузится только нужная система; две
   комнаты одной системы используют один экземпляр; отсутствующая версия даёт
   понятную ошибку.
-- Готово: начальный чанк не содержит кода систем; PbtA/Nehronica грузятся по
+- Готово: начальный чанк не содержит кода систем; PbtA/Nechronica грузятся по
   требованию.
 
 ### Этап 6. Перенос существующей комнаты и backup/restore
@@ -421,8 +456,10 @@ CLI работает с теми же модулями каталога/хран
 
 ## 7. Риски и открытые вопросы
 
-1. **ID сессии = ID участника.** Критично для миграции. Без `participants`
-   инвалидирование сессий ломает назначения листов, заметки и загрузчиков.
+1. **ID сессии больше не равен ID участника (решено на этапе 3).** Старые
+   `sessions.id` перенесены в `participants.id`, поэтому назначения листов,
+   заметки и загрузчики сохранили ссылки. При дальнейших миграциях нельзя
+   пересоздавать participant ID; новые сессии получают собственные ID.
 2. **Короткий код комнаты.** Нужен HMAC с секретом сервера и rate limit;
    обычный хеш перебирается. Смена кода должна быть явной операцией.
 3. **Секреты в `.env`.** После перехода `.env` не должен содержать комнатных

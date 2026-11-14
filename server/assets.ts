@@ -23,17 +23,13 @@ interface AssetDeleteOperations {
   unlink?: (path: string) => Promise<void>;
 }
 
-function assetsDirectory(dataDir: string): string {
-  return resolve(dataDir, 'assets');
-}
-
 function assertAssetId(id: string): void {
   if (!ASSET_ID_PATTERN.test(id)) throw new AssetStorageError('Некорректный идентификатор изображения.');
 }
 
-function originalAssetPath(dataDir: string, id: string): string {
+function originalAssetPath(assetsDir: string, id: string): string {
   assertAssetId(id);
-  const directory = assetsDirectory(dataDir);
+  const directory = resolve(assetsDir);
   const path = resolve(directory, id);
   if (dirname(path) !== directory) throw new AssetStorageError('Путь к изображению находится вне хранилища.');
   return path;
@@ -46,8 +42,8 @@ function safeAssetFile(directory: string, id: string, name: string): string | un
   return path;
 }
 
-async function listAssetFiles(dataDir: string, id: string): Promise<Array<{ name: string; path: string }>> {
-  const directory = assetsDirectory(dataDir);
+async function listAssetFiles(assetsDir: string, id: string): Promise<Array<{ name: string; path: string }>> {
+  const directory = resolve(assetsDir);
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -72,17 +68,17 @@ async function listAssetFiles(dataDir: string, id: string): Promise<Array<{ name
  */
 export async function deleteImageAsset(
   store: RoomStore,
-  dataDir: string,
+  assetsDir: string,
   assetId: string,
   operations: AssetDeleteOperations = {},
 ): Promise<void> {
-  originalAssetPath(dataDir, assetId);
+  originalAssetPath(assetsDir, assetId);
   const asset = store.getAsset(assetId);
   if (!asset) throw new AssetNotFoundError('Изображение не найдено.');
   const usage = store.getAssetUsage(assetId);
   if (usage.length > 0) throw new AssetInUseError(usage);
 
-  const files = await listAssetFiles(dataDir, assetId);
+  const files = await listAssetFiles(assetsDir, assetId);
   const suffix = `.deleting-${randomUUID()}`;
   const staged: Array<{ name: string; original: string; temporary: string }> = [];
   const restoreStaged = async (): Promise<void> => {
@@ -138,7 +134,7 @@ export async function deleteImageAsset(
 
 export async function saveImageAsset(
   store: RoomStore,
-  dataDir: string,
+  assetsDir: string,
   bytes: Buffer,
   claimedMime: string,
   originalName: string,
@@ -159,7 +155,7 @@ export async function saveImageAsset(
     id: randomUUID(), sha256, mimeType: info.mimeType, originalName: safeName,
     size: bytes.length, width: info.width, height: info.height,
   } satisfies Omit<BoardAsset, 'createdAt'>;
-  const assetDir = assetsDirectory(dataDir);
+  const assetDir = resolve(assetsDir);
   await mkdir(assetDir, { recursive: true, mode: 0o700 });
   await chmod(assetDir, 0o700);
   const filePath = join(assetDir, asset.id);

@@ -12,6 +12,7 @@ import type WebSocket from 'ws';
 import type { BoardFontFamily, BoardScene, NoteAccess } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { authenticate, SESSION_COOKIE, sessionDigest } from './auth.js';
+import { resolveRoomDirectory } from './room-storage.js';
 import { executeBoardCommand, BoardCommandError, ROOM_SYSTEM_IMMUTABLE, SYSTEM_MISMATCH } from './board.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { AssetInUseError, AssetNotFoundError, deleteImageAsset, saveImageAsset, UnsupportedImageError } from './assets.js';
@@ -24,6 +25,8 @@ import { executeSheetCommand } from './sheets.js';
 
 const COOKIE_PATH = '/';
 const ASSET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Migrated participants keep their old 64-hex ID; new participants are UUIDs. */
+const PARTICIPANT_ID_PATTERN = /^(?:[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 function parseNotePayload(input: unknown, store: RoomStore): { title: string; body: string; access: NoteAccess; selectedParticipantIds: string[]; assetIds: string[]; markerType: 'text' | 'image'; markerText: string; markerAssetId?: string; fontFamily: BoardFontFamily } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -32,7 +35,7 @@ function parseNotePayload(input: unknown, store: RoomStore): { title: string; bo
   if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 120) return undefined;
   if (typeof body.body !== 'string' || body.body.length > 20_000) return undefined;
   if (body.access !== 'gm-only' && body.access !== 'all-players' && body.access !== 'selected-players') return undefined;
-  if (!Array.isArray(body.selectedParticipantIds) || body.selectedParticipantIds.length > 6 || body.selectedParticipantIds.some((id) => typeof id !== 'string' || !/^[0-9a-f]{64}$/i.test(id))) return undefined;
+  if (!Array.isArray(body.selectedParticipantIds) || body.selectedParticipantIds.length > 6 || body.selectedParticipantIds.some((id) => typeof id !== 'string' || !PARTICIPANT_ID_PATTERN.test(id))) return undefined;
   const selectedParticipantIds = [...new Set(body.selectedParticipantIds as string[])];
   if (selectedParticipantIds.length !== body.selectedParticipantIds.length) return undefined;
   if (body.access === 'selected-players' && (!selectedParticipantIds.length || selectedParticipantIds.some((id) => !store.isPlayerParticipant(id)))) return undefined;
@@ -122,7 +125,7 @@ function isAllowedOrigin(
 
 export async function buildServer(options?: { config?: AppConfig; store?: RoomStore; logger?: boolean; randomInt?: (min: number, max: number) => number }): Promise<FastifyInstance> {
   const config = options?.config ?? loadConfig();
-  const store = options?.store ?? new RoomStore(config.dataDir, config.roomName);
+  const store = options?.store ?? new RoomStore(resolveRoomDirectory(config.dataDir), config.roomName);
   const app = Fastify({ logger: options?.logger ?? true, bodyLimit: config.maxUploadBytes + 1024 * 1024, trustProxy: config.trustProxy === true });
   const originAllowed = (request: { headers: Record<string, string | string[] | undefined>; protocol: string }): boolean =>
     isAllowedOrigin(request.headers.origin, request.headers, request.protocol, config);
@@ -155,10 +158,13 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     secure: config.cookieSecure && requestIsSecure(request),
   });
   const sendState = (): void => {
-    const participants = [...sockets.keys()].flatMap((sessionId) => {
+    // Several sessions may belong to one participant; the room exposes each
+    // person once, even when they are connected from two browsers.
+    const connected = [...sockets.keys()].flatMap((sessionId) => {
       const identity = store.getSession(sessionId);
       return identity ? [identity] : [];
     });
+    const participants = [...new Map(connected.map((identity) => [identity.participantId, identity])).values()];
     for (const [sessionId, connections] of sockets) {
       const identity = store.getSession(sessionId);
       if (!identity) continue;
@@ -250,7 +256,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       actor = { participantId: original.actorId, name: original.actorName, role: 'player' };
     } else if (identity.role === 'gm') {
       if (typeof command.actorId !== 'string' || !store.isPlayerParticipant(command.actorId)) throw new BoardCommandError('Выберите игрока, за которого выполняется бросок.');
-      const target = store.getSession(command.actorId);
+      const target = store.getParticipant(command.actorId);
       if (!target || target.role !== 'player') throw new BoardCommandError('Выбранный игрок больше не подключён.');
       actor = target;
     } else {
@@ -497,7 +503,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       if (!file || file.fieldname !== 'image') return reply.code(400).send({ error: 'Выберите файл изображения.' });
       const bytes = await file.toBuffer();
       if (file.file.truncated) return reply.code(413).send({ error: 'Файл превышает установленный лимит.' });
-      const result = await saveImageAsset(store, config.dataDir, bytes, file.mimetype, file.filename, config.maxUploadBytes, session.identity.participantId);
+      const result = await saveImageAsset(store, store.assetsDir, bytes, file.mimetype, file.filename, config.maxUploadBytes, session.identity.participantId);
       sendState();
       return { asset: result.asset, deduplicated: result.deduplicated };
     } catch (error) {
@@ -528,7 +534,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
     const usage = store.getAssetUsage(id);
     if (usage.length > 0) return reply.code(409).send({ error: 'Изображение используется и не может быть удалено.', usage });
     try {
-      await deleteImageAsset(store, config.dataDir, id);
+      await deleteImageAsset(store, store.assetsDir, id);
     } catch (error) {
       if (error instanceof AssetInUseError) return reply.code(409).send({ error: error.message, usage: error.usage });
       if (error instanceof AssetNotFoundError) return reply.code(404).send({ error: error.message });
@@ -550,7 +556,7 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
       return reply.code(404).send({ error: 'Изображение не найдено.' });
     }
     reply.type(asset.mimeType).header('Cache-Control', 'private, no-store').header('X-Content-Type-Options', 'nosniff');
-    return reply.send(createReadStream(join(config.dataDir, 'assets', id)));
+    return reply.send(createReadStream(join(store.assetsDir, id)));
   });
 
   app.get('/ws', { websocket: true }, (socket, request) => {
@@ -600,11 +606,13 @@ export async function buildServer(options?: { config?: AppConfig; store?: RoomSt
           if (Object.keys(input).some((key) => !['type', 'requestId', 'background', 'scene'].includes(key))) throw new BoardCommandError('Некорректные настройки фона.');
           if (input.background !== 'black' && input.background !== 'gray') throw new BoardCommandError('Доступны только чёрный и серый фон.');
           const scene: BoardScene = input.scene === undefined ? store.activeScene : input.scene === 'battle' ? 'battle' : input.scene === 'board' ? 'board' : (() => { throw new BoardCommandError('Недопустимая сцена.'); })();
+          if (scene === 'battle' && !store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
           store.setBackground(scene, input.background);
         } else if (input.type === 'room:scene:set') {
           if (liveSession.identity.role !== 'gm') throw new BoardCommandError('Только ведущий может переключать сцену комнаты.');
           if (Object.keys(input).some((key) => !['type', 'requestId', 'scene'].includes(key))) throw new BoardCommandError('Некорректная команда сцены.');
           if (input.scene !== 'board' && input.scene !== 'battle') throw new BoardCommandError('Доступны только основная доска и боевая карта.');
+          if (input.scene === 'battle' && !store.supportsBattleMap) throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
           store.setActiveScene(input.scene);
         } else if (input.type === 'room:system:initialize') {
           initializeRoomSystem(liveSession.identity, input);

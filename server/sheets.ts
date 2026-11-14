@@ -164,7 +164,7 @@ export function executeSheetCommand(store: RoomStore, identity: Identity, raw: u
         return;
       }
       if (typeof command.playerId !== 'string' || command.playerId.length > 128) throw new BoardCommandError('Выберите игрока для назначения.');
-      const player = store.getSession(command.playerId);
+      const player = store.getParticipant(command.playerId);
       if (!player || player.role !== 'player') throw new BoardCommandError('Выбранный участник не является игроком комнаты.');
       store.assignSheet(sheet.id, player.participantId, player.name);
       return;

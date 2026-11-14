@@ -18,7 +18,7 @@ function fixture() {
   return { dataDir, store, config };
 }
 
-test('authentication validates room and GM secret on server and persists role', () => {
+test('authentication validates room and GM secret and reuses a participant across sessions', () => {
   const { dataDir, store, config } = fixture();
   try {
     assert.equal(authenticate({ name: 'A', role: 'player', roomCode: 'wrong-room-code-123' }, config, store), undefined);
@@ -26,10 +26,31 @@ test('authentication validates room and GM secret on server and persists role', 
     const result = authenticate({ name: '  Morgan  ', role: 'player', roomCode: config.roomCode }, config, store);
     assert.ok(result);
     assert.deepEqual({ name: result.identity.name, role: result.identity.role }, { name: 'Morgan', role: 'player' });
-    assert.equal(result.identity.participantId, sessionDigest(result.sessionId));
+    // The participant is a stable entity, independent of the browser session.
+    assert.notEqual(result.identity.participantId, sessionDigest(result.sessionId));
     assert.deepEqual(store.getSession(sessionDigest(result.sessionId)), result.identity);
-    assert.equal(store.createSession('another-gm', { name: 'GM', role: 'gm' }, Date.now() + 60_000), true);
-    assert.equal(authenticate({ name: 'GM 2', role: 'gm', roomCode: config.roomCode, gmPassword: config.gmPassword }, config, store), undefined);
+    assert.deepEqual(store.getParticipant(result.identity.participantId), result.identity);
+
+    const reconnect = authenticate({ name: 'Morgan', role: 'player', roomCode: config.roomCode }, config, store);
+    assert.ok(reconnect);
+    assert.equal(reconnect.identity.participantId, result.identity.participantId);
+    assert.notEqual(reconnect.sessionId, result.sessionId);
+    assert.deepEqual(store.getSession(sessionDigest(reconnect.sessionId)), result.identity);
+
+    // Closing one browser session does not invalidate the other one.
+    store.deleteSession(sessionDigest(result.sessionId));
+    assert.equal(store.getSession(sessionDigest(result.sessionId)), undefined);
+    assert.deepEqual(store.getSession(sessionDigest(reconnect.sessionId)), result.identity);
+
+    // A second GM browser is an independent session of the same participant.
+    const gmOne = authenticate({ name: 'GM', role: 'gm', roomCode: config.roomCode, gmPassword: config.gmPassword }, config, store);
+    const gmTwo = authenticate({ name: 'GM', role: 'gm', roomCode: config.roomCode, gmPassword: config.gmPassword }, config, store);
+    assert.ok(gmOne);
+    assert.ok(gmTwo);
+    assert.equal(gmOne.identity.participantId, gmTwo.identity.participantId);
+    assert.notEqual(gmOne.sessionId, gmTwo.sessionId);
+    assert.ok(store.getSession(sessionDigest(gmOne.sessionId)));
+    assert.ok(store.getSession(sessionDigest(gmTwo.sessionId)));
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 

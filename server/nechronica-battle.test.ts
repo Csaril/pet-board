@@ -98,6 +98,7 @@ test('Nechronica and PbtA sheets stay isolated and PbtA-only commands are reject
 
 test('battle map is a separate scene with GM-only preview data and correct ACL', async () => {
   await withStore('battle-scene', (store) => {
+    store.initializeSystem('nechronica', '1.0.0');
     store.createAsset({ id: 'battle-art', sha256: 'hash-battle', mimeType: 'image/png', originalName: 'battle.png', size: 4, width: 100, height: 100 });
     const battleLayer = store.getLayers('battle')[0]!;
     store.setBackground('battle', 'black');
@@ -157,6 +158,7 @@ test('players cannot change the active scene over WebSocket and reconnect return
     gmPassword: 'gm-password-with-enough-length', sessionDays: 30, cookieSecure: false, maxUploadBytes: 1024,
   };
   const store = new RoomStore(dataDir, config.roomName);
+  store.initializeSystem('nechronica', '1.0.0');
   const app = await buildServer({ config, store, logger: false });
   const sockets: WebSocket[] = [];
   try {
@@ -222,6 +224,7 @@ test('backup and restore preserve the battle scene, its background and its asset
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-battle-backup-'));
   try {
     const store = new RoomStore(dataDir, 'Campaign');
+    store.initializeSystem('nechronica', '1.0.0');
     store.createAsset({ id: 'battle-art', sha256: 'hash-battle', mimeType: 'image/png', originalName: 'battle.png', size: 4, width: 10, height: 10 });
     mkdirSync(join(dataDir, 'assets'), { recursive: true, mode: 0o700 });
     writeFileSync(join(dataDir, 'assets', 'battle-art'), 'PNG1', { mode: 0o600 });

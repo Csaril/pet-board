@@ -303,7 +303,7 @@ test('scenario 16: a failed file deletion preserves the database record and orig
     mkdirSync(join(dataDir, 'assets'), { recursive: true });
     await writeFile(path, 'data');
     await assert.rejects(
-      deleteImageAsset(store, dataDir, id, {
+      deleteImageAsset(store, store.assetsDir, id, {
         unlink: async (candidate) => {
           if (candidate.endsWith(id) || candidate.includes(`${id}.deleting-`)) throw Object.assign(new Error('locked'), { code: 'EACCES' });
           await unlinkFile(candidate);
@@ -313,7 +313,7 @@ test('scenario 16: a failed file deletion preserves the database record and orig
     );
     assert.ok(store.getAsset(id));
     assert.equal(await readFile(path, 'utf8'), 'data');
-    await assert.rejects(deleteImageAsset(store, dataDir, '../room.sqlite'), /идентификатор/i);
+    await assert.rejects(deleteImageAsset(store, store.assetsDir, '../room.sqlite'), /идентификатор/i);
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 

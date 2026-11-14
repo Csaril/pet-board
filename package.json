@@ -13,6 +13,7 @@
     "backup": "node dist-server/server/backup.js create",
     "backup:list": "node dist-server/server/backup.js list",
     "backup:restore": "node dist-server/server/backup.js restore",
+    "room:migrate": "node dist-server/server/room-migrate.js",
     "typecheck": "astro check && tsc -p tsconfig.server.json --noEmit",
     "test": "node --import tsx --test server/*.test.ts src/modules/system/pbta-2d6/*.test.ts"
   },

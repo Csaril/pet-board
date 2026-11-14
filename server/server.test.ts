@@ -72,7 +72,7 @@ test('HTTP session endpoints enforce origin, set a protected cookie, and restore
     });
     assert.equal(login.statusCode, 200);
     assert.deepEqual({ name: login.json().identity.name, role: login.json().identity.role }, { name: 'Morgan', role: 'player' });
-    assert.match(login.json().identity.participantId, /^[0-9a-f]{64}$/);
+    assert.match(login.json().identity.participantId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     const cookie = login.headers['set-cookie'];
     assert.equal(typeof cookie, 'string');
     assert.match(cookie as string, /HttpOnly/);

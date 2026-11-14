@@ -7,6 +7,7 @@ export const pbtaSystemModule = {
   version: '1.0.0',
   name: 'PbtA',
   sheetSchemaVersion: 1,
+  capabilities: { battleMap: false },
   roll(input: PbtARollInput, randomInt: RandomInt) {
     return calculatePbtARoll(input, randomInt);
   },

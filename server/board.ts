@@ -63,6 +63,10 @@ function boardScene(value: unknown): BoardScene {
  */
 function commandScene(store: RoomStore, identity: Identity, command: Command): BoardScene {
   const requested = command.scene === undefined ? store.activeScene : boardScene(command.scene);
+  // The battle scene belongs to a system module capability, not to the core.
+  if (requested === 'battle' && !store.supportsBattleMap) {
+    throw new BoardCommandError('Боевая карта доступна только системе, которая её поддерживает.', { code: SYSTEM_MISMATCH, statusCode: 409 });
+  }
   if (identity.role !== 'gm' && requested !== store.activeScene) {
     throw new BoardCommandError('Игрок не может изменять неактивную сцену.');
   }

@@ -10,6 +10,7 @@ export const nechronicaSystemModule = {
   version: '1.0.0',
   name: 'Nechronica',
   sheetSchemaVersion: 1,
+  capabilities: { battleMap: true },
 };
 
 export const nechronicaSheetSchema = {

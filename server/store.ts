@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomSystemState, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomCapabilities, RoomSystemState, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { findSystemModule } from '../src/modules/registry.js';
 import { pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
@@ -112,11 +112,18 @@ function toAbility(row: AbilityRow): CharacterSheetAbility {
 
 export class RoomStore {
   readonly db: Database.Database;
+  /** Directory that owns this store's database, assets and backups. */
+  readonly roomDir: string;
+  readonly assetsDir: string;
+  readonly backupsDir: string;
 
-  constructor(dataDir: string, roomName: string) {
-    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    chmodSync(dataDir, 0o700);
-    const path = join(dataDir, 'room.sqlite');
+  constructor(roomDir: string, roomName: string) {
+    this.roomDir = roomDir;
+    this.assetsDir = join(roomDir, 'assets');
+    this.backupsDir = join(roomDir, 'backups');
+    mkdirSync(roomDir, { recursive: true, mode: 0o700 });
+    chmodSync(roomDir, 0o700);
+    const path = join(roomDir, 'room.sqlite');
     this.db = new Database(path);
     chmodSync(path, 0o600);
     this.db.pragma('journal_mode = DELETE');
@@ -131,10 +138,16 @@ export class RoomStore {
         active_scene TEXT NOT NULL DEFAULT 'board' CHECK (active_scene IN ('board', 'battle')),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
-      CREATE TABLE IF NOT EXISTS sessions (
+      CREATE TABLE IF NOT EXISTS participants (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         role TEXT NOT NULL CHECK (role IN ('gm', 'player')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS participants_name_role ON participants(name, role);
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
         expires_at INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -310,6 +323,8 @@ export class RoomStore {
       CREATE INDEX IF NOT EXISTS character_abilities_sheet_order ON character_abilities(sheet_id, order_index);
       CREATE INDEX IF NOT EXISTS character_abilities_asset ON character_abilities(asset_id);
     `);
+    this.migrateParticipantsAndSessions();
+    this.db.exec('CREATE INDEX IF NOT EXISTS sessions_participant ON sessions(participant_id)');
     const sheetColumns = this.db.pragma('table_info(character_sheets)') as Array<{ name: string }>;
     if (sheetColumns.length > 0 && !sheetColumns.some((column) => column.name === 'creator_id')) {
       this.db.pragma('foreign_keys = OFF');
@@ -381,8 +396,7 @@ export class RoomStore {
     if (!roomColumns.some((column) => column.name === 'active_system_version')) this.db.exec('ALTER TABLE room ADD COLUMN active_system_version TEXT');
     if (!roomColumns.some((column) => column.name === 'system_id')) this.db.exec('ALTER TABLE room ADD COLUMN system_id TEXT');
     if (!roomColumns.some((column) => column.name === 'system_version')) this.db.exec('ALTER TABLE room ADD COLUMN system_version TEXT');
-    if (!roomColumns.some((column) => column.name === 'module_config_json')) this.db.exec("ALTER TABLE room ADD COLUMN module_config_json TEXT NOT NULL DEFAULT '{}'");
-    if (!roomColumns.some((column) => column.name === 'system_fixed')) this.db.exec('ALTER TABLE room ADD COLUMN system_fixed INTEGER NOT NULL DEFAULT 0 CHECK (system_fixed IN (0, 1))');
+    if (!roomColumns.some((column) => column.name === 'module_config_json')) this.db.exec("ALTER TABLE room ADD COLUMN module_config_json TEXT NOT NULL DEFAULT '{}'");    if (!roomColumns.some((column) => column.name === 'system_fixed')) this.db.exec('ALTER TABLE room ADD COLUMN system_fixed INTEGER NOT NULL DEFAULT 0 CHECK (system_fixed IN (0, 1))');
     if (!roomColumns.some((column) => column.name === 'background')) {
       this.db.exec("ALTER TABLE room ADD COLUMN background TEXT NOT NULL DEFAULT 'gray' CHECK (background IN ('black', 'gray'))");
     }
@@ -512,6 +526,7 @@ export class RoomStore {
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
     this.migrateRoomSystem();
     this.createRoomSystemTriggers();
+    this.ensureActiveSceneSupported();
     for (const scene of ['board', 'battle'] as const) {
       const layerCount = (this.db.prepare('SELECT COUNT(*) AS count FROM board_layers WHERE scene = ?').get(scene) as { count: number }).count;
       if (layerCount === 0) this.createLayer(scene === 'board' ? 'Основной слой' : 'Боевая карта', 'all-players', scene);
@@ -547,7 +562,26 @@ export class RoomStore {
     return row?.active_scene === 'battle' ? 'battle' : 'board';
   }
   setActiveScene(scene: BoardScene): void {
+    // The scene is a system capability, not a generic board feature.
+    if (scene === 'battle' && !this.supportsBattleMap) throw new Error('BATTLE_MAP_UNAVAILABLE');
     this.db.prepare('UPDATE room SET active_scene = ? WHERE id = 1').run(scene);
+  }
+  get capabilities(): RoomCapabilities {
+    const { id, version } = this.roomSystem;
+    if (!id) return { battleMap: false };
+    return { battleMap: findSystemModule(id, version ?? undefined)?.capabilities.battleMap === true };
+  }
+  get supportsBattleMap(): boolean {
+    return this.capabilities.battleMap;
+  }
+  /**
+   * A PbtA room may inherit `active_scene = 'battle'` from an older database.
+   * The scene data is preserved, but the room returns to the main board because
+   * only a system that declares the capability may show the battle map.
+   */
+  private ensureActiveSceneSupported(): void {
+    if (this.activeScene !== 'battle' || this.supportsBattleMap) return;
+    this.db.prepare("UPDATE room SET active_scene = 'board' WHERE id = 1").run();
   }
 
   get roomSystem(): RoomSystemState {
@@ -561,12 +595,14 @@ export class RoomStore {
       const parsed = JSON.parse(row?.module_config_json || '{}') as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
     } catch { /* Invalid legacy configuration falls back to an empty object. */ }
+    const module = id ? findSystemModule(id, version ?? undefined) : undefined;
     return {
       fixed,
       id,
       version,
-      name: id ? findSystemModule(id, version ?? undefined)?.name ?? id : null,
+      name: module?.name ?? id ?? null,
       config,
+      capabilities: { battleMap: module?.capabilities.battleMap === true },
     };
   }
 
@@ -707,20 +743,73 @@ export class RoomStore {
     }));
   }
 
+  /**
+   * Older databases stored name, role and the participant identity directly in
+   * `sessions`. Every old session ID becomes the stable participant ID, so all
+   * existing foreign references keep pointing at the same person.
+   */
+  private migrateParticipantsAndSessions(): void {
+    const columns = this.db.pragma('table_info(sessions)') as Array<{ name: string }>;
+    if (columns.length === 0 || columns.some((column) => column.name === 'participant_id')) return;
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      this.db.transaction(() => {
+        this.db.exec('INSERT OR IGNORE INTO participants (id, name, role, created_at) SELECT id, name, role, created_at FROM sessions');
+        this.db.exec('DROP INDEX IF EXISTS sessions_expiry');
+        this.db.exec('ALTER TABLE sessions RENAME TO sessions_legacy');
+        this.db.exec(`CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+          expires_at INTEGER NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )`);
+        this.db.exec('INSERT INTO sessions (id, participant_id, expires_at, created_at) SELECT id, id, expires_at, created_at FROM sessions_legacy');
+        this.db.exec('DROP TABLE sessions_legacy');
+        this.db.exec('CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS sessions_participant ON sessions(participant_id)');
+      })();
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
+    if ((this.db.pragma('foreign_key_check') as unknown[]).length > 0) {
+      throw new Error('Не удалось проверить целостность участников и сессий после миграции.');
+    }
+  }
+
+  private findOrCreateParticipant(identity: NewIdentity): Identity {
+    const existing = this.db.prepare('SELECT id, name, role FROM participants WHERE name = ? AND role = ? ORDER BY created_at ASC, rowid ASC LIMIT 1')
+      .get(identity.name, identity.role) as { id: string; name: string; role: Role } | undefined;
+    if (existing) return { participantId: existing.id, name: existing.name, role: existing.role };
+    const participantId = randomUUID();
+    this.db.prepare('INSERT INTO participants (id, name, role) VALUES (?, ?, ?)').run(participantId, identity.name, identity.role);
+    return { participantId, name: identity.name, role: identity.role };
+  }
+
   createSession(sessionId: string, identity: NewIdentity, expiresAt: number): boolean {
     this.db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
-    if (identity.role === 'gm' && this.db.prepare("SELECT 1 FROM sessions WHERE role = 'gm' LIMIT 1").get()) return false;
-    this.db.prepare('INSERT INTO sessions (id, name, role, expires_at) VALUES (?, ?, ?, ?)')
-      .run(sessionId, identity.name, identity.role, expiresAt);
+    // Reconnecting with the same name and role reuses the participant, so one
+    // person may hold several independent sessions without duplication.
+    const participant = this.findOrCreateParticipant(identity);
+    this.db.prepare('INSERT INTO sessions (id, participant_id, expires_at) VALUES (?, ?, ?)')
+      .run(sessionId, participant.participantId, expiresAt);
     return true;
   }
 
   getSession(sessionId: string): Identity | undefined {
-    const row = this.db.prepare('SELECT id, name, role, expires_at FROM sessions WHERE id = ?').get(sessionId) as
+    const row = this.db.prepare(`SELECT participant.id, participant.name, participant.role, session.expires_at
+      FROM sessions AS session JOIN participants AS participant ON participant.id = session.participant_id
+      WHERE session.id = ?`).get(sessionId) as
       { id: string; name: string; role: Role; expires_at: number } | undefined;
     if (!row) return undefined;
     if (row.expires_at <= Date.now()) { this.deleteSession(sessionId); return undefined; }
     return { participantId: row.id, name: row.name, role: row.role };
+  }
+
+  /** Identity by stable participant ID, independent of any active session. */
+  getParticipant(participantId: string): Identity | undefined {
+    const row = this.db.prepare('SELECT id, name, role FROM participants WHERE id = ?').get(participantId) as
+      { id: string; name: string; role: Role } | undefined;
+    return row ? { participantId: row.id, name: row.name, role: row.role } : undefined;
   }
 
   deleteSession(sessionId: string): void { this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId); }
@@ -968,8 +1057,8 @@ export class RoomStore {
     return Boolean(row) && row?.owner_id === identity.participantId;
   }
   isPlayerParticipant(participantId: string): boolean {
-    const identity = this.getSession(participantId);
-    return identity?.role === 'player';
+    const row = this.db.prepare("SELECT role FROM participants WHERE id = ?").get(participantId) as { role: Role } | undefined;
+    return row?.role === 'player';
   }
   canReadAsset(assetId: string, identity: Identity, scene: BoardScene = this.activeScene): boolean {
     if (!this.getAsset(assetId)) return false;
@@ -1272,18 +1361,22 @@ export class RoomStore {
   snapshot(identityOrRole: Identity | Role, participantId = ''): BoardSnapshot {
     const role = typeof identityOrRole === 'string' ? identityOrRole : identityOrRole.role;
     const identity = typeof identityOrRole === 'string' ? { participantId, name: '', role } : identityOrRole;
-    const activeScene = this.activeScene;
+    const battleSupported = this.supportsBattleMap;
+    // Never expose a battle scene to a room whose fixed system does not own it.
+    const activeScene: BoardScene = this.activeScene === 'battle' && battleSupported ? 'battle' : 'board';
     const scene = this.sceneSnapshot(activeScene, identity);
     const common = {
       activeScene,
       ...scene,
-      system: this.roomSystem,
+      system: { ...this.roomSystem, capabilities: { battleMap: battleSupported } },
       diceRolls: this.getDiceRolls(),
       sheets: this.getSheetsFor(identity),
       personalNotes: this.listPersonalNotes(identity),
     };
     if (role === 'gm') {
-      return { ...common, battle: this.sceneSnapshot('battle', identity), assets: this.getAssets() };
+      return battleSupported
+        ? { ...common, battle: this.sceneSnapshot('battle', identity), assets: this.getAssets() }
+        : { ...common, assets: this.getAssets() };
     }
     const availableAssets = this.getAssets().filter((asset) => this.canReadAsset(asset.id, identity, activeScene));
     return { ...common, availableAssets };

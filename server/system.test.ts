@@ -186,7 +186,7 @@ test('a fresh room can choose a system once, including the deliberate no-system 
   try {
     const store = new RoomStore(dataDir, 'Fresh');
     try {
-      assert.deepEqual(store.roomSystem, { fixed: false, id: null, version: null, name: null, config: {} });
+      assert.deepEqual(store.roomSystem, { fixed: false, id: null, version: null, name: null, config: {}, capabilities: { battleMap: false } });
       assert.equal(store.fixedSystem, null);
       assert.deepEqual(store.getSheetsFor(gm), []);
       assert.throws(() => store.createSheet({
@@ -197,20 +197,20 @@ test('a fresh room can choose a system once, including the deliberate no-system 
       // The pair guard rejects a half-written system before the first fix.
       assert.throws(() => store.db.prepare("UPDATE room SET system_id = 'pbta-2d6' WHERE id = 1").run(), /ROOM_SYSTEM_INVALID/);
       store.initializeSystem('pbta-2d6', '1.0.0', { setting: 'grim' });
-      assert.deepEqual(store.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' } });
+      assert.deepEqual(store.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' }, capabilities: { battleMap: false } });
       assert.throws(() => store.initializeSystem('nechronica', '1.0.0'), /ROOM_SYSTEM_IMMUTABLE/);
-      assert.deepEqual(store.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' } });
+      assert.deepEqual(store.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' }, capabilities: { battleMap: false } });
     } finally { store.close(); }
 
     const reopened = new RoomStore(dataDir, 'Fresh');
     try {
-      assert.deepEqual(reopened.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' } });
+      assert.deepEqual(reopened.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { setting: 'grim' }, capabilities: { battleMap: false } });
     } finally { reopened.close(); }
 
     const noSystem = new RoomStore(noSystemDir, 'No system');
     try {
       noSystem.initializeSystem(null, null);
-      assert.deepEqual(noSystem.roomSystem, { fixed: true, id: null, version: null, name: null, config: {} });
+      assert.deepEqual(noSystem.roomSystem, { fixed: true, id: null, version: null, name: null, config: {}, capabilities: { battleMap: false } });
       assert.equal(noSystem.fixedSystem, null);
       assert.deepEqual(noSystem.getSheetsFor(gm), []);
       assert.throws(() => noSystem.createSheet({
@@ -282,7 +282,7 @@ test('HTTP and WebSocket allow one system commit and reject every later change',
 
     const committed = await putSystem(gmCookie, { systemId: 'pbta-2d6', version: '1.0.0' });
     assert.equal(committed.statusCode, 200);
-    assert.deepEqual(committed.json().system, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: {} });
+    assert.deepEqual(committed.json().system, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: {}, capabilities: { battleMap: false } });
 
     const repeated = await putSystem(gmCookie, { systemId: 'nechronica', version: '1.0.0' });
     assert.equal(repeated.statusCode, 409);
@@ -293,7 +293,7 @@ test('HTTP and WebSocket allow one system commit and reject every later change',
 
     const board = await app.inject({ method: 'GET', url: '/api/board', headers: { cookie: playerCookie } });
     assert.equal(board.statusCode, 200);
-    assert.deepEqual(board.json().system, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: {} });
+    assert.deepEqual(board.json().system, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: {}, capabilities: { battleMap: false } });
 
     const gmConnection = await connect(gmCookie);
     const playerConnection = await connect(playerCookie);
@@ -415,7 +415,7 @@ test('backup and restore preserve the fixed system and its triggers', async () =
     await restoreBackup(dataDir, 'Campaign', backup.name);
     const restored = new RoomStore(dataDir, 'Campaign');
     try {
-      assert.deepEqual(restored.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { variant: 'standard' } });
+      assert.deepEqual(restored.roomSystem, { fixed: true, id: 'pbta-2d6', version: '1.0.0', name: 'PbtA', config: { variant: 'standard' }, capabilities: { battleMap: false } });
       assert.equal(restored.getDiceRolls()[0]?.id, 'kept-roll');
       assert.throws(() => restored.initializeSystem('nechronica', '1.0.0'), /ROOM_SYSTEM_IMMUTABLE/);
       const triggers = restored.db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all() as Array<{ name: string }>;

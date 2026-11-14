@@ -70,6 +70,7 @@ const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
 const nechronicaControls = select<HTMLElement>('#nechronica-roll-controls');
 const pbtaActorRow = select<HTMLElement>('#pbta-actor-row');
 const pbtaActor = select<HTMLSelectElement>('#pbta-actor');
+const battleMapGroup = select<HTMLElement>('[data-topbar-group="battle"]');
 const battlePreviewToggle = select<HTMLButtonElement>('#battle-preview-toggle');
 const battleActivate = select<HTMLButtonElement>('#battle-activate');
 const battleDeactivate = select<HTMLButtonElement>('#battle-deactivate');
@@ -228,7 +229,7 @@ function applyBoardBackground(background: BoardBackground | undefined): void {
 /** Scene currently rendered locally. The GM may preview the battle scene without changing the room. */
 function currentScene(): BoardScene {
   if (!roomState) return 'board';
-  if (viewingBattle && identity?.role === 'gm' && roomState.battle) return 'battle';
+  if (viewingBattle && identity?.role === 'gm' && roomState.system.capabilities.battleMap && roomState.battle) return 'battle';
   return roomState.activeScene;
 }
 
@@ -1365,6 +1366,8 @@ function updateBoard(state: RoomMessage) {
   }
   knownDiceRollIds = nextIds;
   roomState = state;
+  // The battle map is a system capability; never keep a local preview without it.
+  if (!state.system.capabilities.battleMap) viewingBattle = false;
   // If another GM session activated the battle map, the local preview is no longer needed.
   if (state.activeScene === 'battle') viewingBattle = false;
   const view = sceneView();
@@ -1417,11 +1420,15 @@ function updateDiceBadge() {
 }
 
 function updateBattleControls(): void {
-  if (!identity || !roomState || identity.role !== 'gm') {
+  const enabled = Boolean(identity && roomState && identity.role === 'gm' && roomState.system.capabilities.battleMap);
+  battleMapGroup.hidden = !enabled;
+  if (!enabled) {
+    viewingBattle = false;
     battlePreviewBanner.hidden = true;
+    canvasWrap.dataset.battlePreview = 'false';
     return;
   }
-  const active = roomState.activeScene;
+  const active = roomState!.activeScene;
   battlePreviewToggle.hidden = active === 'battle';
   battlePreviewToggle.textContent = viewingBattle ? 'Выйти из редактирования' : 'Редактировать боевую карту';
   battlePreviewToggle.setAttribute('aria-pressed', String(viewingBattle));
@@ -1433,7 +1440,7 @@ function updateBattleControls(): void {
 
 /** Local GM preview: switches the canvas without changing the room's active scene. */
 function setViewingBattle(next: boolean): void {
-  if (identity?.role !== 'gm' || !roomState || next === viewingBattle) return;
+  if (identity?.role !== 'gm' || !roomState || !roomState.system.capabilities.battleMap || next === viewingBattle) return;
   viewingBattle = next;
   const view = sceneView();
   applyBoardBackground(view?.background);
@@ -2952,7 +2959,7 @@ systemSave.addEventListener('click', () => {
   void runCommand('room:system:initialize', { systemId: module.id, version: module.version });
 });
 battlePreviewToggle.addEventListener('click', () => {
-  if (identity?.role !== 'gm' || !roomState) return;
+  if (identity?.role !== 'gm' || !roomState?.system.capabilities.battleMap) return;
   if (roomState.activeScene === 'battle') {
     showCanvasMessage('Боевая карта уже активна.', true);
     return;
@@ -2960,11 +2967,11 @@ battlePreviewToggle.addEventListener('click', () => {
   setViewingBattle(!viewingBattle);
 });
 battleActivate.addEventListener('click', () => {
-  if (identity?.role !== 'gm') return;
+  if (identity?.role !== 'gm' || !roomState?.system.capabilities.battleMap) return;
   void runCommand('room:scene:set', { scene: 'battle' });
 });
 battleDeactivate.addEventListener('click', () => {
-  if (identity?.role !== 'gm') return;
+  if (identity?.role !== 'gm' || !roomState?.system.capabilities.battleMap) return;
   viewingBattle = false;
   void runCommand('room:scene:set', { scene: 'board' });
 });

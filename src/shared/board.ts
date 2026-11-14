@@ -182,12 +182,18 @@ export interface CharacterSheet {
  * chosen a system yet and a one-time initialization is still possible.
  * `fixed = true` with `id = null` is the deliberate "no game system" mode.
  */
+export interface RoomCapabilities {
+  /** True only when the fixed system module declares the battle-map capability. */
+  battleMap: boolean;
+}
+
 export interface RoomSystemState {
   fixed: boolean;
   id: string | null;
   version: string | null;
   name: string | null;
   config: Record<string, unknown>;
+  capabilities: RoomCapabilities;
 }
 
 export interface BoardSnapshot {

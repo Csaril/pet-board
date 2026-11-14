@@ -52,9 +52,9 @@ test('asset upload deduplicates by content and MIME, not by file name', async ()
   const store = new RoomStore(dataDir, 'Assets');
   try {
     const firstBytes = png(1, 1, 30);
-    const first = await saveImageAsset(store, dataDir, firstBytes, 'image/png', '../../map.png', 1024 * 1024);
-    const sameContent = await saveImageAsset(store, dataDir, firstBytes, 'image/png', 'renamed-map.png', 1024 * 1024);
-    const differentContent = await saveImageAsset(store, dataDir, png(1, 1, 220), 'image/png', 'map.png', 1024 * 1024);
+    const first = await saveImageAsset(store, store.assetsDir, firstBytes, 'image/png', '../../map.png', 1024 * 1024);
+    const sameContent = await saveImageAsset(store, store.assetsDir, firstBytes, 'image/png', 'renamed-map.png', 1024 * 1024);
+    const differentContent = await saveImageAsset(store, store.assetsDir, png(1, 1, 220), 'image/png', 'map.png', 1024 * 1024);
     assert.equal(first.deduplicated, false);
     assert.equal(sameContent.deduplicated, true);
     assert.equal(sameContent.asset.id, first.asset.id);

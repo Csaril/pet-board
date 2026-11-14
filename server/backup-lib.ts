@@ -17,20 +17,20 @@ export interface BackupInfo extends BackupManifest {
   path: string;
 }
 
-function backupsDirectory(dataDir: string): string {
-  return join(dataDir, 'backups');
+function backupsDirectory(roomDir: string): string {
+  return join(roomDir, 'backups');
 }
 
 function timestampName(prefix: string): string {
   return `${prefix}-${new Date().toISOString().replaceAll(':', '-')}`;
 }
 
-/** Only a plain directory name is accepted, so restore cannot escape data/backups. */
-export function resolveBackupDirectory(dataDir: string, name: string): string {
+/** Only a plain directory name is accepted, so restore cannot escape roomDir/backups. */
+export function resolveBackupDirectory(roomDir: string, name: string): string {
   if (!name || name !== basename(name) || name === '.' || name === '..' || name.startsWith('.')) {
     throw new Error('Укажите имя копии из списка резервных копий.');
   }
-  return join(backupsDirectory(dataDir), name);
+  return join(backupsDirectory(roomDir), name);
 }
 
 async function readManifest(backupPath: string): Promise<Partial<BackupManifest> | undefined> {
@@ -55,8 +55,8 @@ async function countAssetFiles(directory: string): Promise<number> {
  * consistent snapshot even if the server is still writing. The original image
  * files are copied afterwards from the same data directory.
  */
-export async function createBackup(dataDir: string, roomName: string, prefix = 'backup'): Promise<BackupInfo> {
-  const directory = backupsDirectory(dataDir);
+export async function createBackup(roomDir: string, roomName: string, prefix = 'backup'): Promise<BackupInfo> {
+  const directory = backupsDirectory(roomDir);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   let name = timestampName(prefix);
   let suffix = 1;
@@ -66,7 +66,7 @@ export async function createBackup(dataDir: string, roomName: string, prefix = '
   const backupAssets = join(backupPath, 'assets');
   await mkdir(backupAssets, { recursive: true, mode: 0o700 });
 
-  const store = new RoomStore(dataDir, roomName);
+  const store = new RoomStore(roomDir, roomName);
   try {
     await store.backup(join(backupPath, 'room.sqlite'));
   } catch (error) {
@@ -77,7 +77,7 @@ export async function createBackup(dataDir: string, roomName: string, prefix = '
   store.close();
 
   try {
-    const sourceAssets = join(dataDir, 'assets');
+    const sourceAssets = join(roomDir, 'assets');
     if (existsSync(sourceAssets)) {
       for (const entry of await readdir(sourceAssets, { withFileTypes: true })) {
         if (!entry.isFile()) continue;
@@ -104,8 +104,8 @@ export async function createBackup(dataDir: string, roomName: string, prefix = '
   }
 }
 
-export async function listBackups(dataDir: string): Promise<BackupInfo[]> {
-  const directory = backupsDirectory(dataDir);
+export async function listBackups(roomDir: string): Promise<BackupInfo[]> {
+  const directory = backupsDirectory(roomDir);
   if (!existsSync(directory)) return [];
   const backups: BackupInfo[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -175,16 +175,16 @@ async function copyDirectory(source: string, target: string): Promise<void> {
  * created first, and the database/assets pair is swapped together. If either
  * move fails, the previous state is put back.
  */
-export async function restoreBackup(dataDir: string, roomName: string, name: string): Promise<{ safetyBackup: string }> {
-  const backupPath = resolveBackupDirectory(dataDir, name);
+export async function restoreBackup(roomDir: string, roomName: string, name: string): Promise<{ safetyBackup: string }> {
+  const backupPath = resolveBackupDirectory(roomDir, name);
   await verifyBackup(backupPath);
 
-  const safety = await createBackup(dataDir, roomName, 'pre-restore');
+  const safety = await createBackup(roomDir, roomName, 'pre-restore');
   const token = `${process.pid}-${Date.now()}`;
-  const temporaryDatabase = join(dataDir, `.room.sqlite.${token}.restore`);
-  const temporaryAssets = join(dataDir, `.assets.${token}.restore`);
-  const previousDatabase = join(dataDir, `.room.sqlite.${token}.previous`);
-  const previousAssets = join(dataDir, `.assets.${token}.previous`);
+  const temporaryDatabase = join(roomDir, `.room.sqlite.${token}.restore`);
+  const temporaryAssets = join(roomDir, `.assets.${token}.restore`);
+  const previousDatabase = join(roomDir, `.room.sqlite.${token}.previous`);
+  const previousAssets = join(roomDir, `.assets.${token}.previous`);
 
   try {
     await cp(join(backupPath, 'room.sqlite'), temporaryDatabase, { force: true });
@@ -199,28 +199,28 @@ export async function restoreBackup(dataDir: string, roomName: string, name: str
   let movedDatabase = false;
   let movedAssets = false;
   try {
-    if (existsSync(join(dataDir, 'room.sqlite'))) {
-      await rename(join(dataDir, 'room.sqlite'), previousDatabase);
+    if (existsSync(join(roomDir, 'room.sqlite'))) {
+      await rename(join(roomDir, 'room.sqlite'), previousDatabase);
       movedDatabase = true;
     }
-    if (existsSync(join(dataDir, 'assets'))) {
-      await rename(join(dataDir, 'assets'), previousAssets);
+    if (existsSync(join(roomDir, 'assets'))) {
+      await rename(join(roomDir, 'assets'), previousAssets);
       movedAssets = true;
     }
-    await rename(temporaryDatabase, join(dataDir, 'room.sqlite'));
-    await rename(temporaryAssets, join(dataDir, 'assets'));
+    await rename(temporaryDatabase, join(roomDir, 'room.sqlite'));
+    await rename(temporaryAssets, join(roomDir, 'assets'));
   } catch (error) {
-    await rm(join(dataDir, 'room.sqlite'), { force: true });
-    await rm(join(dataDir, 'assets'), { recursive: true, force: true });
-    if (movedDatabase) await rename(previousDatabase, join(dataDir, 'room.sqlite'));
-    if (movedAssets) await rename(previousAssets, join(dataDir, 'assets'));
+    await rm(join(roomDir, 'room.sqlite'), { force: true });
+    await rm(join(roomDir, 'assets'), { recursive: true, force: true });
+    if (movedDatabase) await rename(previousDatabase, join(roomDir, 'room.sqlite'));
+    if (movedAssets) await rename(previousAssets, join(roomDir, 'assets'));
     await rm(temporaryDatabase, { force: true });
     await rm(temporaryAssets, { recursive: true, force: true });
     throw error;
   }
 
   for (const suffix of ['-journal', '-wal', '-shm']) {
-    await rm(join(dataDir, `room.sqlite${suffix}`), { force: true });
+    await rm(join(roomDir, `room.sqlite${suffix}`), { force: true });
   }
   await rm(previousDatabase, { force: true });
   await rm(previousAssets, { recursive: true, force: true });
