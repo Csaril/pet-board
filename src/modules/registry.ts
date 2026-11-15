@@ -1,20 +1,25 @@
-import { nechronicaSystemModule } from './system/nechronica/module.js';
-import { pbtaSystemModule } from './system/pbta-2d6/module.js';
+/**
+ * Backwards-compatible view of the metadata manifest.
+ *
+ * The old registry imported every implementation. This module deliberately
+ * contains no implementation imports: the core may use it for validation,
+ * names and capabilities, while loaders (client-registry / server registry)
+ * fetch the actual code by the exact `id@version` pair.
+ */
+import {
+  findLatestSystemMetadata,
+  findSystemMetadata,
+  systemKey,
+  systemMetadata,
+  systemMetadataByKey,
+  type SystemCapabilities,
+  type SystemMetadata,
+} from './manifest.js';
 
-export interface SystemCapabilities {
-  /** The system owns the second saved board scene used as its battle map. */
-  battleMap: boolean;
-}
+export type { SystemCapabilities, SystemMetadata };
 
-export interface SystemModuleDescriptor {
-  id: string;
-  version: string;
-  name: string;
-  /** Version of the persisted character-sheet shape owned by this module. */
-  sheetSchemaVersion: number;
-  /** Optional features this system owns; the core never enables them globally. */
-  capabilities: SystemCapabilities;
-}
+/** Historical name kept for existing callers and tests. */
+export type SystemModuleDescriptor = SystemMetadata;
 
 export interface FeatureModuleDescriptor {
   id: string;
@@ -22,14 +27,16 @@ export interface FeatureModuleDescriptor {
   name: string;
 }
 
-export const systemModules = [pbtaSystemModule, nechronicaSystemModule] as const;
+export const systemModules: readonly SystemMetadata[] = systemMetadata;
 export const featureModules: readonly FeatureModuleDescriptor[] = [];
 
-export const systemModuleRegistry = new Map<string, SystemModuleDescriptor>(
-  systemModules.map((module) => [module.id, module]),
+/** Keyed by ID only, for legacy callers that want the newest version. */
+export const systemModuleRegistry: ReadonlyMap<string, SystemMetadata> = new Map(
+  systemMetadata.map((metadata) => [metadata.id, metadata]),
 );
 
-export function findSystemModule(id: string, version?: string): SystemModuleDescriptor | undefined {
-  const module = systemModuleRegistry.get(id);
-  return module && (version === undefined || module.version === version) ? module : undefined;
+export function findSystemModule(id: string, version?: string): SystemMetadata | undefined {
+  return findSystemMetadata(id, version);
 }
+
+export { findLatestSystemMetadata, findSystemMetadata, systemKey, systemMetadata, systemMetadataByKey };

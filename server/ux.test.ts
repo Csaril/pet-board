@@ -62,14 +62,14 @@ test('ability history scenarios 1-12: snapshot, permissions and untouched counte
   try {
     const { sheetId, abilityId } = createAssignedSheet(store);
 
-    await t.test('1. Владелец листа применяет способность', () => {
-      executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
+    await t.test('1. Владелец листа применяет способность', async () => {
+      await executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
       const entries = store.getDiceRolls();
       assert.equal(entries.length, 1);
       assert.equal(entries[0]!.kind, 'ability-use');
     });
 
-    await t.test('2. Событие хранит снимок ID события, способности и листа', () => {
+    await t.test('2. Событие хранит снимок ID события, способности и листа', async () => {
       const entry = store.getDiceRolls()[0]!;
       assert.match(entry.id, /^[0-9a-f-]{36}$/);
       assert.equal(entry.abilityId, abilityId);
@@ -77,7 +77,7 @@ test('ability history scenarios 1-12: snapshot, permissions and untouched counte
       assert.equal(entry.characterId, sheetId);
     });
 
-    await t.test('3. Снимок содержит имена, описание, автора, время и шрифт', () => {
+    await t.test('3. Снимок содержит имена, описание, автора, время и шрифт', async () => {
       const entry = store.getDiceRolls()[0]!;
       assert.equal(entry.abilityCharacterName, 'Ари');
       assert.equal(entry.abilityName, 'Огненный шар');
@@ -88,39 +88,37 @@ test('ability history scenarios 1-12: snapshot, permissions and untouched counte
       assert.ok(!Number.isNaN(Date.parse(entry.createdAt)));
     });
 
-    await t.test('4. Ведущий может применить способность чужого листа', () => {
-      executeSheetCommand(store, gm, { type: 'sheet:ability:apply', sheetId, id: abilityId });
+    await t.test('4. Ведущий может применить способность чужого листа', async () => {
+      await executeSheetCommand(store, gm, { type: 'sheet:ability:apply', sheetId, id: abilityId });
       const entry = store.getDiceRolls()[0]!;
       assert.equal(entry.authorName, 'Keeper');
       assert.equal(entry.actorName, 'Ari');
       assert.equal(entry.actorId, owner.participantId);
     });
 
-    await t.test('5. Чужой игрок не может применить способность', () => {
-      assert.throws(
-        () => executeSheetCommand(store, stranger, { type: 'sheet:ability:apply', sheetId, id: abilityId }),
+    await t.test('5. Чужой игрок не может применить способность', async () => {
+      await assert.rejects(() => executeSheetCommand(store, stranger, { type: 'sheet:ability:apply', sheetId, id: abilityId }),
         /только назначенный вам лист/i,
       );
     });
 
-    await t.test('6. Неизвестная способность отклоняется', () => {
-      assert.throws(
-        () => executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: 'missing' }),
+    await t.test('6. Неизвестная способность отклоняется', async () => {
+      await assert.rejects(() => executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: 'missing' }),
         /Способность не найдена/i,
       );
     });
 
-    await t.test('7. Применение не меняет числовой счётчик способности', () => {
+    await t.test('7. Применение не меняет числовой счётчик способности', async () => {
       const ability = store.getSheet(sheetId)!.abilities.find((entry) => entry.id === abilityId)!;
       assert.equal(ability.counterValue, 2);
     });
 
-    await t.test('8. Применение не меняет чекбокс способности', () => {
+    await t.test('8. Применение не меняет чекбокс способности', async () => {
       const ability = store.getSheet(sheetId)!.abilities.find((entry) => entry.id === abilityId)!;
       assert.equal(ability.checked, true);
     });
 
-    await t.test('9. Применение не бросает кубики', () => {
+    await t.test('9. Применение не бросает кубики', async () => {
       const entry = store.getDiceRolls()[0]!;
       assert.deepEqual(entry.dice, []);
       assert.deepEqual(entry.keptDice, []);
@@ -129,20 +127,19 @@ test('ability history scenarios 1-12: snapshot, permissions and untouched counte
       assert.equal(entry.discardedDie, null);
     });
 
-    await t.test('10. Событие не участвует в цепочке повторных бросков', () => {
+    await t.test('10. Событие не участвует в цепочке повторных бросков', async () => {
       assert.equal(store.getDiceRolls()[0]!.rerollOf, null);
     });
 
-    await t.test('11. Команда не принимает лишние поля', () => {
-      assert.throws(
-        () => executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId, counterValue: 0 }),
+    await t.test('11. Команда не принимает лишние поля', async () => {
+      await assert.rejects(() => executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId, counterValue: 0 }),
         /Некорректная команда применения/i,
       );
     });
 
-    await t.test('12. Снимок не зависит от последующего изменения способности', () => {
+    await t.test('12. Снимок не зависит от последующего изменения способности', async () => {
       const before = store.getDiceRolls()[0]!;
-      executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { name: 'Новое имя' } });
+      await executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { name: 'Новое имя' } });
       const after = store.getDiceRolls()[0]!;
       assert.equal(after.abilityName, before.abilityName);
       assert.equal(after.abilityDescription, before.abilityDescription);
@@ -153,26 +150,26 @@ test('ability history scenarios 1-12: snapshot, permissions and untouched counte
 test('history limit and fonts scenarios 13-22', async (t) => {
   const { store, cleanup } = temporaryStore();
   try {
-    await t.test('13. Общая история ограничена десятью последними событиями', () => {
+    await t.test('13. Общая история ограничена десятью последними событиями', async () => {
       for (let index = 0; index < 12; index += 1) {
         store.saveDiceRoll(diceEntry({ id: `roll-${index}`, createdAt: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`, total: index }));
       }
       assert.equal(store.getDiceRolls().length, 10);
     });
 
-    await t.test('14. При одиннадцатом событии удаляется самое старое независимо от типа', () => {
+    await t.test('14. При одиннадцатом событии удаляется самое старое независимо от типа', async () => {
       const { sheetId, abilityId } = createAssignedSheet(store);
       for (let index = 0; index < 10; index += 1) {
         store.saveDiceRoll(diceEntry({ id: `mixed-${index}`, createdAt: `2026-02-01T00:00:${String(index).padStart(2, '0')}.000Z` }));
       }
-      executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
+      await executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
       const entries = store.getDiceRolls();
       assert.equal(entries.length, 10);
       assert.equal(entries.some((entry) => entry.id === 'mixed-0'), false);
       assert.equal(entries[0]!.kind, 'ability-use');
     });
 
-    await t.test('15. Лимит сохраняет rerollOf у оставшихся записей', () => {
+    await t.test('15. Лимит сохраняет rerollOf у оставшихся записей', async () => {
       const { sheetId, abilityId } = createAssignedSheet(store);
       for (let index = 0; index < 4; index += 1) {
         store.saveDiceRoll(diceEntry({ id: `chain-${index}`, createdAt: `2026-03-01T00:00:0${index}.000Z` }));
@@ -180,12 +177,12 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       store.saveDiceRoll(diceEntry({ id: 'chain-reroll', createdAt: '2026-03-01T00:00:05.000Z', rerollOf: 'chain-2' }));
       const reroll = store.getDiceRolls().find((entry) => entry.id === 'chain-reroll');
       assert.equal(reroll?.rerollOf, 'chain-2');
-      executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
+      await executeSheetCommand(store, owner, { type: 'sheet:ability:apply', sheetId, id: abilityId });
       const kept = store.getDiceRolls().find((entry) => entry.id === 'chain-reroll');
       assert.equal(kept?.rerollOf, 'chain-2');
     });
 
-    await t.test('16. Миграция старой истории сохраняет строки и связи rerollOf', () => {
+    await t.test('16. Миграция старой истории сохраняет строки и связи rerollOf', async () => {
       const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-ux-dice-'));
       const legacy = new Database(join(dataDir, 'room.sqlite'));
       legacy.exec(`
@@ -213,7 +210,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       } finally { migrated.close(); rmSync(dataDir, { recursive: true, force: true }); }
     });
 
-    await t.test('17. После миграции CHECK допускает ability-use', () => {
+    await t.test('17. После миграции CHECK допускает ability-use', async () => {
       const { store: fresh, cleanup: freshCleanup } = temporaryStore();
       try {
         assert.doesNotThrow(() => fresh.saveDiceRoll(diceEntry({
@@ -226,7 +223,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       } finally { freshCleanup(); }
     });
 
-    await t.test('18. Старые заметки, стикеры, листы и способности получают стандартный шрифт', () => {
+    await t.test('18. Старые заметки, стикеры, листы и способности получают стандартный шрифт', async () => {
       const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-ux-legacy-'));
       const legacy = new Database(join(dataDir, 'room.sqlite'));
       legacy.exec(`
@@ -264,7 +261,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       } finally { migrated.close(); rmSync(dataDir, { recursive: true, force: true }); }
     });
 
-    await t.test('19. Шрифт стикера сохраняется и читается', () => {
+    await t.test('19. Шрифт стикера сохраняется и читается', async () => {
       executeBoardCommand(store, gm, {
         type: 'sticker:create', layerId: store.getLayers()[0]!.id, text: 'Caveat', x: 0, y: 0,
         fontFamily: 'caveat',
@@ -273,7 +270,7 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       assert.equal(sticker.fontFamily, 'caveat');
     });
 
-    await t.test('20. Шрифт заметки сохраняется и читается', () => {
+    await t.test('20. Шрифт заметки сохраняется и читается', async () => {
       store.createNote({
         id: 'note-font', title: 'Шрифт', body: 'Текст заметки', access: 'gm-only',
         selectedParticipantIds: [], creatorId: gm.participantId, assetIds: [], fontFamily: 'caveat',
@@ -281,26 +278,24 @@ test('history limit and fonts scenarios 13-22', async (t) => {
       assert.equal(store.getNote('note-font')!.fontFamily, 'caveat');
     });
 
-    await t.test('21. Шрифт листа и способности сохраняется через команды', () => {
+    await t.test('21. Шрифт листа и способности сохраняется через команды', async () => {
       const { sheetId, abilityId } = createAssignedSheet(store);
-      executeSheetCommand(store, owner, { type: 'sheet:update', id: sheetId, changes: { fontFamily: 'caveat' } });
-      executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { fontFamily: 'default' } });
+      await executeSheetCommand(store, owner, { type: 'sheet:update', id: sheetId, changes: { fontFamily: 'caveat' } });
+      await executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { fontFamily: 'default' } });
       assert.equal(store.getSheet(sheetId)!.fontFamily, 'caveat');
       assert.equal(store.getSheet(sheetId)!.abilities.find((entry) => entry.id === abilityId)!.fontFamily, 'default');
     });
 
-    await t.test('22. Неизвестный шрифт отклоняется для стикера, листа и способности', () => {
+    await t.test('22. Неизвестный шрифт отклоняется для стикера, листа и способности', async () => {
       const { sheetId, abilityId } = createAssignedSheet(store);
       assert.throws(
         () => executeBoardCommand(store, gm, { type: 'sticker:create', layerId: store.getLayers()[0]!.id, text: 'X', x: 0, y: 0, fontFamily: 'comic' }),
         /Недопустимый шрифт стикера/i,
       );
-      assert.throws(
-        () => executeSheetCommand(store, owner, { type: 'sheet:update', id: sheetId, changes: { fontFamily: 'comic' } }),
+      await assert.rejects(() => executeSheetCommand(store, owner, { type: 'sheet:update', id: sheetId, changes: { fontFamily: 'comic' } }),
         /Недопустимый шрифт/i,
       );
-      assert.throws(
-        () => executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { fontFamily: 'comic' } }),
+      await assert.rejects(() => executeSheetCommand(store, owner, { type: 'sheet:ability:update', sheetId, id: abilityId, changes: { fontFamily: 'comic' } }),
         /Недопустимый шрифт/i,
       );
     });
@@ -310,20 +305,21 @@ test('history limit and fonts scenarios 13-22', async (t) => {
 test('shared helpers and UI scenarios 23-29', async (t) => {
   const indexSource = readFileSync('src/pages/index.astro', 'utf8');
   const clientSource = readFileSync('src/client/app.ts', 'utf8');
+  const pbtaClientSource = readFileSync('src/modules/system/pbta-2d6/client.ts', 'utf8');
   const styleSource = readFileSync('src/styles/global.css', 'utf8');
 
-  await t.test('23. Краткое описание берёт первую непустую строку', () => {
+  await t.test('23. Краткое описание берёт первую непустую строку', async () => {
     assert.equal(abilityEventSummary('\n  Первая строка\nВторая'), 'Первая строка');
     assert.equal(abilityEventSummary(''), 'Без описания');
   });
 
-  await t.test('24. Длинное краткое описание обрезается с многоточием', () => {
+  await t.test('24. Длинное краткое описание обрезается с многоточием', async () => {
     const summary = abilityEventSummary('а'.repeat(300), 40);
     assert.equal(summary.length, 40);
     assert.ok(summary.endsWith('…'));
   });
 
-  await t.test('25. Меню открывается вверх при нехватке места снизу', () => {
+  await t.test('25. Меню открывается вверх при нехватке места снизу', async () => {
     const placement = placePopover(
       { top: 700, bottom: 734, left: 100, right: 180 },
       { width: 240, height: 300 },
@@ -333,7 +329,7 @@ test('shared helpers and UI scenarios 23-29', async (t) => {
     assert.equal(placement.top, 700 - 8 - 300);
   });
 
-  await t.test('26. Меню остаётся внутри границ экрана', () => {
+  await t.test('26. Меню остаётся внутри границ экрана', async () => {
     const placement = placePopover(
       { top: 20, bottom: 54, left: 1150, right: 1190 },
       { width: 260, height: 150 },
@@ -344,13 +340,13 @@ test('shared helpers and UI scenarios 23-29', async (t) => {
     assert.ok(placement.left >= 12);
   });
 
-  await t.test('27. overflowGroupCount переносит хвостовые группы целиком', () => {
+  await t.test('27. overflowGroupCount переносит хвостовые группы целиком', async () => {
     assert.equal(overflowGroupCount([100, 100, 100], 320, 10), 0);
     assert.equal(overflowGroupCount([100, 100, 100], 200, 0), 1);
     assert.equal(overflowGroupCount([100, 100, 100], 50, 10), 3);
   });
 
-  await t.test('28. Шрифты подключены локально, а верхняя панель и меню размечены', () => {
+  await t.test('28. Шрифты подключены локально, а верхняя панель и меню размечены', async () => {
     assert.deepEqual(BOARD_FONT_OPTIONS.map((option) => option.value), ['default', 'caveat']);
     assert.equal(DEFAULT_BOARD_FONT, 'default');
     assert.equal(isBoardFontFamily('caveat'), true);
@@ -374,11 +370,11 @@ test('shared helpers and UI scenarios 23-29', async (t) => {
     assert.match(clientSource, /setupMenus\(\)/);
     assert.match(clientSource, /scheduleTopbarLayout\(\)/);
     assert.match(clientSource, /placePopover\(/);
-    assert.match(clientSource, /sheet:ability:apply/);
+    assert.match(pbtaClientSource, /sheet:ability:apply/);
     assert.match(clientSource, /document\.fonts\.load\('16px Caveat'\)/);
   });
 
-  await t.test('29. Вложенное меню не закрывает своего предка', () => {
+  await t.test('29. Вложенное меню не закрывает своего предка', async () => {
     // Minimal stand-in for Element.contains with an explicit parent/child tree.
     function fakeMenu(children: unknown[] = []): { contains(node: unknown): boolean } {
       const node = { contains: (target: unknown) => target === node || children.includes(target) };

@@ -1,13 +1,16 @@
 import Konva from 'konva';
-import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CharacterSheetAbility, CropRect, DiceRollEntry, NoteListItem, NoteRecord, PersonalNoteListItem, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardStateMessage, BoardSticker, CharacterSheet, CropRect, DiceRollEntry, NoteListItem, NoteRecord, PersonalNoteListItem, RoomParticipant, SheetCharacteristicKey } from '../shared/board.js';
 import { cameraForBounds, isValidCamera, screenToWorld, zoomKeepingScreenPoint } from '../shared/camera.js';
 import { BOARD_FONT_OPTIONS, canvasFontFamily, cssFontFamily, isBoardFontFamily } from '../shared/fonts.js';
 import { clampRect, cropToDisplayRect, displayRectToCrop, lockTransformScales, transformedSize, type Rect } from '../shared/image-geometry.js';
 import { isImagePickable, isLayerPickable } from '../shared/layer-selection.js';
 import { menuIsWithin, overflowGroupCount, placePopover } from '../shared/menu.js';
-import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, formatSigned, readCollapsedAbilities, readSheetPanelPreference, readSheetRollPanelPreference, setAbilityCollapsed, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
-import { findSystemModule } from '../modules/registry.js';
-import { pbtaSheetSchema, pbtaSystemModule } from '../modules/system/pbta-2d6/module.js';
+import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, DEFAULT_SHEET_PANEL_MODE, readSheetPanelPreference, readSheetRollPanelPreference, toggleSheetMode, writeSheetPanelPreference, writeSheetRollPanelPreference, type SheetPanelMode, type SheetPanelPreference } from '../shared/sheet-ui.js';
+import { SystemHost } from '../modules/client-host.js';
+import { loadSystemClient } from '../modules/client-registry.js';
+import { findLatestSystemMetadata, findSystemMetadata, systemMetadataOptions } from '../modules/manifest.js';
+import type { SystemIdentity, SystemRoomView, SystemRuntimeInfo } from '../modules/client-contract.js';
+import { sheetSection } from './sheet-dom.js';
 import { shouldHideGmOnlyElement } from '../shared/role-ui.js';
 
 const select = <T extends HTMLElement>(selector: string): T => {
@@ -66,10 +69,7 @@ const systemSave = select<HTMLButtonElement>('#room-system-save');
 const systemReadonly = select<HTMLElement>('#room-system-readonly');
 const systemName = select<HTMLElement>('#room-system-name');
 const systemVersion = select<HTMLElement>('#room-system-version');
-const pbtaControls = select<HTMLElement>('#pbta-roll-controls');
-const nechronicaControls = select<HTMLElement>('#nechronica-roll-controls');
-const pbtaActorRow = select<HTMLElement>('#pbta-actor-row');
-const pbtaActor = select<HTMLSelectElement>('#pbta-actor');
+const systemRollControlsHome = select<HTMLElement>('#system-roll-controls-home');
 const battleMapGroup = select<HTMLElement>('[data-topbar-group="battle"]');
 const battlePreviewToggle = select<HTMLButtonElement>('#battle-preview-toggle');
 const battleActivate = select<HTMLButtonElement>('#battle-activate');
@@ -90,7 +90,6 @@ const sheetMessage = select<HTMLElement>('#sheet-message');
 const sheetRollPanel = select<HTMLElement>('#sheet-roll-panel');
 const sheetRollName = select<HTMLElement>('#sheet-roll-name');
 const sheetRollControls = select<HTMLElement>('#sheet-roll-controls');
-const pbtaControlsHome = select<HTMLElement>('#pbta-controls-home');
 const selectedLayer = select<HTMLSelectElement>('#object-layer');
 const stretchControl = select<HTMLInputElement>('#free-stretch');
 const allowPlayerMoveControl = select<HTMLInputElement>('#allow-player-move');
@@ -412,6 +411,10 @@ function refreshCreateToggle(): void {
 
 function login(nextIdentity: AppIdentity, nextRoomId?: string) {
   if (nextRoomId) currentRoomId = nextRoomId;
+  // A new session must never inherit a module mounted for the previous room.
+  systemActivationKey = undefined;
+  systemActivation = undefined;
+  systemHost.deactivate();
   if (currentRoomId && location.pathname !== `/room/${currentRoomId}`) {
     history.replaceState(null, '', `/room/${encodeURIComponent(currentRoomId)}`);
   }
@@ -512,6 +515,122 @@ function withCommandScene(type: string, data: Record<string, unknown>): Record<s
 async function runCommand(type: string, data: Record<string, unknown> = {}) {
   try { await sendCommand(type, data); }
   catch (error) { showCanvasMessage(error instanceof Error ? error.message : 'Ошибка сервера.', true); }
+}
+
+/** Compact runtime view of the room system; implementations never read globals. */
+function runtimeSystemInfo(system: RoomMessage['system']): SystemRuntimeInfo | undefined {
+  if (!system.fixed || !system.id || !system.version) return undefined;
+  const metadata = findSystemMetadata(system.id, system.version);
+  // Keep the pinned pair even when this build does not know it: the lazy
+  // loader must produce the explicit unsupported-version error, not a silent
+  // "no system" state.
+  return {
+    id: system.id,
+    version: system.version,
+    name: metadata?.name ?? system.name ?? system.id,
+    capabilities: { battleMap: metadata?.capabilities.battleMap === true },
+  };
+}
+
+function currentSystemIdentity(): SystemIdentity | undefined {
+  if (!identity) return undefined;
+  return { participantId: identity.participantId, name: identity.name, role: identity.role };
+}
+
+function currentSystemRoomView(): SystemRoomView {
+  return {
+    roomId: currentRoomId,
+    system: roomState
+      ? runtimeSystemInfo(roomState.system) ?? { id: '', version: '', name: '', capabilities: { battleMap: false } }
+      : { id: '', version: '', name: '', capabilities: { battleMap: false } },
+    participants: (roomState?.participants ?? []).map((participant) => ({
+      participantId: participant.participantId,
+      name: participant.name,
+      role: participant.role,
+    })),
+    activeScene: roomState?.activeScene,
+  };
+}
+
+let systemLoadError: string | undefined;
+
+/**
+ * The host caches loaded code by `id@version` and owns the mounted instance.
+ * Every room gets a fresh module instance; a stale import never mounts.
+ */
+const systemHost = new SystemHost({
+  load: loadSystemClient,
+  createContext(system) {
+    const fallbackIdentity: SystemIdentity = { participantId: '', name: '', role: 'player' };
+    return {
+      roomId: currentRoomId ?? 'default',
+      system,
+      identity: currentSystemIdentity() ?? fallbackIdentity,
+      elements: {
+        sheet: sheetContent,
+        rollControlsHome: systemRollControlsHome,
+      },
+      services: {
+        command: (type, data) => runCommand(type, data),
+        message: (text, error) => showCanvasMessage(text, error),
+        getState: currentSystemRoomView,
+        getIdentity: () => currentSystemIdentity() ?? fallbackIdentity,
+        openRoll: (sheet, key, characteristicName) => prepareSheetRoll(sheet, key, characteristicName),
+        getPendingRoll: () => pendingRollContext,
+        clearPendingRoll: () => { pendingRollContext = undefined; },
+        openAbilityAssetPicker: (abilityId, assetId) => {
+          editingAbilityId = abilityId;
+          selectedAbilityAssetId = assetId ?? undefined;
+          openAssetPicker('ability');
+        },
+        applyFont: (element, font) => applyBoardFont(element, font),
+        assetUrl,
+        storageScope: roomStorageScope,
+        renderSheet: () => renderSheetPanel(),
+      },
+    };
+  },
+  onError(error) {
+    systemLoadError = error.message;
+    showCanvasMessage(error.message, true);
+  },
+});
+
+let systemActivationKey: string | undefined;
+let systemActivation: Promise<void> | undefined;
+
+/**
+ * Synchronises the mounted module with the current room. Repeated room-state
+ * frames reuse the same activation; a different room/pair starts a new
+ * generation, so the previous module is disposed before the new one mounts.
+ */
+function syncSystemModule(): Promise<void> {
+  const roomId = currentRoomId ?? 'default';
+  const system = roomState ? runtimeSystemInfo(roomState.system) : undefined;
+  if (!system) {
+    systemActivationKey = undefined;
+    systemActivation = undefined;
+    systemLoadError = undefined;
+    systemHost.deactivate();
+    return Promise.resolve();
+  }
+  const key = `${roomId}::${system.id}@${system.version}`;
+  if (systemActivationKey === key && systemActivation) return systemActivation;
+  systemActivationKey = key;
+  systemLoadError = undefined;
+  const activation = systemHost.activate(roomId, system).then((result) => {
+    if (systemActivationKey !== key) return;
+    if (result.status === 'error') {
+      // Keep the key so an unsupported pinned version is not retried on every
+      // room frame; the error is shown once and requires a controlled migration.
+      showCanvasMessage(result.error.message, true);
+      return;
+    }
+    renderDicePanel();
+    if (openSheetId) renderSheetPanel();
+  });
+  systemActivation = activation;
+  return activation;
 }
 
 async function refreshBoard() {
@@ -1301,7 +1420,8 @@ function raiseSheetRollPanel(): void {
 
 function openSheetRollPanel(characteristicName: string): void {
   sheetRollName.textContent = characteristicName;
-  if (pbtaControls.parentElement !== sheetRollControls) sheetRollControls.append(pbtaControls);
+  const controls = systemRollControlsHome.firstElementChild ?? sheetRollControls.firstElementChild;
+  if (controls && controls.parentElement !== sheetRollControls) sheetRollControls.append(controls);
   sheetRollPanel.hidden = false;
   positionSheetRollPanel();
   raiseSheetRollPanel();
@@ -1309,7 +1429,8 @@ function openSheetRollPanel(characteristicName: string): void {
 
 function closeSheetRollPanel(): void {
   if (!sheetRollPanel.hidden) sheetRollPanel.hidden = true;
-  if (pbtaControls.parentElement !== pbtaControlsHome) pbtaControlsHome.append(pbtaControls);
+  const controls = sheetRollControls.firstElementChild;
+  if (controls && controls.parentElement !== systemRollControlsHome) systemRollControlsHome.append(controls);
   pendingRollContext = undefined;
 }
 
@@ -1396,6 +1517,7 @@ function updateBoard(state: RoomMessage) {
   }
   knownDiceRollIds = nextIds;
   roomState = state;
+  void syncSystemModule();
   // The battle map is a system capability; never keep a local preview without it.
   if (!state.system.capabilities.battleMap) viewingBattle = false;
   // If another GM session activated the battle map, the local preview is no longer needed.
@@ -1487,10 +1609,24 @@ function setViewingBattle(next: boolean): void {
   drawObjects();
 }
 
+function renderSystemOptions(): void {
+  if (systemSelect.dataset.ready === 'true') return;
+  const options: HTMLOptionElement[] = [];
+  const none = document.createElement('option'); none.value = 'none'; none.textContent = 'Без системы'; options.push(none);
+  for (const metadata of systemMetadataOptions()) {
+    const option = document.createElement('option');
+    option.value = metadata.id;
+    option.textContent = metadata.name;
+    options.push(option);
+  }
+  systemSelect.replaceChildren(...options);
+  systemSelect.dataset.ready = 'true';
+}
+
 function renderDicePanel() {
   if (!roomState || !identity) return;
+  renderSystemOptions();
   const system = roomState.system;
-  const activeId = system.id ?? 'none';
   systemSelect.hidden = system.fixed;
   systemReadonly.hidden = !system.fixed;
   if (system.fixed) {
@@ -1502,16 +1638,10 @@ function renderDicePanel() {
     systemSave.hidden = identity.role !== 'gm';
     systemSave.textContent = 'Закрепить систему';
   }
-  pbtaControls.hidden = activeId !== 'pbta-2d6';
-  nechronicaControls.hidden = activeId !== 'nechronica';
-  if (activeId !== 'pbta-2d6' && !sheetRollPanel.hidden) closeSheetRollPanel();
-  pbtaActorRow.hidden = identity.role !== 'gm';
-  pbtaActor.hidden = identity.role !== 'gm';
-  const actorValue = pbtaActor.value;
-  pbtaActor.replaceChildren(...roomState.participants.filter((participant) => participant.role === 'player').map((participant) => {
-    const option = document.createElement('option'); option.value = participant.participantId; option.textContent = participant.name; return option;
-  }));
-  if (roomState.participants.some((participant) => participant.participantId === actorValue && participant.role === 'player')) pbtaActor.value = actorValue;
+  const activeSystem = runtimeSystemInfo(system);
+  const hostActive = Boolean(activeSystem && systemHost.isActive(currentRoomId ?? 'default', activeSystem));
+  if (!hostActive && !sheetRollPanel.hidden) closeSheetRollPanel();
+  systemHost.renderRollControls();
   diceHistory.replaceChildren();
   if (!roomState.diceRolls.length) {
     const empty = document.createElement('li'); empty.className = 'dice-history-empty'; empty.textContent = 'Пока нет событий.'; diceHistory.append(empty); return;
@@ -1816,56 +1946,12 @@ function closeSheetPanel() {
   saveSheetPanelPreference();
 }
 
-function sheetSection(title: string, className: string): HTMLElement {
-  const section = document.createElement('section');
-  section.className = `sheet-section ${className}`;
-  const heading = document.createElement('h3');
-  heading.textContent = title;
-  section.append(heading);
-  return section;
-}
-
-function numberFromInput(input: HTMLInputElement, fallback: number): number {
-  const value = Number(input.value);
-  return Number.isSafeInteger(value) ? value : fallback;
-}
-
-function makeStepper(
-  value: number, min: number, max: number, label: string,
-  onChange: (value: number) => void,
-): HTMLElement {
-  const wrap = document.createElement('div');
-  wrap.className = 'sheet-stepper';
-  const minus = document.createElement('button'); minus.type = 'button'; minus.textContent = '−'; minus.setAttribute('aria-label', `Уменьшить ${label}`);
-  const input = document.createElement('input'); input.type = 'number'; input.min = String(min); input.max = String(max); input.value = String(value); input.setAttribute('aria-label', label);
-  const plus = document.createElement('button'); plus.type = 'button'; plus.textContent = '+'; plus.setAttribute('aria-label', `Увеличить ${label}`);
-  const emit = (next: number) => {
-    const bounded = Math.max(min, Math.min(max, Math.round(next)));
-    input.value = String(bounded);
-    onChange(bounded);
-  };
-  minus.addEventListener('click', () => emit(numberFromInput(input, value) - 1));
-  plus.addEventListener('click', () => emit(numberFromInput(input, value) + 1));
-  input.addEventListener('change', () => emit(numberFromInput(input, value)));
-  wrap.append(minus, input, plus);
-  return wrap;
-}
-
-function moveIds<T extends { id: string; orderIndex: number }>(items: T[], id: string, direction: -1 | 1): string[] | undefined {
-  const sorted = [...items].sort((left, right) => left.orderIndex - right.orderIndex);
-  const index = sorted.findIndex((item) => item.id === id);
-  const target = index + direction;
-  if (index < 0 || target < 0 || target >= sorted.length) return undefined;
-  const [moving] = sorted.splice(index, 1);
-  sorted.splice(target, 0, moving!);
-  return sorted.map((item) => item.id);
-}
-
 function prepareSheetRoll(sheet: CharacterSheet, key: SheetCharacteristicKey, characteristicName: string) {
   if (!identity || !roomState || !canPrepareSheetRoll(sheet)) return;
   const active = roomState.system;
-  if (!active.fixed || active.id !== pbtaSystemModule.id || active.version !== pbtaSystemModule.version) {
-    showCanvasMessage('В комнате не закреплена система PbtA.', true);
+  if (!active.fixed || !active.id || !active.version
+    || sheet.systemId !== active.id || sheet.systemVersion !== active.version) {
+    showCanvasMessage('В комнате не закреплена доступная игровая система.', true);
     return;
   }
   const assignedPlayerId = sheet.assignedPlayerId;
@@ -1873,21 +1959,17 @@ function prepareSheetRoll(sheet: CharacterSheet, key: SheetCharacteristicKey, ch
     showCanvasMessage('Лист не назначен игроку — бросок недоступен.', true);
     return;
   }
-  if (identity.role === 'gm') {
-    if (![...pbtaActor.options].some((option) => option.value === assignedPlayerId)) {
-      showCanvasMessage('Назначенный игрок не подключён, бросок от его имени недоступен.', true);
-      return;
-    }
-    pbtaActor.value = assignedPlayerId;
+  if (identity.role === 'gm' && !roomState.participants.some((participant) => participant.participantId === assignedPlayerId && participant.role === 'player')) {
+    showCanvasMessage('Назначенный игрок не подключён, бросок от его имени недоступен.', true);
+    return;
   }
   pendingRollContext = buildSheetRollContext(sheet, key, characteristicName);
-  select<HTMLInputElement>('#pbta-bonus').value = String(pendingRollContext.characteristicBonus);
   openSheetRollPanel(characteristicName);
 }
 
 function renderSheetPanel() {
   const sheet = openSheetId ? (roomState?.sheets || []).find((entry) => entry.id === openSheetId) : undefined;
-  if (!sheet || !identity) {
+  if (!sheet || !identity || !roomState) {
     openSheetId = undefined;
     sheetPanel.hidden = true;
     closeSheetRollPanel();
@@ -1899,7 +1981,7 @@ function renderSheetPanel() {
   sheetNameHeading.textContent = sheet.characterName || 'Без имени';
   applyBoardFont(sheetNameHeading, sheet.fontFamily);
   sheetOwnerLabel.textContent = sheet.assignedPlayerName ? `Игрок: ${sheet.assignedPlayerName}` : 'Не назначен';
-  const systemModule = findSystemModule(sheet.systemId, sheet.systemVersion);
+  const systemModule = findSystemMetadata(sheet.systemId, sheet.systemVersion);
   sheetSystemLabel.textContent = `${systemModule?.name ?? sheet.systemId} · версия ${sheet.systemVersion} · схема ${sheet.schemaVersion}${sheet.creatorName !== sheet.assignedPlayerName ? ` · создатель: ${sheet.creatorName}` : ''}`;
   if (sheet.portraitAssetId) {
     sheetPortrait.src = assetUrl(sheet.portraitAssetId);
@@ -1946,285 +2028,31 @@ function renderSheetPanel() {
     sheetContent.append(identitySection);
   }
 
-  if (sheet.systemId !== pbtaSystemModule.id) {
-    // Other systems share the floating panel shell and common identity fields,
-    // but never render PbtA characteristics, counters or abilities.
-    const placeholder = sheetSection('Лист персонажа', 'sheet-placeholder-section');
+  const active = roomState.system;
+  if (!active.id || !active.version || sheet.systemId !== active.id || sheet.systemVersion !== active.version) {
+    const mismatch = sheetSection('Лист персонажа', 'sheet-placeholder-section');
     const note = document.createElement('p');
-    note.className = 'panel-note sheet-placeholder';
-    note.textContent = 'Лист персонажа Nechronica — находится в разработке';
-    placeholder.append(note);
-    sheetContent.append(placeholder);
+    note.className = 'panel-note';
+    note.textContent = 'Лист относится к другой игровой системе.';
+    mismatch.append(note);
+    sheetContent.append(mismatch);
     return;
   }
-
-  const characteristics = sheetSection('Характеристики', 'sheet-characteristics-section');
-  if (canPrepareSheetRoll(sheet)) {
-    const hint = document.createElement('p'); hint.className = 'panel-note'; hint.textContent = 'Нажмите на название характеристики, чтобы открыть окно броска PbtA.';
-    characteristics.append(hint);
+  if (!systemHost.instance) {
+    const loading = sheetSection('Лист персонажа', 'sheet-placeholder-section');
+    const note = document.createElement('p');
+    note.className = 'panel-note';
+    note.textContent = systemLoadError ?? 'Системный модуль загружается…';
+    note.classList.toggle('error-text', Boolean(systemLoadError));
+    loading.append(note);
+    sheetContent.append(loading);
+    return;
   }
-  const characteristicGrid = document.createElement('div'); characteristicGrid.className = 'sheet-characteristics';
-  for (const definition of pbtaSheetSchema.characteristics) {
-    const card = document.createElement('div'); card.className = 'sheet-characteristic';
-    const name = document.createElement('button'); name.type = 'button'; name.className = 'sheet-characteristic-name'; name.textContent = definition.name;
-    if (canPrepareSheetRoll(sheet)) {
-      name.title = 'Подготовить бросок по этой характеристике';
-      name.addEventListener('click', () => prepareSheetRoll(sheet, definition.key, definition.name));
-    } else {
-      name.disabled = true;
-      name.title = 'Только просмотр';
-    }
-    card.append(name);
-    if (editing) {
-      card.append(makeStepper(sheet.characteristics[definition.key], -1000, 1000, definition.name, (value) => {
-        void runCommand('sheet:update', { id: sheet.id, changes: { characteristics: { [definition.key]: value } } });
-      }));
-    } else {
-      const value = document.createElement('span'); value.className = 'sheet-characteristic-value'; value.textContent = formatSigned(sheet.characteristics[definition.key]);
-      card.append(value);
-    }
-    characteristicGrid.append(card);
-  }
-  characteristics.append(characteristicGrid);
-  sheetContent.append(characteristics);
-
-  const fate = sheetSection('Сила Судьбы', 'sheet-fate-section');
-  const fateRow = document.createElement('div'); fateRow.className = 'sheet-resource';
-  const fateLabel = document.createElement('strong'); fateLabel.textContent = 'Сила Судьбы';
-  fateRow.append(fateLabel);
-  if (canEdit) {
-    fateRow.append(makeStepper(sheet.fate, -1_000_000_000, 1_000_000_000, 'Сила Судьбы', (value) => {
-      void runCommand('sheet:fate:update', { sheetId: sheet.id, value });
-    }));
-  } else {
-    const value = document.createElement('span'); value.className = 'sheet-resource-value'; value.textContent = String(sheet.fate);
-    fateRow.append(value);
-  }
-  const fateNote = document.createElement('p'); fateNote.className = 'panel-note'; fateNote.textContent = 'Не списывается автоматически при повторном броске — учитывайте расход вручную.';
-  fate.append(fateRow, fateNote);
-  sheetContent.append(fate);
-
-  const counters = sheetSection('Дополнительные счётчики', 'sheet-counters-section');
-  const sortedCounters = [...sheet.counters].sort((left, right) => left.orderIndex - right.orderIndex);
-  if (!sortedCounters.length) {
-    const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Дополнительных счётчиков нет.';
-    counters.append(empty);
-  }
-  for (const counter of sortedCounters) {
-    const row = document.createElement('div'); row.className = 'sheet-counter-row';
-    if (editing) {
-      const name = document.createElement('input'); name.value = counter.name; name.maxLength = 80; name.setAttribute('aria-label', 'Название счётчика');
-      name.addEventListener('change', () => void runCommand('sheet:counter:update', { sheetId: sheet.id, id: counter.id, changes: { name: name.value } }));
-      row.append(name, makeStepper(counter.value, -1_000_000_000, 1_000_000_000, counter.name, (value) => {
-        void runCommand('sheet:counter:update', { sheetId: sheet.id, id: counter.id, changes: { value } });
-      }));
-      const tools = document.createElement('div'); tools.className = 'sheet-row-tools';
-      tools.append(
-        makeRowButton('↑', 'Переместить выше', () => {
-          const ids = moveIds(sheet.counters, counter.id, -1); if (ids) void runCommand('sheet:counter:reorder', { sheetId: sheet.id, ids });
-        }),
-        makeRowButton('↓', 'Переместить ниже', () => {
-          const ids = moveIds(sheet.counters, counter.id, 1); if (ids) void runCommand('sheet:counter:reorder', { sheetId: sheet.id, ids });
-        }),
-        makeRowButton('×', 'Удалить счётчик', () => void runCommand('sheet:counter:delete', { sheetId: sheet.id, id: counter.id }), true),
-      );
-      row.append(tools);
-    } else {
-      const name = document.createElement('span'); name.textContent = counter.name;
-      if (canEdit) {
-        row.append(name, makeStepper(counter.value, -1_000_000_000, 1_000_000_000, counter.name, (value) => {
-          void runCommand('sheet:counter:value', { sheetId: sheet.id, id: counter.id, value });
-        }));
-      } else {
-        const value = document.createElement('strong'); value.textContent = String(counter.value);
-        row.append(name, value);
-      }
-    }
-    counters.append(row);
-  }
-  if (editing) {
-    const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary sheet-add-button'; add.textContent = '＋ Счётчик';
-    add.addEventListener('click', () => {
-      const name = window.prompt('Название счётчика', 'Ресурс');
-      if (name?.trim()) void runCommand('sheet:counter:create', { sheetId: sheet.id, name: name.trim(), value: 0 });
-    });
-    counters.append(add);
-  }
-  sheetContent.append(counters);
-
-  const abilities = sheetSection('Особые способности', 'sheet-abilities-section');
-  const collapsed = readCollapsedAbilities(localStorage, roomStorageScope(), identity.participantId, sheet.id);
-  const sortedAbilities = [...sheet.abilities].sort((left, right) => left.orderIndex - right.orderIndex);
-  if (!sortedAbilities.length) {
-    const empty = document.createElement('p'); empty.className = 'panel-note'; empty.textContent = 'Особых способностей нет.';
-    abilities.append(empty);
-  }
-  for (const ability of sortedAbilities) {
-    abilities.append(renderSheetAbility(sheet, ability, editing, collapsed.has(ability.id)));
-  }
-  if (editing) {
-    const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary sheet-add-button'; add.textContent = '＋ Способность';
-    add.addEventListener('click', () => {
-      const name = window.prompt('Название способности', 'Новая способность');
-      if (name?.trim()) void runCommand('sheet:ability:create', { sheetId: sheet.id, name: name.trim() });
-    });
-    abilities.append(add);
-  }
-  sheetContent.append(abilities);
-}
-
-function makeRowButton(label: string, title: string, action: () => void, danger = false): HTMLButtonElement {
-  const button = document.createElement('button'); button.type = 'button'; button.className = danger ? 'sheet-row-button danger-text' : 'sheet-row-button'; button.textContent = label; button.title = title; button.setAttribute('aria-label', title);
-  button.addEventListener('click', action);
-  return button;
-}
-
-function renderSheetAbility(sheet: CharacterSheet, ability: CharacterSheetAbility, editing: boolean, collapsed: boolean): HTMLElement {
-  const card = document.createElement('article'); card.className = 'sheet-ability';
-  const header = document.createElement('div'); header.className = 'sheet-ability-header';
-  const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'sheet-ability-expand'; expand.textContent = collapsed ? '▸' : '▾'; expand.setAttribute('aria-expanded', String(!collapsed)); expand.setAttribute('aria-label', collapsed ? 'Развернуть способность' : 'Свернуть способность');
-  expand.addEventListener('click', () => {
-    if (!identity) return;
-    setAbilityCollapsed(localStorage, roomStorageScope(), identity.participantId, sheet.id, ability.id, !collapsed);
-    renderSheetPanel();
+  systemHost.renderSheet(sheet, {
+    editing,
+    canEdit,
+    canRoll: canPrepareSheetRoll(sheet),
   });
-  const image = makeSheetPortrait(ability.assetId, ability.name, 'sheet-ability-image');
-  const title = document.createElement('strong'); title.className = 'sheet-ability-name'; title.textContent = ability.name || 'Без названия';
-  applyBoardFont(title, ability.fontFamily);
-  header.append(expand, image, title);
-  if (collapsed && ability.counterEnabled) {
-    const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = `${ability.counterName || 'Счётчик'}: ${ability.counterValue}`;
-    header.append(summary);
-  }
-  if (collapsed && ability.checkboxEnabled && ability.checked) {
-    const summary = document.createElement('span'); summary.className = 'sheet-ability-summary'; summary.textContent = ability.checkboxLabel || 'Отмечено';
-    header.append(summary);
-  }
-  if (canEditSheet(sheet)) {
-    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'secondary sheet-ability-apply';
-    apply.textContent = 'Применить';
-    apply.title = 'Добавить событие применения способности в историю';
-    apply.addEventListener('click', () => {
-      apply.disabled = true;
-      void runCommand('sheet:ability:apply', { sheetId: sheet.id, id: ability.id }).finally(() => { apply.disabled = false; });
-    });
-    header.append(apply);
-  }
-  card.append(header);
-  if (collapsed) return card;
-
-  const body = document.createElement('div'); body.className = 'sheet-ability-body';
-  const description = document.createElement('div'); description.className = 'sheet-ability-description'; description.textContent = ability.description || 'Описание не задано.';
-  applyBoardFont(description, ability.fontFamily);
-  body.append(description);
-
-  if (ability.counterEnabled) {
-    const counter = document.createElement('div'); counter.className = 'sheet-resource sheet-ability-resource';
-    const label = document.createElement('strong'); label.textContent = ability.counterName || 'Счётчик';
-    counter.append(label);
-    if (canEditSheet(sheet)) {
-      counter.append(makeStepper(ability.counterValue, -1_000_000_000, 1_000_000_000, ability.counterName || 'Счётчик способности', (value) => {
-        if (editing) void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterValue: value } });
-        else void runCommand('sheet:ability:value', { sheetId: sheet.id, id: ability.id, counterValue: value });
-      }));
-    } else {
-      const value = document.createElement('span'); value.className = 'sheet-resource-value'; value.textContent = String(ability.counterValue);
-      counter.append(value);
-    }
-    body.append(counter);
-  }
-
-  if (ability.checkboxEnabled) {
-    const checkLabel = document.createElement('label'); checkLabel.className = 'sheet-ability-check';
-    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = ability.checked; checkbox.disabled = !canEditSheet(sheet);
-    checkbox.addEventListener('change', () => {
-      if (editing) void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checked: checkbox.checked } });
-      else void runCommand('sheet:ability:value', { sheetId: sheet.id, id: ability.id, checked: checkbox.checked });
-    });
-    checkLabel.append(checkbox, document.createTextNode(ability.checkboxLabel || 'Отметка'));
-    body.append(checkLabel);
-  }
-
-  if (editing) {
-    const editor = document.createElement('div'); editor.className = 'sheet-ability-editor';
-    const nameLabel = document.createElement('label'); nameLabel.textContent = 'Название';
-    const name = document.createElement('input'); name.value = ability.name; name.maxLength = 80;
-    name.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { name: name.value } }));
-    nameLabel.append(name);
-    const descriptionLabel = document.createElement('label'); descriptionLabel.textContent = 'Описание';
-    const descriptionInput = document.createElement('textarea'); descriptionInput.rows = 5; descriptionInput.maxLength = 8000; descriptionInput.value = ability.description;
-    descriptionInput.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { description: descriptionInput.value } }));
-    descriptionLabel.append(descriptionInput);
-    const fontLabel = document.createElement('label'); fontLabel.textContent = 'Шрифт';
-    const fontSelect = document.createElement('select');
-    for (const font of BOARD_FONT_OPTIONS) { const option = document.createElement('option'); option.value = font.value; option.textContent = font.label; fontSelect.append(option); }
-    fontSelect.value = ability.fontFamily || 'default';
-    fontSelect.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { fontFamily: fontSelect.value } }));
-    fontLabel.append(fontSelect);
-    editor.append(nameLabel, descriptionLabel, fontLabel);
-
-    const imageRow = document.createElement('div'); imageRow.className = 'sheet-portrait-actions';
-    const pick = document.createElement('button'); pick.type = 'button'; pick.className = 'secondary'; pick.textContent = 'Выбрать картинку';
-    pick.addEventListener('click', () => { editingAbilityId = ability.id; selectedAbilityAssetId = ability.assetId ?? undefined; openAssetPicker('ability'); });
-    imageRow.append(pick);
-    if (ability.assetId) {
-      const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'secondary danger-text'; clear.textContent = 'Убрать картинку';
-      clear.addEventListener('click', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { assetId: null } }));
-      imageRow.append(clear);
-    }
-    editor.append(imageRow);
-
-    const counterToggle = document.createElement('label'); counterToggle.className = 'sheet-inline-check';
-    const counterEnabled = document.createElement('input'); counterEnabled.type = 'checkbox'; counterEnabled.checked = ability.counterEnabled;
-    counterEnabled.addEventListener('change', () => {
-      const next = counterEnabled.checked;
-      void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterEnabled: next, ...(next && !ability.counterName ? { counterName: 'Заряды' } : {}) } });
-    });
-    counterToggle.append(counterEnabled, document.createTextNode(' Числовой счётчик'));
-    editor.append(counterToggle);
-    if (ability.counterEnabled) {
-      const counterNameLabel = document.createElement('label'); counterNameLabel.textContent = 'Название счётчика';
-      const counterName = document.createElement('input'); counterName.value = ability.counterName; counterName.maxLength = 80;
-      counterName.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { counterName: counterName.value } }));
-      counterNameLabel.append(counterName);
-      editor.append(counterNameLabel);
-    }
-
-    const checkboxToggle = document.createElement('label'); checkboxToggle.className = 'sheet-inline-check';
-    const checkboxEnabled = document.createElement('input'); checkboxEnabled.type = 'checkbox'; checkboxEnabled.checked = ability.checkboxEnabled;
-    checkboxEnabled.addEventListener('change', () => {
-      const next = checkboxEnabled.checked;
-      void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checkboxEnabled: next, ...(next && !ability.checkboxLabel ? { checkboxLabel: 'Использовано' } : {}) } });
-    });
-    checkboxToggle.append(checkboxEnabled, document.createTextNode(' Чекбокс'));
-    editor.append(checkboxToggle);
-    if (ability.checkboxEnabled) {
-      const checkboxLabel = document.createElement('label'); checkboxLabel.textContent = 'Подпись чекбокса';
-      const checkboxText = document.createElement('input'); checkboxText.value = ability.checkboxLabel; checkboxText.maxLength = 80;
-      checkboxText.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checkboxLabel: checkboxText.value } }));
-      checkboxLabel.append(checkboxText);
-      const checkedLabel = document.createElement('label'); checkedLabel.className = 'sheet-inline-check';
-      const checked = document.createElement('input'); checked.type = 'checkbox'; checked.checked = ability.checked;
-      checked.addEventListener('change', () => void runCommand('sheet:ability:update', { sheetId: sheet.id, id: ability.id, changes: { checked: checked.checked } }));
-      checkedLabel.append(checked, document.createTextNode(' Отмечено'));
-      editor.append(checkboxLabel, checkedLabel);
-    }
-
-    const tools = document.createElement('div'); tools.className = 'sheet-row-tools';
-    tools.append(
-      makeRowButton('↑', 'Переместить выше', () => {
-        const ids = moveIds(sheet.abilities, ability.id, -1); if (ids) void runCommand('sheet:ability:reorder', { sheetId: sheet.id, ids });
-      }),
-      makeRowButton('↓', 'Переместить ниже', () => {
-        const ids = moveIds(sheet.abilities, ability.id, 1); if (ids) void runCommand('sheet:ability:reorder', { sheetId: sheet.id, ids });
-      }),
-      makeRowButton('×', 'Удалить способность', () => void runCommand('sheet:ability:delete', { sheetId: sheet.id, id: ability.id }), true),
-    );
-    editor.append(tools);
-    body.append(editor);
-  }
-  card.append(body);
-  return card;
 }
 
 function setNoteMessage(message: string) { select<HTMLElement>('#note-message').textContent = message; }
@@ -2879,6 +2707,9 @@ function formatSize(bytes: number) {
 }
 
 function closeWorkspace(message: string) {
+  systemActivationKey = undefined;
+  systemActivation = undefined;
+  systemHost.deactivate();
   resizeObserver?.disconnect();
   stage?.destroy(); stage = undefined; boardLayer = undefined; interactionLayer = undefined; transformer = undefined; cropTransformer = undefined; markerTransformer = undefined;
   markerResizeMode = false; markerResizeOriginal = undefined;
@@ -2952,12 +2783,6 @@ sheetEditToggle.addEventListener('click', () => {
   clampFloatingPanel(sheetPanel);
   saveSheetPanelPreference();
 });
-select<HTMLInputElement>('#pbta-bonus').addEventListener('input', () => {
-  if (pendingRollContext && Number(select<HTMLInputElement>('#pbta-bonus').value) !== pendingRollContext.characteristicBonus) pendingRollContext = undefined;
-});
-pbtaActor.addEventListener('change', () => {
-  if (pendingRollContext && identity?.role === 'gm' && pbtaActor.value !== pendingRollContext.characterOwnerId) pendingRollContext = undefined;
-});
 makeFloatingPanelDraggable(diceToolsPanel, 'dice-tools');
 makeFloatingPanelDraggable(diceHistoryPanel, 'dice-history');
 makeFloatingPanelDraggable(sheetPanel, 'sheet');
@@ -2986,7 +2811,7 @@ systemSave.addEventListener('click', () => {
   const message = 'Игровая система закрепляется за комнатой навсегда. После подтверждения сменить её будет нельзя. Продолжить?';
   if (!window.confirm(message)) return;
   if (systemId === 'none') { void runCommand('room:system:initialize', { systemId: null }); return; }
-  const module = findSystemModule(systemId);
+  const module = findLatestSystemMetadata(systemId);
   if (!module) { showCanvasMessage('Выбранная система недоступна.', true); return; }
   void runCommand('room:system:initialize', { systemId: module.id, version: module.version });
 });
@@ -3006,20 +2831,6 @@ battleDeactivate.addEventListener('click', () => {
   if (identity?.role !== 'gm' || !roomState?.system.capabilities.battleMap) return;
   viewingBattle = false;
   void runCommand('room:scene:set', { scene: 'board' });
-});
-select<HTMLButtonElement>('#pbta-roll').addEventListener('click', () => {
-  const characteristicBonus = Number(select<HTMLInputElement>('#pbta-bonus').value);
-  const situationalModifier = Number(select<HTMLSelectElement>('#pbta-modifier').value);
-  const disadvantage = select<HTMLInputElement>('#pbta-disadvantage').checked;
-  const actorId = identity?.role === 'gm' ? pbtaActor.value : undefined;
-  let context = pendingRollContext;
-  if (context && (characteristicBonus !== context.characteristicBonus
-    || (identity?.role === 'gm' ? actorId !== context.characterOwnerId : context.characterOwnerId !== identity?.participantId))) context = undefined;
-  void runCommand('dice:pbta', {
-    characteristicBonus, situationalModifier, disadvantage,
-    ...(actorId ? { actorId } : {}),
-    ...(context ? { characteristicName: context.characteristicName, characterId: context.characterId, characterOwnerId: context.characterOwnerId } : {}),
-  });
 });
 select<HTMLButtonElement>('#free-roll').addEventListener('click', () => {
   const count = Number(select<HTMLInputElement>('#free-count').value);

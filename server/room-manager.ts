@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import type { AppConfig } from './config.js';
 import { RoomCatalog, type CatalogRoom, type RoomStatus } from './catalog.js';
-import { findSystemModule } from '../src/modules/registry.js';
+import { findSystemMetadata } from '../src/modules/manifest.js';
 import { RoomStore } from './store.js';
 
 export type RoomUnavailableCode = 'ROOM_NOT_FOUND' | 'ROOM_DISABLED' | 'ROOM_ARCHIVED';
@@ -134,7 +134,7 @@ export class RoomManager {
         `Системная принадлежность комнаты ${room.id} противоречит каталогу: каталог ${room.systemId ?? '—'}@${room.systemVersion ?? '—'}, база ${system.id ?? '—'}@${system.version ?? '—'}.`,
       );
     }
-    if (room.systemId && room.systemVersion && !findSystemModule(room.systemId, room.systemVersion)) {
+    if (room.systemId && room.systemVersion && !findSystemMetadata(room.systemId, room.systemVersion)) {
       throw new RoomConfigurationError(`Система ${room.systemId}@${room.systemVersion} отсутствует в сборке сервера.`);
     }
   }

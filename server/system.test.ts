@@ -53,7 +53,7 @@ function historicalRoll(patch: Partial<DiceRollEntry> & Pick<DiceRollEntry, 'id'
   };
 }
 
-test('migration of a copy of the real room fixes the system and keeps every record', (t) => {
+test('migration of a copy of the real room fixes the system and keeps every record', async (t) => {
   const source = join(process.cwd(), 'data', 'room.sqlite');
   if (!existsSync(source)) {
     t.skip('data/room.sqlite отсутствует в этом окружении.');
@@ -123,7 +123,7 @@ test('migration of a copy of the real room fixes the system and keeps every reco
         assert.equal(store.getSheetFor(hidden.id, gm), undefined);
         assert.equal(store.getSheetsFor(gm).some((sheet) => sheet.id === hidden.id), false);
         assert.equal(store.canEditSheet(hidden.id, gm), false);
-        assert.throws(() => executeSheetCommand(store, gm, { type: 'sheet:update', id: hidden.id, changes: { characterName: 'Hidden' } }));
+        await assert.rejects(() => executeSheetCommand(store, gm, { type: 'sheet:update', id: hidden.id, changes: { characterName: 'Hidden' } }));
         assert.ok(store.getSheet(hidden.id));
       }
       // Ordinary writes cannot replace the fixed system.

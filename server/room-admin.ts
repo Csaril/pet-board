@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync }
 import { join } from 'node:path';
 import { createBackup } from './backup-lib.js';
 import { generateRoomCode, hashRoomPassword, normalizeRoomCode, RoomCatalog, type CatalogRoom } from './catalog.js';
-import { findSystemModule } from '../src/modules/registry.js';
+import { findLatestSystemMetadata } from '../src/modules/manifest.js';
 import { newRoomId } from './room-manager.js';
 import { RoomStore } from './store.js';
 
@@ -100,7 +100,7 @@ export async function createRoom(options: {
 }): Promise<CreateRoomResult> {
   const name = options.name.trim();
   if (!name || name.length > 120) throw new RoomAdminError('Название комнаты должно содержать от 1 до 120 символов.');
-  const module = findSystemModule(options.systemId);
+  const module = findLatestSystemMetadata(options.systemId);
   if (!module) {
     throw new RoomAdminError(`Неизвестная игровая система «${options.systemId}». Доступны: pbta-2d6, nechronica.`);
   }

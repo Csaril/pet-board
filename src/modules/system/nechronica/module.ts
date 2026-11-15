@@ -1,17 +1,13 @@
 /**
- * Nechronica system module.
+ * Public metadata facade for Nechronica.
  *
- * Stage 1 intentionally contains no game mechanics: the sheet and roll UI are
- * placeholders. Keeping the module independent from PbtA guarantees that the
- * two systems can evolve and store their data separately.
+ * No UI or server implementation is imported here. Stage 5 keeps the Nechronica
+ * mechanics as a placeholder, but its client chunk and server module are real
+ * lazy entrypoints.
  */
-export const nechronicaSystemModule = {
-  id: 'nechronica',
-  version: '1.0.0',
-  name: 'Nechronica',
-  sheetSchemaVersion: 1,
-  capabilities: { battleMap: true },
-};
+import { findSystemMetadata } from '../../manifest.js';
+
+export const nechronicaSystemModule = findSystemMetadata('nechronica', '1.0.0')!;
 
 export const nechronicaSheetSchema = {
   version: nechronicaSystemModule.sheetSchemaVersion,

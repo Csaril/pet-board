@@ -43,7 +43,7 @@ test('Nechronica and PbtA sheets stay isolated and PbtA-only commands are reject
   const nechStore = new RoomStore(nechDir, 'Nechronica room');
   try {
     pbtaStore.initializeSystem(pbtaSystemModule.id, pbtaSystemModule.version);
-    executeSheetCommand(pbtaStore, player, { type: 'sheet:create', characterName: 'PbtA hero' });
+    await executeSheetCommand(pbtaStore, player, { type: 'sheet:create', characterName: 'PbtA hero' });
     const pbtaSheet = pbtaStore.getSheetsFor(gm)[0]!;
     assert.equal(pbtaSheet.systemId, 'pbta-2d6');
     assert.deepEqual(pbtaSheet.characteristics, { might: 0, insight: 0, glory: 0, will: 0 });
@@ -55,8 +55,8 @@ test('Nechronica and PbtA sheets stay isolated and PbtA-only commands are reject
     assert.equal(pbtaStore.getSheet(pbtaSheet.id)?.systemId, 'pbta-2d6');
 
     nechStore.initializeSystem('nechronica', '1.0.0');
-    executeSheetCommand(nechStore, gm, { type: 'sheet:create', characterName: 'Nechro draft' });
-    executeSheetCommand(nechStore, player, { type: 'sheet:create', characterName: 'Nechro player' });
+    await executeSheetCommand(nechStore, gm, { type: 'sheet:create', characterName: 'Nechro draft' });
+    await executeSheetCommand(nechStore, player, { type: 'sheet:create', characterName: 'Nechro player' });
     const gmSheets = nechStore.getSheetsFor(gm);
     assert.equal(gmSheets.length, 2);
     assert.ok(gmSheets.every((sheet) => sheet.systemId === 'nechronica' && sheet.systemVersion === '1.0.0'));
@@ -72,16 +72,16 @@ test('Nechronica and PbtA sheets stay isolated and PbtA-only commands are reject
     assert.equal(playerSheets.length, 1);
     assert.equal(playerSheets[0]!.id, owned.id);
 
-    assert.throws(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characteristics: { might: 1 } } }), /PbtA/);
-    assert.throws(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { fate: 3 } }), /PbtA/);
-    assert.throws(() => executeSheetCommand(nechStore, gm, { type: 'sheet:fate:update', sheetId: owned.id, value: 1 }), /PbtA/);
-    assert.throws(() => executeSheetCommand(nechStore, gm, { type: 'sheet:counter:create', sheetId: owned.id, name: 'Charge' }), /PbtA/);
-    assert.throws(() => executeSheetCommand(nechStore, gm, { type: 'sheet:ability:create', sheetId: owned.id, name: 'Move' }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characteristics: { might: 1 } } }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { fate: 3 } }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:fate:update', sheetId: owned.id, value: 1 }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:counter:create', sheetId: owned.id, name: 'Charge' }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:ability:create', sheetId: owned.id, name: 'Move' }), /PbtA/);
     // Shared fields keep working for any system.
-    executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characterName: 'Nechro renamed' } });
+    await executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characterName: 'Nechro renamed' } });
     assert.equal(nechStore.getSheet(owned.id)?.characterName, 'Nechro renamed');
     // A player cannot edit another player's sheet.
-    assert.throws(() => executeSheetCommand(nechStore, otherPlayer, { type: 'sheet:update', id: owned.id, changes: { characterName: 'Hijack' } }), /назначенный/);
+    await assert.rejects(() => executeSheetCommand(nechStore, otherPlayer, { type: 'sheet:update', id: owned.id, changes: { characterName: 'Hijack' } }), /назначенный/);
 
     // The Nechronica room never exposes the PbtA sheet and cannot switch systems.
     assert.equal(nechStore.getSheetsFor(gm).some((sheet) => sheet.id === pbtaSheet.id), false);

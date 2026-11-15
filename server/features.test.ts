@@ -158,7 +158,7 @@ test('legacy rooms and note markers migrate without losing the default backgroun
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });
 
-test('character sheet scenarios 5-9: delete only unassigned sheets as GM and keep library images', () => {
+test('character sheet scenarios 5-9: delete only unassigned sheets as GM and keep library images', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'tabletop-sheet-delete-'));
   const store = new RoomStore(dataDir, 'Campaign');
   store.initializeSystem('pbta-2d6', '1.0.0');
@@ -177,18 +177,18 @@ test('character sheet scenarios 5-9: delete only unassigned sheets as GM and kee
       counterEnabled: true, counterName: 'Uses', counterValue: 1, checkboxEnabled: false, checkboxLabel: '', checked: false,
     });
 
-    assert.doesNotThrow(() => executeSheetCommand(store, gm, { type: 'sheet:delete', id: 'prepared-sheet' }));
+    await executeSheetCommand(store, gm, { type: 'sheet:delete', id: 'prepared-sheet' });
     assert.equal(store.getSheet('prepared-sheet'), undefined);
     assert.equal((store.db.prepare('SELECT COUNT(*) AS count FROM character_counters WHERE sheet_id = ?').get('prepared-sheet') as { count: number }).count, 0);
     assert.equal((store.db.prepare('SELECT COUNT(*) AS count FROM character_abilities WHERE sheet_id = ?').get('prepared-sheet') as { count: number }).count, 0);
     assert.ok(store.getAsset('shared-image'));
 
     store.createSheet(sheetInput('assigned-sheet', player.participantId));
-    assert.throws(() => executeSheetCommand(store, gm, { type: 'sheet:delete', id: 'assigned-sheet' }), /назначен/i);
+    await assert.rejects(() => executeSheetCommand(store, gm, { type: 'sheet:delete', id: 'assigned-sheet' }), /назначен/i);
     assert.ok(store.getSheet('assigned-sheet'));
     store.assignSheet('assigned-sheet', null, null);
     store.createSheet(sheetInput('player-target'));
-    assert.throws(() => executeSheetCommand(store, player, { type: 'sheet:delete', id: 'player-target' }), /только ведущий/i);
+    await assert.rejects(() => executeSheetCommand(store, player, { type: 'sheet:delete', id: 'player-target' }), /только ведущий/i);
     assert.ok(store.getSheet('player-target'));
   } finally { store.close(); rmSync(dataDir, { recursive: true, force: true }); }
 });

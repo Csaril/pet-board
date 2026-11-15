@@ -4,8 +4,7 @@ import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomCapabilities, RoomSystemState, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
-import { findSystemModule } from '../src/modules/registry.js';
-import { pbtaSystemModule } from '../src/modules/system/pbta-2d6/module.js';
+import { findLatestSystemMetadata, findSystemMetadata } from '../src/modules/manifest.js';
 
 export type Role = 'gm' | 'player';
 export interface Identity { participantId: string; name: string; role: Role }
@@ -519,7 +518,7 @@ export class RoomStore {
       this.db.transaction(() => {
         this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_id TEXT');
         this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_version TEXT');
-        this.db.prepare("UPDATE dice_rolls SET system_id = ? WHERE kind IN ('pbta', 'ability-use') AND system_id IS NULL").run(pbtaSystemModule.id);
+        this.db.prepare("UPDATE dice_rolls SET system_id = ? WHERE kind IN ('pbta', 'ability-use') AND system_id IS NULL").run(findLatestSystemMetadata('pbta-2d6')?.id ?? 'pbta-2d6');
       })();
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS dice_rolls_system ON dice_rolls(system_id, system_version)');
@@ -569,7 +568,7 @@ export class RoomStore {
   get capabilities(): RoomCapabilities {
     const { id, version } = this.roomSystem;
     if (!id) return { battleMap: false };
-    return { battleMap: findSystemModule(id, version ?? undefined)?.capabilities.battleMap === true };
+    return { battleMap: findSystemMetadata(id, version ?? undefined)?.capabilities.battleMap === true };
   }
   get supportsBattleMap(): boolean {
     return this.capabilities.battleMap;
@@ -595,7 +594,7 @@ export class RoomStore {
       const parsed = JSON.parse(row?.module_config_json || '{}') as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
     } catch { /* Invalid legacy configuration falls back to an empty object. */ }
-    const module = id ? findSystemModule(id, version ?? undefined) : undefined;
+    const module = id ? findSystemMetadata(id, version ?? undefined) : undefined;
     return {
       fixed,
       id,
@@ -617,7 +616,7 @@ export class RoomStore {
     if ((id === null) !== (version === null)) throw new Error('Идентификатор и версия системы должны быть заданы вместе.');
     const row = this.db.prepare('SELECT system_fixed FROM room WHERE id = 1').get() as { system_fixed: number } | undefined;
     if (Number(row?.system_fixed) === 1) throw new Error('ROOM_SYSTEM_IMMUTABLE');
-    if (id !== null && version !== null && !findSystemModule(id, version)) {
+    if (id !== null && version !== null && !findSystemMetadata(id, version)) {
       throw new Error('Выберите зарегистрированную системную версию.');
     }
     this.db.prepare('UPDATE room SET system_id = ?, system_version = ?, module_config_json = ?, system_fixed = 1 WHERE id = 1')
@@ -638,7 +637,7 @@ export class RoomStore {
       if ((row.system_id === null) !== (row.system_version === null)) {
         throw new Error('Системные поля комнаты заполнены не полностью. Требуется контролируемая миграция.');
       }
-      if (row.system_id !== null && row.system_version !== null && !findSystemModule(row.system_id, row.system_version)) {
+      if (row.system_id !== null && row.system_version !== null && !findSystemMetadata(row.system_id, row.system_version)) {
         throw new Error(`Неизвестная игровая система комнаты: ${row.system_id}@${row.system_version}.`);
       }
       this.db.prepare('UPDATE room SET system_fixed = 1 WHERE id = 1').run();
@@ -651,7 +650,7 @@ export class RoomStore {
       throw new Error('В комнате задан только один из параметров active_system_id/active_system_version. Требуется ручная проверка.');
     }
     if (legacyId === null || legacyVersion === null) return;
-    if (!findSystemModule(legacyId, legacyVersion)) {
+    if (!findSystemMetadata(legacyId, legacyVersion)) {
       throw new Error(`Неизвестная система в active_system_id: ${legacyId}@${legacyVersion}. Требуется ручная проверка.`);
     }
     this.db.prepare('UPDATE room SET system_id = ?, system_version = ?, system_fixed = 1 WHERE id = 1').run(legacyId, legacyVersion);
@@ -1202,7 +1201,7 @@ export class RoomStore {
   }
   private hydrateSheet(row: SheetRow): CharacterSheet {
     let characteristics: Record<SheetCharacteristicKey, number>;
-    if (row.system_id === pbtaSystemModule.id) {
+    if (row.system_id === (findLatestSystemMetadata('pbta-2d6')?.id ?? 'pbta-2d6')) {
       characteristics = { might: 0, insight: 0, glory: 0, will: 0 };
       try {
         const parsed = JSON.parse(row.characteristics_json) as Partial<Record<SheetCharacteristicKey, unknown>>;

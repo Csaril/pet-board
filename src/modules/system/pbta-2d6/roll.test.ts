@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createPbtARollCommand } from './module.js';
+import { createPbtARollCommand } from './commands.js';
 import { calculatePbtARoll, rollFreeDice } from './roll.js';
 
 const randomFrom = (values: number[]) => {

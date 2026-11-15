@@ -61,6 +61,7 @@ const sheetNamed = (state: Record<string, unknown>, name: string): CharacterShee
 
 const indexSource = readFileSync('src/pages/index.astro', 'utf8');
 const clientSource = readFileSync('src/client/app.ts', 'utf8');
+const pbtaClientSource = readFileSync('src/modules/system/pbta-2d6/client.ts', 'utf8');
 const styleSource = readFileSync('src/styles/global.css', 'utf8');
 
 test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => {
@@ -210,7 +211,8 @@ test('multi-sheet PbtA workflow covers acceptance scenarios 1-31', async (t) => 
       assert.match(indexSource, /id="sheet-roll-controls"/);
       assert.match(clientSource, /function prepareSheetRoll/);
       assert.match(clientSource, /openSheetRollPanel\(characteristicName\)/);
-      assert.match(clientSource, /name\.addEventListener\('click', \(\) => prepareSheetRoll/);
+      assert.match(pbtaClientSource, /name\.addEventListener\('click', \(\) => \{/);
+      assert.match(pbtaClientSource, /services\.openRoll\(sheet, definition\.key, definition\.name\)/);
     });
 
     await t.test('9. Лист остаётся открытым при окне броска', () => {
