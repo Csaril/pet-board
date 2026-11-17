@@ -112,6 +112,11 @@ export class SystemHost {
     this.mounted?.instance.renderSheet?.(sheet, options);
   }
 
+  /** True when the mounted module draws its own profile/header controls. */
+  get ownsProfile(): boolean {
+    return this.mounted?.instance.ownsProfile === true;
+  }
+
   renderRollControls(): void {
     this.mounted?.instance.renderRollControls?.();
   }

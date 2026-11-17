@@ -73,6 +73,8 @@ test('system metadata is trusted, exact and contains no implementation imports',
 
   assert.deepEqual(systemMetadata.map((entry) => systemKey(entry.id, entry.version)).sort(), [
     'nechronica@1.0.0',
+    'nechronica@1.1.0',
+    'nechronica@1.2.0',
     'pbta-2d6@1.0.0',
   ]);
   assert.deepEqual(findSystemMetadata('pbta-2d6', '1.0.0'), {
@@ -93,13 +95,16 @@ test('only the exact id@version pair resolves; no implicit upgrade or downgrade'
   assert.equal(findSystemMetadata('nechronica', '1.0.0'), findSystemMetadata('nechronica', '1.0.0'));
   assert.equal(findSystemMetadata('unknown', '1.0.0'), undefined);
   assert.equal(findLatestSystemMetadata('pbta-2d6')?.version, '1.0.0');
+  assert.equal(findLatestSystemMetadata('nechronica')?.version, '1.2.0');
+  assert.equal(findLatestSystemMetadata('nechronica')?.sheetSchemaVersion, 3);
   assert.equal(findLatestSystemMetadata('unknown'), undefined);
   assert.deepEqual(systemMetadataOptions().map((entry) => entry.id).sort(), ['nechronica', 'pbta-2d6']);
+  assert.equal(systemMetadataOptions().find((entry) => entry.id === 'nechronica')?.version, '1.2.0');
 });
 
 test('server loader allowlist loads exact versions and caches a code promise', async () => {
   clearSystemServerCacheForTests();
-  assert.deepEqual([...serverLoaderKeys].sort(), ['nechronica@1.0.0', 'pbta-2d6@1.0.0']);
+  assert.deepEqual([...serverLoaderKeys].sort(), ['nechronica@1.0.0', 'nechronica@1.1.0', 'nechronica@1.2.0', 'pbta-2d6@1.0.0']);
   assert.deepEqual(loadedSystemKeys(), []);
 
   const first = loadSystemServer('pbta-2d6', '1.0.0');
@@ -114,7 +119,16 @@ test('server loader allowlist loads exact versions and caches a code promise', a
   const nechronica = await loadSystemServer('nechronica', '1.0.0');
   assert.equal(nechronica.id, 'nechronica');
   assert.equal(nechronica.advancedSheet, false);
-  assert.deepEqual(loadedSystemKeys(), ['nechronica@1.0.0', 'pbta-2d6@1.0.0']);
+  const nechronicaNext = await loadSystemServer('nechronica', '1.1.0');
+  assert.equal(nechronicaNext.version, '1.1.0');
+  assert.equal(nechronicaNext.advancedSheet, true);
+  assert.equal(nechronicaNext.createRoll, undefined, '1.1.0 must not expose the 1.2.0 roll');
+  const nechronicaLatest = await loadSystemServer('nechronica', '1.2.0');
+  assert.equal(nechronicaLatest.version, '1.2.0');
+  assert.equal(nechronicaLatest.advancedSheet, true);
+  assert.equal(nechronicaLatest.handlesRollCommand?.('dice:nechronica'), true);
+  assert.equal(nechronicaNext.handlesRollCommand?.('dice:nechronica'), undefined);
+  assert.deepEqual(loadedSystemKeys(), ['nechronica@1.0.0', 'nechronica@1.1.0', 'nechronica@1.2.0', 'pbta-2d6@1.0.0']);
   assert.notEqual(module, nechronica);
 });
 
@@ -133,7 +147,7 @@ test('server loader rejects unknown ids and mismatched versions with a migration
 
 test('client loader allowlist caches the module promise but not a UI instance', async () => {
   clearClientModuleCacheForTests();
-  assert.deepEqual([...clientLoaderKeys].sort(), ['nechronica@1.0.0', 'pbta-2d6@1.0.0']);
+  assert.deepEqual([...clientLoaderKeys].sort(), ['nechronica@1.0.0', 'nechronica@1.1.0', 'nechronica@1.2.0', 'pbta-2d6@1.0.0']);
   assert.equal(isClientModuleCached('pbta-2d6', '1.0.0'), false);
 
   const first = loadSystemClient('pbta-2d6', '1.0.0');
@@ -150,6 +164,16 @@ test('client loader allowlist caches the module promise but not a UI instance', 
 
   const nechronica = await loadSystemClient('nechronica', '1.0.0');
   assert.notEqual(factory, nechronica);
+  const nechronicaNext = await loadSystemClient('nechronica', '1.1.0');
+  assert.notEqual(nechronica, nechronicaNext);
+  const advanced = nechronicaNext.createClientModule();
+  assert.equal(advanced.ownsProfile, true);
+  advanced.dispose();
+  const latest = await loadSystemClient('nechronica', '1.2.0');
+  assert.notEqual(nechronicaNext, latest);
+  const latestModule = latest.createClientModule();
+  assert.equal(latestModule.ownsProfile, true);
+  latestModule.dispose();
 });
 
 test('client loader reports unsupported versions and never falls back', async () => {
@@ -309,11 +333,11 @@ test('Nechronica capabilities own the battle map and reject PbtA-only sheet mech
     const doll = nech.getSheetsFor(gm)[0]!;
     await assert.rejects(
       () => executeSheetCommand(nech, gm, { type: 'sheet:ability:create', sheetId: doll.id, name: 'Move' }),
-      /PbtA/,
+      /расширенный лист/,
     );
     await assert.rejects(
       () => executeSheetCommand(nech, gm, { type: 'sheet:fate:update', sheetId: doll.id, value: 1 }),
-      /PbtA/,
+      /расширенный лист/,
     );
     await executeSheetCommand(nech, gm, { type: 'sheet:update', id: doll.id, changes: { characterName: 'Renamed doll' } });
     assert.equal(nech.getSheet(doll.id)?.characterName, 'Renamed doll');

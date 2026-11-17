@@ -486,6 +486,124 @@ body:has(.workspace:not([hidden])) { min-width: 320px; overflow: hidden; backgro
 .dice-entry-applied { padding: 2px 6px; border-radius: 999px; background: var(--success-soft); color: var(--success-text); font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .dice-entry-ability-summary { white-space: pre-wrap; }
 .dice-entry-ability-description { padding: 6px 8px; border-radius: 6px; background: var(--surface-secondary); color: var(--text-secondary); font-size: 10px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Nechronica 1.1.0 advanced sheet */
+.floating-sheet-panel:has(.nechronica-header) { width: min(960px, calc(100vw - 24px)); }
+.nechronica-header { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--border-subtle); }
+.nechronica-profile-editor { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.nechronica-profile-editor .nechronica-field { flex: 1 1 220px; }
+.nechronica-profile-editor .nechronica-portrait-button { flex: 0 0 auto; }
+.nechronica-portrait-block { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: 0 0 auto; }
+.nechronica-portrait { width: 76px; height: 100px; object-fit: contain; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-secondary); }
+.nechronica-portrait-button { width: auto; height: 25px; margin: 0; padding: 0 8px; font-size: 10px; }
+.nechronica-identity { min-width: 0; flex: 1; display: grid; gap: 8px; }
+.nechronica-name { margin: 0; font-size: 20px; line-height: 1.2; overflow-wrap: anywhere; }
+.nechronica-name-input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--input-border); border-radius: 7px; font: inherit; font-size: 18px; font-weight: 700; }
+.nechronica-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 7px; }
+.nechronica-stat { min-width: 0; display: grid; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-secondary); }
+.nechronica-stat-label { color: var(--text-label); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+.nechronica-stat-value { font-size: 17px; font-variant-numeric: tabular-nums; }
+.nechronica-stat select { width: 100%; height: 30px; padding: 0 6px; font-size: 11px; }
+.nechronica-tabs { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; width: 100%; padding: 8px 0; border-top: 1px solid var(--border-subtle); }
+.nechronica-tab { width: auto; height: 29px; margin: 0; padding: 0 10px; font-size: 11px; }
+.nechronica-tab.active { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-text); }
+.nechronica-tab-body { min-width: 0; }
+.nechronica-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.nechronica-toolbar button { width: auto; height: 30px; margin: 0; padding: 0 10px; font-size: 11px; }
+.nechronica-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.nechronica-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
+.nechronica-table th { position: sticky; top: 0; z-index: 1; padding: 6px; border-bottom: 1px solid var(--border); background: var(--surface-secondary); color: var(--text-label); font-size: 10px; letter-spacing: .03em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.nechronica-table td { padding: 5px 6px; border-bottom: 1px solid var(--border-subtle); color: var(--text-body); text-align: left; vertical-align: top; }
+.nechronica-table tbody tr:last-child td { border-bottom: 0; }
+.nechronica-image-cell { width: 38px; }
+.nechronica-row-thumb { width: 30px; height: 30px; object-fit: contain; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-secondary); }
+.nechronica-name-cell { min-width: 104px; }
+.nechronica-reference-link { width: auto; height: auto; max-width: 100%; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 11px; font-weight: 700; text-align: left; text-overflow: ellipsis; cursor: pointer; }
+.nechronica-reference-link:hover { background: transparent; color: var(--accent-text); text-decoration: underline; }
+.nechronica-effect { min-width: 0; max-width: 260px; }
+.nechronica-longtext {
+  min-height: 4.2em;
+  max-height: 4.2em;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.nechronica-longtext.is-expanded,
+.nechronica-effect.is-expanded .nechronica-longtext { min-height: 0; max-height: none; overflow-y: visible; }
+.nechronica-effect-toggle { width: auto; height: 22px; margin: 3px 0 0; padding: 0 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-secondary); color: var(--text-secondary); font-size: 9px; }
+.nechronica-check-cell { text-align: center; }
+.nechronica-check-cell input { width: 15px; height: 15px; margin: 0; }
+.nechronica-actions-cell { white-space: nowrap; }
+.nechronica-row-actions { display: flex; justify-content: flex-end; gap: 3px; }
+.nechronica-zone { margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border-subtle); }
+.nechronica-zone-title { margin: 0 0 7px; color: var(--text-label); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+.nechronica-table tr.is-used:not(.is-destroyed) { background: color-mix(in srgb, var(--text-tertiary) 9%, transparent); }
+.nechronica-table tr.is-used:not(.is-destroyed) td { color: var(--text-secondary); }
+.nechronica-table tr.is-used:not(.is-destroyed) .nechronica-reference-link { color: var(--text-secondary); }
+.nechronica-table tr.is-used:not(.is-destroyed) .nechronica-row-thumb { opacity: .55; filter: grayscale(1); }
+.nechronica-table tr.is-destroyed { background: color-mix(in srgb, var(--danger-text) 14%, transparent); }
+.nechronica-table tr.is-destroyed td { color: var(--danger-text); text-decoration: line-through; }
+.nechronica-table tr.is-destroyed .nechronica-reference-link { color: var(--danger-text); text-decoration: line-through; }
+.nechronica-table tr.is-destroyed .nechronica-row-thumb { opacity: .55; filter: grayscale(1); }
+.nechronica-table tr.is-broken-heart { background: color-mix(in srgb, #b3243a 22%, transparent); }
+.nechronica-table tr.is-broken-heart td { color: var(--text-primary); }
+.nechronica-madness-cell { white-space: nowrap; }
+.nechronica-madness-box { width: 15px; height: 15px; margin: 0 2px 0 0; accent-color: #b3243a; }
+.nechronica-editor { margin: 0 0 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-secondary); }
+.nechronica-editor h3 { margin-bottom: 8px; }
+.nechronica-editor-asset { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.nechronica-editor-asset button { width: auto; height: 28px; margin: 0; padding: 0 9px; font-size: 10px; }
+.nechronica-editor-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.nechronica-editor-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.nechronica-field { display: grid; gap: 3px; margin: 0; color: var(--text-label); font-size: 11px; }
+.nechronica-field-label { font-size: 10px; letter-spacing: .03em; text-transform: uppercase; }
+.nechronica-field input, .nechronica-field textarea { width: 100%; height: 32px; padding: 0 8px; border: 1px solid var(--input-border); border-radius: 6px; font: inherit; font-size: 12px; }
+.nechronica-field textarea { height: auto; min-height: 80px; padding: 7px 8px; line-height: 1.5; resize: vertical; }
+.nechronica-editor-actions { display: flex; gap: 6px; margin-top: 8px; }
+.nechronica-editor-actions button { width: auto; height: 30px; margin: 0; padding: 0 12px; font-size: 11px; }
+.nechronica-info-fields { display: grid; gap: 8px; }
+.nechronica-info-fields > button { width: fit-content; height: 31px; margin: 0; padding: 0 12px; font-size: 11px; }
+.nechronica-info-list { display: grid; grid-template-columns: max-content 1fr; gap: 5px 10px; margin: 0; }
+.nechronica-info-list dt { color: var(--text-label); font-size: 11px; }
+.nechronica-info-list dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nechronica-memory-list { display: grid; gap: 6px; }
+.nechronica-memory {
+  display: grid;
+  grid-template-columns: 34px minmax(90px, 160px) minmax(28px, max-content) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.nechronica-memory-image { min-width: 0; }
+.nechronica-memory-thumb { width: 30px; height: 30px; object-fit: contain; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-secondary); }
+.nechronica-memory-name { min-width: 0; color: var(--text-primary); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+.nechronica-memory-number { min-width: 24px; padding: 1px 5px; border-radius: 999px; background: var(--surface-secondary); color: var(--text-label); font-size: 10px; font-weight: 700; text-align: center; }
+.nechronica-memory-text { min-width: 0; }
+.nechronica-memory .nechronica-effect { max-width: none; }
+.nechronica-memory .nechronica-row-actions { align-self: start; }
+@media (max-width: 620px) {
+  .nechronica-memory { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .nechronica-memory-number { grid-column: 2; justify-self: start; }
+  .nechronica-memory-text { grid-column: 1 / -1; }
+}
+.dice-entry-reference-card { display: grid; gap: 4px; padding: 7px 8px; border-radius: 7px; background: var(--surface-secondary); }
+.dice-entry-reference-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dice-reference-image { width: 38px; height: 38px; flex: 0 0 38px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.dice-entry-reference-name { min-width: 0; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }
+.dice-entry-reference-meta { display: flex; flex-wrap: wrap; gap: 3px 9px; color: var(--text-secondary); font-size: 10px; }
+.dice-entry-reference-description { color: var(--text-body); font-size: 10px; line-height: 1.5; }
+.dice-entry-nechronica .dice-entry-detail { font-variant-numeric: tabular-nums; }
+.dice-entry-nechronica .dice-entry-result { font-weight: 700; }
+.dice-entry-nechronica.is-failure .dice-entry-result { color: var(--danger); }
+.dice-entry-nechronica.is-success .dice-entry-result { color: var(--success-text); }
+.dice-entry-nechronica.is-critical-failure { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+.dice-entry-nechronica.is-critical-failure .dice-entry-result { color: var(--danger); font-weight: 800; }
+.dice-entry-nechronica.is-critical-success { border-color: var(--success-text); background: color-mix(in srgb, var(--success-soft) 65%, var(--surface)); }
+.dice-entry-nechronica.is-critical-success .dice-entry-result { color: var(--success-text); font-weight: 800; }
+.nechronica-roll-type { padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-secondary); color: var(--text-primary); font-size: 13px; font-weight: 700; text-align: center; }
 #note-font-family { height: 36px; }
 @media (max-width: 1280px) { .topbar-group-label, .topbar-brand-copy .topbar-group-label { display: none; } }
 @media (max-width: 900px) {

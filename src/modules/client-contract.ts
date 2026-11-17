@@ -36,6 +36,17 @@ export interface SystemSheetRenderOptions {
   canRoll: boolean;
 }
 
+/**
+ * A system-owned request to use the core image picker. The module supplies the
+ * current asset and a callback, so the core keeps one picker and one asset ACL
+ * path for every system.
+ */
+export interface SheetAssetPickerRequest {
+  currentAssetId: string | null;
+  /** Called with the chosen asset id, or null when the choice is cleared. */
+  select(assetId: string | null): void;
+}
+
 export interface SystemClientServices {
   command(type: string, data?: Record<string, unknown>): Promise<void>;
   message(text: string, error?: boolean): void;
@@ -47,6 +58,10 @@ export interface SystemClientServices {
   clearPendingRoll(): void;
   /** Opens the shared image picker in the "ability artwork" mode. */
   openAbilityAssetPicker(abilityId: string, assetId: string | null): void;
+  /** Opens the shared image picker for an arbitrary system-owned sheet item. */
+  openSheetAssetPicker(request: SheetAssetPickerRequest): void;
+  /** Opens the existing Personal Notes panel without creating a second store. */
+  openPersonalNotes(): void;
   applyFont(element: HTMLElement, font: BoardFontFamily | null | undefined): void;
   assetUrl(assetId: string): string;
   /** Room-scoped localStorage prefix used for per-participant UI preferences. */
@@ -71,6 +86,11 @@ export interface SystemClientContext {
 export interface SystemClientModule {
   mount(context: SystemClientContext): void | Promise<void>;
   dispose(): void;
+  /**
+   * The module renders its own name/portrait header, so the core skips its
+   * generic identity editor to avoid two competing controls.
+   */
+  readonly ownsProfile?: boolean;
   renderSheet?(sheet: CharacterSheet, options: SystemSheetRenderOptions): void;
   renderRollControls?(): void;
 }

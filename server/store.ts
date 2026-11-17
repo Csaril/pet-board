@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomCapabilities, RoomSystemState, SheetCharacteristicKey, StickerBackground, StickerTextColor } from '../src/shared/board.js';
+import type { BoardAsset, BoardAssetUsage, BoardAssetUsageKind, BoardBackground, BoardFontFamily, BoardImage, BoardLayer, BoardScene, BoardSceneSnapshot, BoardSnapshot, BoardSticker, CharacterSheet, CharacterSheetAbility, CharacterSheetCounter, CropRect, DiceRollEntry, LayerAudience, NoteAccess, NoteListItem, NoteMarker, NoteRecord, NoteType, PersonalNoteListItem, RoomCapabilities, RoomSystemState, SheetCharacteristicKey, SheetReferenceSnapshot, StickerBackground, StickerTextColor } from '../src/shared/board.js';
 import { DEFAULT_BOARD_FONT, isBoardFontFamily } from '../src/shared/fonts.js';
 import { findLatestSystemMetadata, findSystemMetadata } from '../src/modules/manifest.js';
 
@@ -25,8 +25,30 @@ export interface SheetInput {
   id: string; creatorId: string; creatorName: string; assignedPlayerId: string | null; assignedPlayerName: string | null;
   systemId: string; systemVersion: string; schemaVersion: number;
   characterName: string; portraitAssetId: string | null; characteristics: Record<SheetCharacteristicKey, number>; fate: number; fontFamily?: BoardFontFamily;
+  /** Opaque system-owned payload; PbtA leaves it undefined. */
+  systemData?: unknown;
 }
-export interface SheetPatch { characterName?: string; portraitAssetId?: string | null; characteristics?: Record<SheetCharacteristicKey, number>; fate?: number; fontFamily?: BoardFontFamily }
+export interface SheetPatch { characterName?: string; portraitAssetId?: string | null; characteristics?: Record<SheetCharacteristicKey, number>; fate?: number; fontFamily?: BoardFontFamily; systemData?: unknown }
+export interface SheetSystemMigration {
+  schemaVersion: number;
+  systemData: unknown;
+}
+export interface RoomSystemMigrationOptions {
+  targetVersion: string;
+  targetSchemaVersion: number;
+  /**
+   * Return null to leave a sheet byte-identical; throw to abort the transaction.
+   * `rawSystemData` is the exact persisted JSON so the system can reject corrupt
+   * payloads instead of treating them as absent data.
+   */
+  migrateSheet: (sheet: CharacterSheet, rawSystemData: string | null) => SheetSystemMigration | null;
+}
+export interface RoomSystemMigrationResult {
+  fromVersion: string;
+  toVersion: string;
+  migratedSheetIds: string[];
+  unchangedSheetIds: string[];
+}
 export interface CounterPatch { name?: string; value?: number }
 export interface AbilityInput { id: string; name: string; description: string; assetId: string | null; counterEnabled: boolean; counterName: string; counterValue: number; checkboxEnabled: boolean; checkboxLabel: string; checked: boolean; fontFamily?: BoardFontFamily }
 export interface AbilityPatch { name?: string; description?: string; assetId?: string | null; counterEnabled?: boolean; counterName?: string; counterValue?: number; checkboxEnabled?: boolean; checkboxLabel?: string; checked?: boolean; fontFamily?: BoardFontFamily; orderIndex?: number }
@@ -44,6 +66,7 @@ type SheetRow = {
   id: string; creator_id: string; creator_name: string; assigned_player_id: string | null; assigned_player_name: string | null;
   system_id: string; system_version: string; schema_version: number;
   character_name: string; portrait_asset_id: string | null; characteristics_json: string; fate: number;
+  system_data_json: string | null;
   font_family: BoardFontFamily; created_at: string; updated_at: string;
 };
 type CounterRow = { id: string; sheet_id: string; name: string; value: number; order_index: number };
@@ -74,6 +97,42 @@ function toSticker(row: StickerRow): BoardSticker {
 }
 function safeFont(value: unknown): BoardFontFamily {
   return isBoardFontFamily(value) ? value : DEFAULT_BOARD_FONT;
+}
+function parseSheetReference(value: unknown): SheetReferenceSnapshot | null {
+  if (typeof value !== 'string' || !value) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const source = parsed as Record<string, unknown>;
+  const type = source.type;
+  if (type !== 'ability' && type !== 'body' && type !== 'fetter') return null;
+  const optional = (key: string): string | null => typeof source[key] === 'string' ? source[key] as string : null;
+  return {
+    type,
+    imageAssetId: typeof source.imageAssetId === 'string' && source.imageAssetId.length > 0 && source.imageAssetId.length <= 64 ? source.imageAssetId : null,
+    name: typeof source.name === 'string' ? source.name : '',
+    source: optional('source'),
+    timing: optional('timing'),
+    cost: optional('cost'),
+    range: optional('range'),
+    target: optional('target'),
+    fetter: optional('fetter'),
+    madness: optional('madness'),
+    madnessSpent: typeof source.madnessSpent === 'number' && Number.isSafeInteger(source.madnessSpent) ? source.madnessSpent : null,
+    description: typeof source.description === 'string' ? source.description : '',
+  };
+}
+/** Recursively checks an opaque system payload for a referenced asset id. */
+function jsonContainsAssetId(value: unknown, assetId: string): boolean {
+  if (typeof value === 'string') return value === assetId;
+  if (Array.isArray(value)) return value.some((entry) => jsonContainsAssetId(entry, assetId));
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).some(([key, entry]) => {
+      if (key.toLowerCase().includes('asset')) return jsonContainsAssetId(entry, assetId);
+      return entry !== null && typeof entry === 'object' ? jsonContainsAssetId(entry, assetId) : false;
+    });
+  }
+  return false;
 }
 function textMarkerSize(text: string): { width: number; height: number } {
   return { width: Math.min(200, Math.max(64, text.length * 8 + 18)), height: 34 };
@@ -158,7 +217,9 @@ export class RoomStore {
         actor_id TEXT NOT NULL,
         actor_name TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use')),
+        kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use', 'sheet-reference', 'nechronica')),
+        system_id TEXT,
+        system_version TEXT,
         dice_json TEXT NOT NULL,
         kept_dice_json TEXT NOT NULL,
         discarded_die INTEGER,
@@ -180,7 +241,8 @@ export class RoomStore {
         ability_asset_id TEXT,
         ability_summary TEXT,
         ability_description TEXT,
-        ability_font_family TEXT
+        ability_font_family TEXT,
+        reference_json TEXT
       );
       CREATE INDEX IF NOT EXISTS dice_rolls_created ON dice_rolls(created_at DESC, id DESC);
       CREATE TABLE IF NOT EXISTS board_layers (
@@ -291,6 +353,7 @@ export class RoomStore {
         portrait_asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
         characteristics_json TEXT NOT NULL,
         fate INTEGER NOT NULL DEFAULT 0,
+        system_data_json TEXT,
         font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat')),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -423,6 +486,7 @@ export class RoomStore {
     if (!stickerColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE stickers ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
     const characterSheetColumns = this.db.pragma('table_info(character_sheets)') as Array<{ name: string }>;
     if (!characterSheetColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE character_sheets ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
+    if (!characterSheetColumns.some((column) => column.name === 'system_data_json')) this.db.exec('ALTER TABLE character_sheets ADD COLUMN system_data_json TEXT');
     const abilityColumns = this.db.pragma('table_info(character_abilities)') as Array<{ name: string }>;
     if (!abilityColumns.some((column) => column.name === 'font_family')) this.db.exec("ALTER TABLE character_abilities ADD COLUMN font_family TEXT NOT NULL DEFAULT 'default' CHECK (font_family IN ('default', 'caveat'))");
     const markerColumns = this.db.pragma('table_info(note_markers)') as Array<{ name: string }>;
@@ -445,14 +509,32 @@ export class RoomStore {
     const diceColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
     if (!diceColumns.some((column) => column.name === 'character_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_id TEXT');
     if (!diceColumns.some((column) => column.name === 'character_owner_id')) this.db.exec('ALTER TABLE dice_rolls ADD COLUMN character_owner_id TEXT');
-    const diceSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dice_rolls'").get() as { sql: string } | undefined;
+    // Add every optional column before the CHECK rebuild so the rebuild can
+    // copy it. SQLite cannot extend a CHECK constraint in place, so an old
+    // journal table is recreated once with the full current shape.
     const abilityHistoryColumns = [
       ['ability_id', 'TEXT'], ['ability_sheet_id', 'TEXT'], ['ability_character_name', 'TEXT'], ['ability_name', 'TEXT'],
       ['ability_asset_id', 'TEXT'], ['ability_summary', 'TEXT'], ['ability_description', 'TEXT'], ['ability_font_family', 'TEXT'],
     ] as const;
-    if (diceSchema && !diceSchema.sql.includes("'ability-use'")) {
-      // SQLite cannot extend a CHECK constraint in place. Rebuild the journal
-      // table while preserving every row and both indexes.
+    const ensureDiceColumn = (name: string, type: string): void => {
+      const columns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE dice_rolls ADD COLUMN ${name} ${type}`);
+    };
+    for (const [name, type] of abilityHistoryColumns) ensureDiceColumn(name, type);
+    ensureDiceColumn('reference_json', 'TEXT');
+    if (!(this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>).some((column) => column.name === 'system_id')) {
+      // Rows created before system attribution existed are classified only
+      // when their kind is unambiguous. The module version stays NULL because
+      // the old module version was never recorded.
+      this.db.transaction(() => {
+        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_id TEXT');
+        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_version TEXT');
+        this.db.prepare("UPDATE dice_rolls SET system_id = ? WHERE kind IN ('pbta', 'ability-use') AND system_id IS NULL").run(findLatestSystemMetadata('pbta-2d6')?.id ?? 'pbta-2d6');
+      })();
+    }
+    const diceSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dice_rolls'").get() as { sql: string } | undefined;
+    if (diceSchema && (!diceSchema.sql.includes("'ability-use'") || !diceSchema.sql.includes("'sheet-reference'") || !diceSchema.sql.includes("'nechronica'"))) {
+      const copyColumns = (this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>).map((column) => column.name);
       this.db.pragma('foreign_keys = OFF');
       try {
         this.db.transaction(() => {
@@ -465,7 +547,9 @@ export class RoomStore {
             actor_id TEXT NOT NULL,
             actor_name TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use')),
+            kind TEXT NOT NULL CHECK (kind IN ('pbta', 'free', 'ability-use', 'sheet-reference', 'nechronica')),
+            system_id TEXT,
+            system_version TEXT,
             dice_json TEXT NOT NULL,
             kept_dice_json TEXT NOT NULL,
             discarded_die INTEGER,
@@ -487,16 +571,11 @@ export class RoomStore {
             ability_asset_id TEXT,
             ability_summary TEXT,
             ability_description TEXT,
-            ability_font_family TEXT
+            ability_font_family TEXT,
+            reference_json TEXT
           )`);
-          this.db.exec(`INSERT INTO dice_rolls_new
-            (id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
-             characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage,
-             sides, total, category, critical, reroll_of)
-            SELECT id, author_id, author_name, actor_id, actor_name, created_at, kind, dice_json, kept_dice_json, discarded_die,
-             characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage,
-             sides, total, category, critical, reroll_of
-            FROM dice_rolls ORDER BY rowid`);
+          const columnList = copyColumns.join(', ');
+          this.db.exec(`INSERT INTO dice_rolls_new (${columnList}) SELECT ${columnList} FROM dice_rolls ORDER BY rowid`);
           this.db.exec('DROP TABLE dice_rolls');
           this.db.exec('ALTER TABLE dice_rolls_new RENAME TO dice_rolls');
           this.db.exec('CREATE INDEX IF NOT EXISTS dice_rolls_created ON dice_rolls(created_at DESC, id DESC)');
@@ -504,22 +583,6 @@ export class RoomStore {
       } finally {
         this.db.pragma('foreign_keys = ON');
       }
-    } else {
-      const columns = new Set(diceColumns.map((column) => column.name));
-      for (const [name, type] of abilityHistoryColumns) {
-        if (!columns.has(name)) this.db.exec(`ALTER TABLE dice_rolls ADD COLUMN ${name} ${type}`);
-      }
-    }
-    const diceSystemColumns = this.db.pragma('table_info(dice_rolls)') as Array<{ name: string }>;
-    if (!diceSystemColumns.some((column) => column.name === 'system_id')) {
-      // Rows created before system attribution existed are classified only
-      // when their kind is unambiguous. The module version stays NULL because
-      // the old module version was never recorded.
-      this.db.transaction(() => {
-        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_id TEXT');
-        this.db.exec('ALTER TABLE dice_rolls ADD COLUMN system_version TEXT');
-        this.db.prepare("UPDATE dice_rolls SET system_id = ? WHERE kind IN ('pbta', 'ability-use') AND system_id IS NULL").run(findLatestSystemMetadata('pbta-2d6')?.id ?? 'pbta-2d6');
-      })();
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS dice_rolls_system ON dice_rolls(system_id, system_version)');
     this.db.prepare('INSERT OR IGNORE INTO room (id, name) VALUES (1, ?)').run(roomName);
@@ -695,11 +758,13 @@ export class RoomStore {
       (id, author_id, author_name, actor_id, actor_name, created_at, kind, system_id, system_version,
        dice_json, kept_dice_json, discarded_die,
        characteristic_name, character_id, character_owner_id, characteristic_bonus, situational_modifier, disadvantage, sides, total, category, critical, reroll_of,
-       ability_id, ability_sheet_id, ability_character_name, ability_name, ability_asset_id, ability_summary, ability_description, ability_font_family)
+       ability_id, ability_sheet_id, ability_character_name, ability_name, ability_asset_id, ability_summary, ability_description, ability_font_family,
+       reference_json)
       VALUES (@id, @authorId, @authorName, @actorId, @actorName, @createdAt, @kind, @systemId, @systemVersion,
        @dice, @keptDice, @discardedDie,
        @characteristicName, @characterId, @characterOwnerId, @characteristicBonus, @situationalModifier, @disadvantage, @sides, @total, @category, @critical, @rerollOf,
-       @abilityId, @abilitySheetId, @abilityCharacterName, @abilityName, @abilityAssetId, @abilitySummary, @abilityDescription, @abilityFontFamily)`);
+       @abilityId, @abilitySheetId, @abilityCharacterName, @abilityName, @abilityAssetId, @abilitySummary, @abilityDescription, @abilityFontFamily,
+       @reference)`);
     this.db.transaction(() => {
       insert.run({
         id: entry.id, authorId: entry.authorId, authorName: entry.authorName, actorId: entry.actorId, actorName: entry.actorName,
@@ -711,6 +776,7 @@ export class RoomStore {
         abilityId: entry.abilityId, abilitySheetId: entry.abilitySheetId, abilityCharacterName: entry.abilityCharacterName,
         abilityName: entry.abilityName, abilityAssetId: entry.abilityAssetId, abilitySummary: entry.abilitySummary,
         abilityDescription: entry.abilityDescription, abilityFontFamily: entry.abilityFontFamily,
+        reference: entry.reference ? JSON.stringify(entry.reference) : null,
       });
       this.db.exec('DELETE FROM dice_rolls WHERE id NOT IN (SELECT id FROM dice_rolls ORDER BY created_at DESC, rowid DESC LIMIT 10)');
     })();
@@ -739,6 +805,7 @@ export class RoomStore {
       abilitySummary: row.ability_summary === null || row.ability_summary === undefined ? null : String(row.ability_summary),
       abilityDescription: row.ability_description === null || row.ability_description === undefined ? null : String(row.ability_description),
       abilityFontFamily: row.ability_font_family === null || row.ability_font_family === undefined ? null : safeFont(row.ability_font_family),
+      reference: parseSheetReference(row.reference_json),
     }));
   }
 
@@ -888,6 +955,33 @@ export class RoomStore {
       UNION ALL SELECT 'sheet-portrait', COUNT(*) FROM character_sheets WHERE portrait_asset_id = @id
       UNION ALL SELECT 'sheet-ability', COUNT(*) FROM character_abilities WHERE asset_id = @id
     `).all({ id: assetId }) as Array<{ kind: BoardAssetUsageKind; count: number }>;
+    const systemSheets = this.db.prepare("SELECT system_data_json FROM character_sheets WHERE system_data_json IS NOT NULL AND instr(system_data_json, @id) > 0")
+      .all({ id: assetId }) as Array<{ system_data_json: string }>;
+    let systemCount = 0;
+    for (const row of systemSheets) {
+      try { if (jsonContainsAssetId(JSON.parse(row.system_data_json) as unknown, assetId)) systemCount += 1; }
+      catch { /* Invalid payload is ignored here; reads fall back to null. */ }
+    }
+    if (systemCount > 0) rows.push({ kind: 'sheet-system', count: systemCount });
+    // History cards freeze their own asset id. A later sheet edit must not make
+    // the old card's image deletable, so reference_json and the legacy ability
+    // snapshot are part of the usage check too.
+    const historyRows = this.db.prepare(
+      "SELECT reference_json, ability_asset_id FROM dice_rolls WHERE ability_asset_id = @id OR (reference_json IS NOT NULL AND instr(reference_json, @id) > 0)",
+    ).all({ id: assetId }) as Array<{ reference_json: string | null; ability_asset_id: string | null }>;
+    let historyCount = 0;
+    for (const row of historyRows) {
+      if (row.ability_asset_id === assetId) {
+        historyCount += 1;
+        continue;
+      }
+      if (!row.reference_json) continue;
+      try {
+        const parsed = JSON.parse(row.reference_json) as { imageAssetId?: unknown };
+        if (parsed.imageAssetId === assetId) historyCount += 1;
+      } catch { /* Invalid historical JSON cannot reference a valid asset. */ }
+    }
+    if (historyCount > 0) rows.push({ kind: 'dice-reference', count: historyCount });
     return rows.filter((row) => row.count > 0);
   }
   deleteAssetIfUnused(id: string): boolean {
@@ -1130,6 +1224,65 @@ export class RoomStore {
       ORDER BY assigned_player_id IS NULL DESC, assigned_player_name COLLATE NOCASE ASC, character_name COLLATE NOCASE ASC, updated_at DESC`).all() as SheetRow[];
     return rows.map((row) => this.hydrateSheet(row));
   }
+  /**
+   * Every sheet of one system, regardless of its pinned version. Used only by
+   * controlled room migration; normal reads still filter by the exact pair.
+   */
+  getSheetsBySystem(systemId: string): CharacterSheet[] {
+    const rows = this.db.prepare('SELECT * FROM character_sheets WHERE system_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(systemId) as SheetRow[];
+    return rows.map((row) => this.hydrateSheet(row));
+  }
+  /**
+   * Moves the fixed room pair and every sheet of that system in one SQLite
+   * transaction. The immutability triggers are dropped only inside this
+   * transaction and are recreated before it commits.
+   *
+   * The callback runs inside the transaction: a thrown error rolls back the
+   * room version, all sheets and the trigger definitions.
+   */
+  migrateRoomSystemAndSheets(options: RoomSystemMigrationOptions): RoomSystemMigrationResult {
+    const active = this.fixedSystemOrThrow();
+    const rows = this.db.prepare('SELECT * FROM character_sheets WHERE system_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(active.id) as SheetRow[];
+    const updates: Array<{ id: string; schemaVersion: number; systemData: unknown }> = [];
+    const unchangedSheetIds: string[] = [];
+    for (const row of rows) {
+      const sheet = this.hydrateSheet(row);
+      const update = options.migrateSheet(sheet, row.system_data_json ?? null);
+      if (!update) { unchangedSheetIds.push(sheet.id); continue; }
+      updates.push({ id: sheet.id, schemaVersion: update.schemaVersion, systemData: update.systemData });
+    }
+    if (!updates.length && active.version === options.targetVersion) {
+      return {
+        fromVersion: active.version,
+        toVersion: active.version,
+        migratedSheetIds: [],
+        unchangedSheetIds,
+      };
+    }
+
+    this.db.transaction(() => {
+      if (active.version !== options.targetVersion) {
+        this.db.exec('DROP TRIGGER IF EXISTS room_system_immutable');
+        this.db.prepare('UPDATE room SET system_version = ? WHERE id = 1').run(options.targetVersion);
+        this.createRoomSystemTriggers();
+      }
+      const statement = this.db.prepare(`UPDATE character_sheets
+        SET system_version = ?, schema_version = ?, system_data_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`);
+      for (const update of updates) {
+        statement.run(options.targetVersion, update.schemaVersion, JSON.stringify(update.systemData), update.id);
+      }
+    })();
+
+    return {
+      fromVersion: active.version,
+      toVersion: options.targetVersion,
+      migratedSheetIds: updates.map((update) => update.id),
+      unchangedSheetIds,
+    };
+  }
   getSheetsFor(identity: Identity): CharacterSheet[] {
     const active = this.fixedSystem;
     if (!active) return [];
@@ -1223,12 +1376,21 @@ export class RoomStore {
     }
     const counters = (this.db.prepare('SELECT * FROM character_counters WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as CounterRow[]).map(toCounter);
     const abilities = (this.db.prepare('SELECT * FROM character_abilities WHERE sheet_id = ? ORDER BY order_index ASC, rowid ASC').all(row.id) as AbilityRow[]).map(toAbility);
+    let systemData: unknown | null = null;
+    if (row.system_data_json) {
+      // Corrupt JSON is surfaced verbatim so the owning system can show an
+      // explicit schema error instead of rendering an empty sheet. Migration
+      // also receives the exact string and aborts rather than overwriting it.
+      try { systemData = JSON.parse(row.system_data_json) as unknown; }
+      catch { systemData = row.system_data_json; }
+    }
     return {
       id: row.id, creatorId: row.creator_id, creatorName: row.creator_name,
       assignedPlayerId: row.assigned_player_id, assignedPlayerName: row.assigned_player_name,
       systemId: row.system_id, systemVersion: row.system_version, schemaVersion: row.schema_version,
       characterName: row.character_name, portraitAssetId: row.portrait_asset_id, characteristics,
-      fate: row.fate, fontFamily: safeFont(row.font_family), counters, abilities, createdAt: row.created_at, updatedAt: row.updated_at,
+      fate: row.fate, fontFamily: safeFont(row.font_family), counters, abilities, systemData,
+      createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
   createSheet(sheet: SheetInput): void {
@@ -1237,17 +1399,23 @@ export class RoomStore {
       throw new Error('Лист относится к другой игровой системе.');
     }
     this.db.prepare(`INSERT INTO character_sheets
-      (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate, font_family)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate, sheet.fontFamily ?? DEFAULT_BOARD_FONT);
+      (id, creator_id, creator_name, assigned_player_id, assigned_player_name, system_id, system_version, schema_version, character_name, portrait_asset_id, characteristics_json, fate, system_data_json, font_family)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(sheet.id, sheet.creatorId, sheet.creatorName, sheet.assignedPlayerId, sheet.assignedPlayerName, sheet.systemId, sheet.systemVersion, sheet.schemaVersion, sheet.characterName, sheet.portraitAssetId, JSON.stringify(sheet.characteristics), sheet.fate, sheet.systemData === undefined ? null : JSON.stringify(sheet.systemData), sheet.fontFamily ?? DEFAULT_BOARD_FONT);
   }
   updateSheet(id: string, patch: SheetPatch): void {
     this.assertSheetInFixedSystem(id);
-    const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate', fontFamily: 'font_family' };
+    const columns: Record<keyof SheetPatch, string> = { characterName: 'character_name', portraitAssetId: 'portrait_asset_id', characteristics: 'characteristics_json', fate: 'fate', fontFamily: 'font_family', systemData: 'system_data_json' };
     const entries = Object.entries(patch) as Array<[keyof SheetPatch, SheetPatch[keyof SheetPatch]]>;
     if (!entries.length) return;
     this.db.prepare(`UPDATE character_sheets SET ${entries.map(([key]) => `${columns[key]} = @${key}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
-      .run({ id, ...Object.fromEntries(entries.map(([key, value]) => [key, key === 'characteristics' ? JSON.stringify(value) : value])) });
+      .run({ id, ...Object.fromEntries(entries.map(([key, value]) => [key, key === 'characteristics' || key === 'systemData' ? JSON.stringify(value) : value])) });
+  }
+  /** Replaces the opaque system payload and bumps the sheet timestamp. */
+  updateSheetSystemData(id: string, data: unknown): void {
+    this.assertSheetInFixedSystem(id);
+    this.db.prepare('UPDATE character_sheets SET system_data_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(JSON.stringify(data), id);
   }
   createCounter(sheetId: string, counter: Omit<CharacterSheetCounter, 'orderIndex'>): CharacterSheetCounter {
     this.assertSheetInFixedSystem(sheetId);
@@ -1328,11 +1496,20 @@ export class RoomStore {
     const active = this.fixedSystem;
     if (!active) return false;
     const assignedFilter = identity.role === 'gm' ? '' : 'AND sheet.assigned_player_id IS NOT NULL';
-    return Boolean(this.db.prepare(`SELECT 1 FROM character_sheets AS sheet
+    const direct = Boolean(this.db.prepare(`SELECT 1 FROM character_sheets AS sheet
       WHERE sheet.portrait_asset_id = @assetId AND sheet.system_id = @systemId AND sheet.system_version = @systemVersion ${assignedFilter}
       UNION SELECT 1 FROM character_abilities AS ability JOIN character_sheets AS sheet ON sheet.id = ability.sheet_id
       WHERE ability.asset_id = @assetId AND sheet.system_id = @systemId AND sheet.system_version = @systemVersion ${assignedFilter} LIMIT 1`)
       .get({ assetId, systemId: active.id, systemVersion: active.version }));
+    if (direct) return true;
+    const systemSheets = this.db.prepare(`SELECT sheet.system_data_json FROM character_sheets AS sheet
+      WHERE sheet.system_id = @systemId AND sheet.system_version = @systemVersion ${assignedFilter}
+        AND sheet.system_data_json IS NOT NULL AND instr(sheet.system_data_json, @assetId) > 0`)
+      .all({ assetId, systemId: active.id, systemVersion: active.version }) as Array<{ system_data_json: string }>;
+    return systemSheets.some((row) => {
+      try { return jsonContainsAssetId(JSON.parse(row.system_data_json) as unknown, assetId); }
+      catch { return false; }
+    });
   }
 
   private sceneSnapshot(scene: BoardScene, identity: Identity): BoardSceneSnapshot {

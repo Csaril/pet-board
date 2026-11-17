@@ -46,6 +46,20 @@ export const systemMetadata: readonly SystemMetadata[] = [
   },
   {
     id: 'nechronica',
+    version: '1.2.0',
+    name: 'Nechronica',
+    sheetSchemaVersion: 3,
+    capabilities: { battleMap: true },
+  },
+  {
+    id: 'nechronica',
+    version: '1.1.0',
+    name: 'Nechronica',
+    sheetSchemaVersion: 2,
+    capabilities: { battleMap: true },
+  },
+  {
+    id: 'nechronica',
     version: '1.0.0',
     name: 'Nechronica',
     sheetSchemaVersion: 1,
@@ -68,15 +82,31 @@ export function findSystemMetadata(id: string, version?: string): SystemMetadata
 }
 
 export function findLatestSystemMetadata(id: string): SystemMetadata | undefined {
-  return systemMetadata.find((metadata) => metadata.id === id);
+  const candidates = systemMetadata.filter((metadata) => metadata.id === id);
+  if (!candidates.length) return undefined;
+  return candidates.reduce((latest, candidate) => compareSystemVersions(candidate.version, latest.version) > 0 ? candidate : latest);
 }
 
-/** Distinct system IDs in registry order, used by the one-time room picker. */
+/** Numeric semver comparison used by the latest-version picker and migration. */
+export function compareSystemVersions(left: string, right: string): number {
+  const leftParts = left.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = right.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/** Distinct system IDs in registry order, newest version of each, used by pickers. */
 export function systemMetadataOptions(): SystemMetadata[] {
   const seen = new Set<string>();
-  return systemMetadata.filter((metadata) => {
-    if (seen.has(metadata.id)) return false;
-    seen.add(metadata.id);
-    return true;
-  });
+  return systemMetadata
+    .filter((metadata) => {
+      if (seen.has(metadata.id)) return false;
+      seen.add(metadata.id);
+      return true;
+    })
+    .map((metadata) => findLatestSystemMetadata(metadata.id) ?? metadata);
 }

@@ -12,8 +12,10 @@ test('production build splits client and server system code', { skip: distReady 
 
   const pbtaChunk = [...sources].find(([, source]) => source.includes('Проверка PbtA'));
   const nechronicaChunk = [...sources].find(([, source]) => source.includes('Броски Nechronica'));
+  const nechronicaAdvancedChunk = [...sources].find(([, source]) => source.includes('Узы и безумие'));
   assert.ok(pbtaChunk, 'the PbtA client implementation must live in its own chunk');
   assert.ok(nechronicaChunk, 'the Nechronica client implementation must live in its own chunk');
+  assert.ok(nechronicaAdvancedChunk, 'the Nechronica 1.2.0 sheet must live in its own chunk');
   assert.notEqual(pbtaChunk[0], nechronicaChunk[0], 'PbtA and Nechronica must not share a chunk');
 
   // The entry shell must not statically carry either system implementation.
@@ -30,12 +32,16 @@ test('production build splits client and server system code', { skip: distReady 
 
   assert.ok(existsSync('dist-server/server/modules/pbta-2d6/server.js'));
   assert.ok(existsSync('dist-server/server/modules/nechronica/server.js'));
+  assert.ok(existsSync('dist-server/server/modules/nechronica/server-1.1.0.js'));
+  assert.ok(existsSync('dist-server/server/modules/nechronica/server-1.2.0.js'));
   assert.equal(existsSync('dist-server/src/modules/system/pbta-2d6/client.js'), false, 'server build must not emit client chunks');
 
   const registry = readFileSync('dist-server/server/system-registry.js', 'utf8');
   assert.match(registry, /import\(/);
   assert.match(registry, /pbta-2d6@1\.0\.0/);
   assert.match(registry, /nechronica@1\.0\.0/);
+  assert.match(registry, /nechronica@1\.1\.0/);
+  assert.match(registry, /nechronica@1\.2\.0/);
 
   const entryServer = readFileSync('dist-server/server/index.js', 'utf8');
   assert.doesNotMatch(entryServer, /calculatePbtARoll/);

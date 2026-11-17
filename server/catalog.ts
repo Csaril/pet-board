@@ -318,6 +318,24 @@ export class RoomCatalog {
     return this.getRoom(roomId)!;
   }
 
+  /**
+   * Updates the pinned system pair for several rooms in one catalog
+   * transaction. Offline system migration uses this after every room database
+   * has been staged and verified.
+   */
+  updateRoomSystems(updates: ReadonlyArray<{ roomId: string; systemId: string; systemVersion: string }>): void {
+    const statement = this.db.prepare(
+      'UPDATE rooms SET system_id = ?, system_version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    );
+    this.db.transaction(() => {
+      for (const update of updates) {
+        assertValidRoomId(update.roomId);
+        if (!this.getRoom(update.roomId)) throw new Error(`Комната ${update.roomId} не найдена.`);
+        statement.run(update.systemId, update.systemVersion, update.roomId);
+      }
+    })();
+  }
+
   /** Removes the discovery/auth record. Game data lives outside the catalog. */
   deleteRoom(roomId: string): CatalogRoom {
     assertValidRoomId(roomId);

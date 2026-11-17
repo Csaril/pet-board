@@ -22,6 +22,7 @@ import { findSystemMetadata } from '../src/modules/manifest.js';
 import { rollFreeDice } from '../src/shared/dice.js';
 import { executeSheetCommand } from './sheets.js';
 import { loadSystemServer } from './system-registry.js';
+import { acquireServerLock } from './instance-lock.js';
 import { CatalogRoomAccess, RoomManager, RoomUnavailableError, SingleRoomAccess, type RoomAccess, type RoomLease } from './room-manager.js';
 
 const COOKIE_PATH = '/';
@@ -319,11 +320,29 @@ export async function buildServer(options: ServerOptions = {}): Promise<FastifyI
   const prepareRoomSystem = async (room: CatalogRoom): Promise<void> => {
     if (!room.systemId || !room.systemVersion) return;
     try {
-      await loadSystemServer(room.systemId, room.systemVersion);
+      const module = await loadSystemServer(room.systemId, room.systemVersion);
+      const metadata = findSystemMetadata(room.systemId, room.systemVersion);
+      if (!module.migrateRoomSheets || !metadata) return;
+      let lease: RoomLease | undefined;
+      try {
+        lease = roomAccess.acquire(room.id);
+        const report = module.migrateRoomSheets({
+          store: lease.store,
+          target: { id: metadata.id, version: metadata.version, schemaVersion: metadata.sheetSchemaVersion },
+        });
+        if (report.migratedSheetIds.length > 0) {
+          app.log.info(
+            { roomId: room.id, system: `${metadata.id}@${metadata.version}`, migrated: report.migratedSheetIds.length },
+            'room sheets migrated',
+          );
+        }
+      } finally {
+        lease?.release();
+      }
     } catch (error) {
       // Entry stays possible so the user sees the specific unsupported-version
-      // message on the first system operation; no fallback is attempted.
-      app.log.warn({ err: error }, 'system module is not available');
+      // or incompatible-schema message; no fallback and no data rewrite occur.
+      app.log.warn({ err: error, roomId: room.id }, 'system module or sheet migration is not available');
     }
   };
 
@@ -708,7 +727,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<FastifyI
       try {
         if (!command || typeof command !== 'object' || Array.isArray(command)) throw new BoardCommandError('Некорректная команда.');
         const input = command as Record<string, unknown>;
-        if (input.type === 'dice:pbta' || input.type === 'dice:free' || input.type === 'dice:reroll') {
+        if (input.type === 'dice:pbta' || input.type === 'dice:free' || input.type === 'dice:reroll' || input.type === 'dice:nechronica') {
           const entry = await createDiceRoll(lease.store, liveIdentity, input);
           lease.store.saveDiceRoll(entry);
         } else if (typeof input.type === 'string' && input.type.startsWith('sheet:')) {
@@ -807,11 +826,13 @@ export async function buildServer(options: ServerOptions = {}): Promise<FastifyI
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  let releaseLock: (() => void) | undefined;
   try {
     const config = loadConfig();
     if (config.cookieSecure && !existsSync(resolve(process.cwd(), 'dist', 'index.html'))) {
       throw new Error('Frontend build not found. Run "npm run build" before starting the production server.');
     }
+    releaseLock = acquireServerLock(config.dataDir);
     let roomManager: RoomManager;
     try {
       const catalog = RoomCatalog.open(config.dataDir);
@@ -823,7 +844,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const app = await buildServer({ config, roomManager });
     await app.listen({ host: config.host, port: config.port });
     app.log.info(`Room server listening on ${config.host}:${config.port}`);
+    process.once('exit', () => releaseLock?.());
+    const shutdown = (): void => {
+      void app.close().finally(() => {
+        releaseLock?.();
+        releaseLock = undefined;
+        process.exit(0);
+      });
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
   } catch (error) {
+    releaseLock?.();
     console.error(`Не удалось запустить сервер: ${error instanceof Error ? error.message : 'неизвестная ошибка'}`);
     process.exitCode = 1;
   }

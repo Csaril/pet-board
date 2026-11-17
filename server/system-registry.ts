@@ -20,6 +20,8 @@ interface LoadedModule {
 /** Explicit allowlist: no path is ever built from a room or client value. */
 const serverLoaders: Readonly<Record<string, () => Promise<LoadedModule>>> = {
   'pbta-2d6@1.0.0': () => import('./modules/pbta-2d6/server.js'),
+  'nechronica@1.2.0': () => import('./modules/nechronica/server-1.2.0.js'),
+  'nechronica@1.1.0': () => import('./modules/nechronica/server-1.1.0.js'),
   'nechronica@1.0.0': () => import('./modules/nechronica/server.js'),
 };
 

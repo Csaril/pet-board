@@ -10,7 +10,7 @@ import type { SystemServerModule } from './system-contract.js';
 type Command = Record<string, unknown> & { type?: string; requestId?: unknown };
 const owns = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 
-const ADVANCED_COMMAND = /^sheet:(?:fate|counter|ability):/;
+const ADVANCED_COMMAND = /^sheet:(?:fate|counter|ability|nechronica):/;
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BoardCommandError(`${label} должен быть объектом.`);
@@ -75,7 +75,7 @@ function accessibleAssetId(value: unknown, store: RoomStore, identity: Identity,
 
 function requireAdvanced(module: SystemServerModule, active: SystemMetadata): SystemServerModule {
   if (!module.advancedSheet) {
-    throw new BoardCommandError(`Действие недоступно для системы ${active.name}: расширенный лист PbtA не поддерживается.`, { code: SYSTEM_MISMATCH, statusCode: 409 });
+    throw new BoardCommandError(`Действие недоступно для системы ${active.name}: расширенный лист не поддерживается.`, { code: SYSTEM_MISMATCH, statusCode: 409 });
   }
   return module;
 }
@@ -101,7 +101,7 @@ export async function executeSheetCommand(store: RoomStore, identity: Identity, 
         assignedPlayerId, assignedPlayerName: assignedPlayerId ? identity.name : null,
         systemId: active.id, systemVersion: active.version, schemaVersion: active.sheetSchemaVersion,
         characterName, portraitAssetId: null, characteristics: defaults.characteristics as Record<SheetCharacteristicKey, number>,
-        fate: defaults.fate,
+        fate: defaults.fate, systemData: defaults.systemData,
       });
       return;
     }
@@ -141,7 +141,7 @@ export async function executeSheetCommand(store: RoomStore, identity: Identity, 
       if (owns(changes, 'characteristics') || owns(changes, 'fate')) {
         const module = requireAdvanced(await loadSystemServer(active.id, active.version), active);
         if (!module.applySheetChanges) {
-          throw new BoardCommandError(`Действие недоступно для системы ${active.name}: расширенный лист PbtA не поддерживается.`, { code: SYSTEM_MISMATCH, statusCode: 409 });
+          throw new BoardCommandError(`Действие недоступно для системы ${active.name}: расширенный лист не поддерживается.`, { code: SYSTEM_MISMATCH, statusCode: 409 });
         }
         Object.assign(patch, module.applySheetChanges(sheet, changes));
       }

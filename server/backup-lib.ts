@@ -57,6 +57,14 @@ export interface RestoreExpectation {
   allowRoomMismatch?: boolean;
 }
 
+export interface BackupOptions {
+  /**
+   * Copies the SQLite file with a read-only connection. Offline migrations use
+   * this so creating the safety copy cannot run schema upgrades on the source.
+   */
+  raw?: boolean;
+}
+
 export class BackupRoomMismatchError extends Error {
   constructor(message: string) {
     super(message);
@@ -130,6 +138,7 @@ export async function createBackup(
   roomName: string,
   prefix = 'backup',
   metadata: BackupMetadata = {},
+  options: BackupOptions = {},
 ): Promise<BackupInfo> {
   const directory = backupsDirectory(roomDir);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -141,20 +150,32 @@ export async function createBackup(
   const backupAssets = join(backupPath, 'assets');
   await mkdir(backupAssets, { recursive: true, mode: 0o700 });
 
-  const store = new RoomStore(roomDir, roomName);
   let systemId = metadata.systemId ?? null;
   let systemVersion = metadata.systemVersion ?? null;
-  try {
-    const fixed = store.fixedSystem;
-    if (systemId === null && fixed) systemId = fixed.id;
-    if (systemVersion === null && fixed) systemVersion = fixed.version;
-    await store.backup(join(backupPath, 'room.sqlite'));
-  } catch (error) {
+  if (options.raw) {
+    const source = new Database(join(roomDir, 'room.sqlite'), { readonly: true, fileMustExist: true });
+    try {
+      await source.backup(join(backupPath, 'room.sqlite'));
+    } catch (error) {
+      source.close();
+      await rm(backupPath, { recursive: true, force: true });
+      throw error;
+    }
+    source.close();
+  } else {
+    const store = new RoomStore(roomDir, roomName);
+    try {
+      const fixed = store.fixedSystem;
+      if (systemId === null && fixed) systemId = fixed.id;
+      if (systemVersion === null && fixed) systemVersion = fixed.version;
+      await store.backup(join(backupPath, 'room.sqlite'));
+    } catch (error) {
+      store.close();
+      await rm(backupPath, { recursive: true, force: true });
+      throw error;
+    }
     store.close();
-    await rm(backupPath, { recursive: true, force: true });
-    throw error;
   }
-  store.close();
 
   try {
     const files: BackupFile[] = [];

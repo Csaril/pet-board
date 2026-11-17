@@ -47,7 +47,7 @@ export interface BoardAsset {
   createdAt: string;
 }
 
-export type BoardAssetUsageKind = 'board-object' | 'note-attachment' | 'note-marker' | 'sheet-portrait' | 'sheet-ability';
+export type BoardAssetUsageKind = 'board-object' | 'note-attachment' | 'note-marker' | 'sheet-portrait' | 'sheet-ability' | 'sheet-system' | 'dice-reference';
 
 export interface BoardAssetUsage {
   kind: BoardAssetUsageKind;
@@ -173,6 +173,12 @@ export interface CharacterSheet {
   fontFamily: BoardFontFamily;
   counters: CharacterSheetCounter[];
   abilities: CharacterSheetAbility[];
+  /**
+   * Opaque, system-owned sheet payload. The core never interprets it; each
+   * system validates and normalizes its own shape. PbtA sheets keep it null and
+   * continue to use the typed core fields above.
+   */
+  systemData: unknown | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -221,6 +227,28 @@ export interface BoardSceneSnapshot {
   noteMarkers: NoteMarker[];
 }
 
+export type SheetReferenceType = 'ability' | 'body' | 'fetter';
+
+/**
+ * Immutable snapshot of a sheet item sent to the shared history. It is stored
+ * with the event so later edits to the sheet never rewrite old cards.
+ */
+export interface SheetReferenceSnapshot {
+  type: SheetReferenceType;
+  /** Asset frozen into the event snapshot; later sheet edits never rewrite it. */
+  imageAssetId: string | null;
+  name: string;
+  source: string | null;
+  timing: string | null;
+  cost: string | null;
+  range: string | null;
+  target: string | null;
+  fetter: string | null;
+  madness: string | null;
+  madnessSpent: number | null;
+  description: string;
+}
+
 export type DiceRollEntry = {
   id: string;
   authorId: string;
@@ -228,7 +256,7 @@ export type DiceRollEntry = {
   actorId: string;
   actorName: string;
   createdAt: string;
-  kind: 'pbta' | 'free' | 'ability-use';
+  kind: 'pbta' | 'free' | 'ability-use' | 'sheet-reference' | 'nechronica';
   /** System ownership recorded by the server. Free core rolls keep both values null. */
   systemId: string | null;
   systemVersion: string | null;
@@ -255,6 +283,8 @@ export type DiceRollEntry = {
   abilitySummary: string | null;
   abilityDescription: string | null;
   abilityFontFamily: BoardFontFamily | null;
+  /** Sheet reference card snapshot; null for dice rolls and PbtA ability applications. */
+  reference?: SheetReferenceSnapshot | null;
 };
 
 export interface BoardStateMessage extends BoardSnapshot {

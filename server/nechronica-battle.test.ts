@@ -29,8 +29,8 @@ test('Nechronica is registered as an independent system module', () => {
   const module = findSystemModule('nechronica');
   assert.ok(module);
   assert.equal(module.name, 'Nechronica');
-  assert.equal(module.version, '1.0.0');
-  assert.equal(module.sheetSchemaVersion, 1);
+  assert.equal(module.version, '1.2.0');
+  assert.equal(module.sheetSchemaVersion, 3);
   assert.notEqual(module.id, pbtaSystemModule.id);
   assert.ok(systemModules.some((entry) => entry.id === 'nechronica'));
   assert.ok(systemModules.some((entry) => entry.id === 'pbta-2d6'));
@@ -72,11 +72,11 @@ test('Nechronica and PbtA sheets stay isolated and PbtA-only commands are reject
     assert.equal(playerSheets.length, 1);
     assert.equal(playerSheets[0]!.id, owned.id);
 
-    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characteristics: { might: 1 } } }), /PbtA/);
-    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { fate: 3 } }), /PbtA/);
-    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:fate:update', sheetId: owned.id, value: 1 }), /PbtA/);
-    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:counter:create', sheetId: owned.id, name: 'Charge' }), /PbtA/);
-    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:ability:create', sheetId: owned.id, name: 'Move' }), /PbtA/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characteristics: { might: 1 } } }), /расширенный лист/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { fate: 3 } }), /расширенный лист/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:fate:update', sheetId: owned.id, value: 1 }), /расширенный лист/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:counter:create', sheetId: owned.id, name: 'Charge' }), /расширенный лист/);
+    await assert.rejects(() => executeSheetCommand(nechStore, gm, { type: 'sheet:ability:create', sheetId: owned.id, name: 'Move' }), /расширенный лист/);
     // Shared fields keep working for any system.
     await executeSheetCommand(nechStore, gm, { type: 'sheet:update', id: owned.id, changes: { characterName: 'Nechro renamed' } });
     assert.equal(nechStore.getSheet(owned.id)?.characterName, 'Nechro renamed');

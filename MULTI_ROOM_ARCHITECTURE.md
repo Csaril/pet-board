@@ -153,9 +153,9 @@ Manifest v2 содержит `roomId`, `roomName`, `systemId`, `systemVersion`,
 - `src/modules/client-registry.ts` и `server/system-registry.ts` — явные
   allowlist-карты `id@version` → `() => import(...)`. Ключ не строится из
   пользовательских строк.
-- Начальный клиентский чанк (`index…js`, ~281 КБ) содержит оболочку, Konva,
+- Начальный клиентский чанк (`index…js`, ~293 КБ) содержит оболочку, Konva,
   авторизацию, доску и метаданные, но не реализации. PbtA вынесен в отдельный
-  чанк ~14 КБ, Nechronica — ~986 Б.
+  чанк ~15 КБ, Nechronica 1.0.0 — ~1 КБ, 1.1.0 — ~23 КБ, 1.2.0 — ~24 КБ.
 - Серверные модули собираются отдельными файлами
   `dist-server/server/modules/pbta-2d6/server.js` и
   `dist-server/server/modules/nechronica/server.js`; клиентский код в
@@ -342,7 +342,7 @@ npm run rooms:delete -- <room-id> [--force] [--yes] [--no-backup]
 ```ts
 interface SystemMetadata {
   id: string;            // 'pbta-2d6' | 'nechronica'
-  version: string;       // '1.0.0'
+  version: string;       // '1.0.0' | '1.1.0' | '1.2.0'
   name: string;          // отображаемое имя
   sheetSchemaVersion: number;
   capabilities: { battleMap: boolean };
@@ -361,6 +361,8 @@ interface SystemMetadata {
 interface SystemClientModule {
   mount(context: SystemClientContext): void | Promise<void>;
   dispose(): void;
+  /** Модуль сам рисует шапку имени/портрета; ядро не дублирует её. */
+  readonly ownsProfile?: boolean;
 }
 interface SystemClientFactory {
   createClientModule(): SystemClientModule;
@@ -368,8 +370,10 @@ interface SystemClientFactory {
 ```
 
 - `loadSystemClient(id, version)` — явная карта
-  `pbta-2d6@1.0.0 → () => import('./system/pbta-2d6/client.js')` и
-  `nechronica@1.0.0 → () => import('./system/nechronica/client.js')`.
+  `pbta-2d6@1.0.0 → () => import('./system/pbta-2d6/client.js')`,
+  `nechronica@1.0.0 → () => import('./system/nechronica/client.js')`,
+  `nechronica@1.1.0 → () => import('./system/nechronica/client-1.1.0.js')` и
+  `nechronica@1.2.0 → () => import('./system/nechronica/client-1.2.0.js')`.
 - Кэшируется **Promise кода**, а не экземпляр UI. Фабрика создаёт новый
   `SystemClientModule` на комнату; состояние комнаты никогда не живёт в
   module-level переменных.
@@ -398,20 +402,22 @@ interface SystemClientFactory {
 interface SystemServerModule {
   id: string;
   version: string;
-  sheetSchemaVersion: number;
   advancedSheet: boolean;
-  capabilities: { battleMap: boolean };
-  validateSheet?(...): ...;
+  sheetDefaults(): SystemSheetDefaults;
+  applySheetChanges?(...): ...;
   executeSheetCommand?(...): ...;
-  createDiceRoll(...): DiceRollEntry;
-  actionCheck?(...): ...;
-  systemEvent?(...): ...;
+  handlesRollCommand?(type: string): boolean;
+  createRoll?(context: SystemRollContext): DiceRollEntry;
+  migrateRoomSheets?(...): SystemRoomMigrationReport;
+  verifyRoomSheets?(...): ...;
 }
 ```
 
 - `server/system-registry.ts` — явная карта
   `pbta-2d6@1.0.0 → () => import('./modules/pbta-2d6/server.js')`,
-  `nechronica@1.0.0 → () => import('./modules/nechronica/server.js')`.
+  `nechronica@1.0.0 → () => import('./modules/nechronica/server.js')`,
+  `nechronica@1.1.0 → () => import('./modules/nechronica/server-1.1.0.js')` и
+  `nechronica@1.2.0 → () => import('./modules/nechronica/server-1.2.0.js')`.
 - Promise загрузки кэшируется на процесс. Несколько комнат одной системы
   переиспользуют код, но получают независимый `RoomStore`/контекст; глобального
   «текущего store» нет.
@@ -431,7 +437,10 @@ interface SystemServerModule {
 которой нет в сборке, сервер отказывает в системной операции, а клиент
 показывает понятную ошибку. Новая версия не подхватывается автоматически;
 переход существующей комнаты — только через явную контролируемую миграцию с
-резервной копией (в этом этапе не реализована).
+резервной копией (`npm run rooms:migrate-system`, этап 9). Бросок Nechronica
+1d10 выбирает механику по закреплённой паре комнаты: `handlesRollCommand`
+PbtA не принимает `dice:nechronica`, замороженный 1.1.0 не имеет `createRoll`,
+а модуль 1.2.0 дополнительно сверяет `activeSystem`.
 
 ---
 
@@ -557,19 +566,29 @@ interface SystemServerModule {
 
 - Метаданные и контракты: `src/modules/manifest.ts`, `src/modules/registry.ts`,
   `src/modules/module.ts`, `src/modules/system/*/module.ts`,
-  `src/modules/system/pbta-2d6/schema.ts`, `src/modules/client-contract.ts`,
+  `src/modules/system/pbta-2d6/schema.ts`,
+  `src/modules/system/nechronica/schema.ts`,
+  `src/modules/system/nechronica/schema-1.1.0.ts`,
+  `src/modules/system/nechronica/roll.ts`, `src/modules/client-contract.ts`,
   `src/modules/client-registry.ts`, `src/modules/client-host.ts`,
   `server/system-contract.ts`, `server/system-registry.ts`.
 - Клиентские реализации: `src/modules/system/pbta-2d6/client.ts`,
-  `src/modules/system/nechronica/client.ts`, `src/client/sheet-dom.ts`,
+  `src/modules/system/nechronica/client.ts`,
+  `src/modules/system/nechronica/client-1.1.0.ts`,
+  `src/modules/system/nechronica/client-1.2.0.ts`, `src/client/sheet-dom.ts`,
   `src/client/app.ts`, `src/pages/index.astro`.
 - Серверные реализации: `server/modules/pbta-2d6/server.ts`,
-  `server/modules/nechronica/server.ts`.
+  `server/modules/nechronica/server.ts`,
+  `server/modules/nechronica/server-1.1.0.ts`,
+  `server/modules/nechronica/server-1.2.0.ts`.
 - Интеграция: `server/store.ts`, `server/room-manager.ts`,
-  `server/room-admin.ts`, `server/sheets.ts`, `server/index.ts`.
+  `server/room-admin.ts`, `server/sheets.ts`, `server/index.ts`,
+  `server/system-migrate.ts`, `server/instance-lock.ts`.
 - Общее: `src/shared/dice.ts` (свободные кубики вынесены из PbtA).
-- Тесты: `server/system-loading.test.ts`, `server/production-split.test.ts` и
-  обновлённые `features/nechronica-battle/system/ux/sheets` тесты.
+- Тесты: `server/system-loading.test.ts`, `server/production-split.test.ts`,
+  `server/nechronica-sheet.test.ts`, `server/nechronica-roll.test.ts`,
+  `server/nechronica-migration.test.ts` и обновлённые
+  `features/nechronica-battle/system/ux/sheets` тесты.
 
 Что сделано:
 
@@ -585,10 +604,10 @@ interface SystemServerModule {
 - Capabilities — серверный источник истины; `battleMap` только у Nechronica,
   регрессии нет. Общая история, лимит 10 и `rerollOf` не менялись; системная
   атрибуция событий остаётся на сервере.
-- Production: клиент даёт отдельные динамические чанки PbtA (~14 КБ) и
-  Nechronica (~986 Б) плюс entry ~281 КБ; сервер — отдельные файлы модулей,
-  `ERR_MODULE_NOT_FOUND` в production не возникает. Замеры — после `npm run
-  build`, hashed-имена меняются.
+- Production: клиент даёт отдельные динамические чанки PbtA (~15 КБ) и
+  Nechronica (~1–24 КБ по версиям) плюс entry ~293 КБ; сервер — отдельные файлы
+  модулей, `ERR_MODULE_NOT_FOUND` в production не возникает. Замеры — после
+  `npm run build`, hashed-имена меняются.
 - Тесты: метаданные без реализаций, точные версии, неизвестный ID/версия,
   capabilities, frontend/backend loaders, кэш Promise, `mount/dispose`, гонки,
   ошибки импорта, изоляция комнат, PbtA/Nechronica, запрет PbtA-команд в
@@ -623,8 +642,10 @@ interface SystemServerModule {
 
 ### Этап 7. Регрессия и ручная проверка (выполнено для этапа 5)
 
-- Автотесты: все существующие + новые сценарии этапов 2–6; последний прогон —
-  253 теста, 0 ошибок. `server/system-loading.test.ts` — 13 тестов этапа 5,
+- Автотесты: все существующие + новые сценарии этапов 2–6; последний полный
+  прогон — 352 теста, 0 ошибок. `server/system-loading.test.ts` — 13 тестов
+  этапа 5, `server/nechronica-sheet.test.ts` — 55 сценариев Nechronica 1.2.0,
+  `server/nechronica-roll.test.ts` — 13 сценариев броска 1d10,
   `server/production-split.test.ts` — проверка фактического production output.
 - Ручные проверки: live-скрипт на реальном production-сервере с `default` (PbtA)
   и Nechronica; PbtA-бросок с системной парой, отказ PbtA-броска в Nechronica,
@@ -637,12 +658,125 @@ interface SystemServerModule {
   около 71 MB. После закрытия сокетов комнатные SQLite закрываются, число
   файловых дескрипторов возвращается к базовому. Значения ориентировочные,
   память Node/sqlite освобождается не мгновенно.
-- Production-чанки: entry ~281 КБ, PbtA ~14 КБ, Nechronica ~986 Б; hashed-имена
-  меняются при сборке.
+- Production-чанки: entry ~293 КБ, PbtA ~15 КБ, Nechronica 1.0.0 ~1 КБ,
+  Nechronica 1.1.0 ~23 КБ, Nechronica 1.2.0 ~24 КБ; hashed-имена меняются при
+  сборке.
 - `npm run typecheck`, `npm test`, `npm run build`, `npm audit --omit=dev`
   проходят; чек-лист изоляции закрыт.
 - Остаётся периодическая визуальная проверка вёрстки, перетаскивания панелей и
   Konva в обычном браузере.
+
+### Этап 8. Nechronica 1.1.0 — полноценный лист (выполнено; версия заморожена)
+
+- Реестр содержит `nechronica@1.1.0` (`sheetSchemaVersion: 2`) рядом с
+  `nechronica@1.0.0`. `findLatestSystemMetadata` выбирает старшую semver-версию,
+  поэтому на этом этапе новые комнаты создавались на 1.1.0, а старые
+  открывались точным загрузчиком без автоматической миграции. С этапа 10
+  актуальна 1.2.0, а 1.1.0 остаётся рабочей замороженной версией.
+- `src/modules/system/nechronica/schema-1.1.0.ts` — замороженная копия схемы 2
+  `NechronicaSheetData` с профилем, способностями, четырьмя зонами тела, узами,
+  info и памятью. Актуальная схема 3 живёт в `schema.ts`; PbtA-поля не
+  используются ни в одной из них.
+- Данные 1.1.0 хранятся в `character_sheets.system_data_json`; PbtA продолжает
+  использовать `characteristics_json`, `fate` и `character_abilities`. Схема
+  листа версионируется отдельно от версии модуля и поддерживает аддитивные
+  миграции.
+- Сервер (`server/modules/nechronica/server-1.1.0.ts`) разделяет value-команды
+  (`ap`, `used`, `destroyed`, `madness`, `reset-used`, `reference`) и
+  structural-команды (`profile`, `info`, `create`, `update`, `delete`,
+  `reorder`). Проверяются система/версия, лист, роль, назначение, поля,
+  коллекция/зона и изображение комнаты.
+- AP меняется только вручную. Deployment и Одобрение — в редактировании;
+  Used, Destroyed и четыре очка безумия независимы. Broken Heart выводится из
+  всех четырёх флажков и не хранится.
+- Клиент (`src/modules/system/nechronica/client-1.1.0.ts`) рисует постоянную
+  шапку и пять вкладок, объявляет `ownsProfile: true`, раскрывает длинные
+  эффекты, показывает алую заливку Broken Heart, открывает существующую панель
+  Personal Notes и отправляет справочные карточки в общую историю.
+- `dice_rolls` получила `kind: 'sheet-reference'` и `reference_json`.
+  Миграция CHECK сохраняет все колонки, включая системную атрибуцию. Лимит 10
+  событий и `rerollOf` не меняются.
+- `getAssetUsage`/`isAssetUsedBySheet` рекурсивно сканируют `system_data_json`
+  и учитывают вложенные массивы; новый вид — `sheet-system`, удаление
+  используемого изображения блокируется.
+- Тесты: `server/nechronica-sheet.test.ts` — 55 отдельных сценариев; обновлены
+  `system-loading`, `nechronica-battle`, `room-admin` и `production-split`.
+  Последний полный прогон — 352 теста, 0 ошибок; typecheck, build и audit
+  проходят.
+- Ограничения: правила бросков, автоматизация AP/эффектов/Broken Heart/
+  безумия, справочник частей тела, инициатива, боевые манёвры и взаимодействие
+  с боевой картой не реализованы. Меню бросков Nechronica остаётся заглушкой.
+  Бросок 1d10 появился только в 1.2.0 (этап 10).
+
+### Этап 9. Массовая миграция системных комнат (выполнено)
+
+- Причина: лист и история бросков привязаны к точной паре
+  `systemId@systemVersion`. После появления `nechronica@1.1.0` комнаты 1.0.0
+  оставались рабочими, но их листы нельзя было обновить без отдельной
+  операции; `NULL`/частичный `system_data_json` молча заменялся defaults, а
+  будущая схема показывалась пустым листом.
+- `src/modules/system/nechronica/schema.ts` получила аддитивную идемпотентную
+  `migrateNechronicaSheetData`, `isCurrentNechronicaSheetData` и
+  `NechronicaSheetSchemaError`. `null`, пустой JSON и старая схема дают полный
+  объект актуальной схемы (сейчас 3); неизвестные поля сохраняются; будущая
+  схема и повреждённый JSON прерывают операцию с ожидаемой/фактической версией.
+- `RoomStore.migrateRoomSystemAndSheets` меняет версию комнаты и все листы
+  системы в одной транзакции, временно снимая и пересоздавая
+  `room_system_immutable`. Ошибка откатывает версию, листы и триггеры.
+- `SystemServerModule.migrateRoomSheets`/`verifyRoomSheets` — системный хук;
+  реализован в `nechronica@1.1.0` и `nechronica@1.2.0` со своими схемами.
+  `server/index.ts` вызывает его при подготовке комнаты, чтобы уже закреплённая
+  комната исправляла старые листы без ручного вмешательства, но без смены версии.
+- `server/system-migrate.ts` и `npm run rooms:migrate-system` обновляют все
+  комнаты одной системы (`active`/`disabled`/`archived`) до latest или `--to`.
+  `--dry-run` только читает; `--yes` отключает подтверждение; понижение версии
+  и неизвестная версия запрещены; PbtA и другие системы не затрагиваются.
+- Безопасность: обязательная проверка `data/server.lock`, копия каталога с
+  `server-secret`, `raw`-копия каждой комнаты, staged-миграция на копиях,
+  `integrity_check`, `foreign_key_check`, проверка листов и ресурсов,
+  атомарная замена `room.sqlite`, одна транзакция каталога, полный rollback при
+  любой ошибке, журнал `data/backups/system-migrations/<timestamp>/journal.json`.
+  Копии и журнал не удаляются.
+- `server/instance-lock.ts` создаёт lock при production-старте и снимает его по
+  `SIGINT`/`SIGTERM`; устаревший lock удаляется, живой процесс блокирует CLI.
+- Тесты: `server/nechronica-migration.test.ts` — 10 сценариев листа и 21
+  сценарий массового обновления/регрессии (включая воспроизведение исходного
+  `SYSTEM_MISMATCH`). Полный прогон — 352 теста, 0 ошибок; typecheck, build и
+  audit проходят.
+- Ограничения: миграция только офлайн, автоматического онлайн-переключения нет;
+  очистка старых копий и журналов остаётся ручной.
+
+### Этап 10. Nechronica 1.2.0 — доработка листа и бросок 1d10 (выполнено)
+
+- Реестр содержит `nechronica@1.2.0` (`sheetSchemaVersion: 3`) рядом с
+  замороженными `1.1.0` (схема 2) и `1.0.0` (схема 1). `schema.ts` — схема 3,
+  `schema-1.1.0.ts` — замороженная копия схемы 2; клиенты и серверы версий
+  разнесены по файлам `*-1.1.0.ts`/`*-1.2.0.ts`.
+- Единственное изменение схемы — необязательный `Memory.imageAssetId`; миграция
+  `1/2 → 3` заполняет отсутствующее значение `null`.
+- Лист: центрированные вкладки, один портрет/имя в заголовке панели, горизонтальная
+  память `изображение → название → номер → описание → действия`, общий
+  `.nechronica-longtext` для длинных описаний с внутренней прокруткой и
+  раскрытием. `Used` приглушает строку, `Destroyed` имеет приоритет и
+  зачёркивает текст.
+- История: snapshot `sheet-reference` хранит `imageAssetId`; `getAssetUsage`
+  сканирует `reference_json` и возвращает `dice-reference`, поэтому ресурс
+  старой карточки нельзя удалить.
+- Бросок: `calculateNechronicaRoll` — один d10 и целочисленный бонус; натуральная
+  1 — критический провал с итогом 1, натуральная 10 — критический успех с итогом
+  10, бонус игнорируется; обычный итог не ограничивается, `≤5` — провал, `≥6` —
+  успех. `server-1.2.0.ts` реализует `handlesRollCommand('dice:nechronica')` и
+  `createRoll` с `crypto.randomInt`; клиент передаёт только бонус/actorId.
+- Событие хранится в `dice_rolls` с `kind = 'nechronica'`, натуральным броском,
+  бонусом, итогом, категорией, критическим статусом, автором и временем. CHECK
+  расширен аддитивно; лимит истории остаётся 10.
+- Изоляция: PbtA не объявляет `dice:nechronica`, 1.1.0 не имеет `createRoll`, а
+  1.2.0 сверяет `activeSystem`; клиентский `systemId` не учитывается.
+- Тесты: `server/nechronica-sheet.test.ts` — 55 сценариев,
+  `server/nechronica-roll.test.ts` — 13 сценариев; полный прогон — 352 теста,
+  0 ошибок; typecheck, production build и audit проходят.
+- Ограничения: только один d10 с бонусом; других кубиков, формул и боевых
+  манёвров нет.
 
 ---
 

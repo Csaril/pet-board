@@ -100,7 +100,7 @@ test('room admin: defaults are migrated idempotently and new rooms are atomic', 
       const store = new RoomStore(directory, 'New Nechronica');
       try {
         assert.equal(store.roomSystem.id, 'nechronica');
-        assert.equal(store.roomSystem.version, '1.0.0');
+        assert.equal(store.roomSystem.version, '1.2.0');
         assert.equal(store.roomSystem.fixed, true);
         assert.equal(store.getLayers('board').length, 1);
         assert.equal(store.getLayers('battle').length, 1);

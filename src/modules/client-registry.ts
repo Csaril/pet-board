@@ -16,6 +16,8 @@ export class SystemClientLoadError extends Error {
  */
 const clientLoaders: Readonly<Record<string, () => Promise<{ createClientModule: SystemClientFactory['createClientModule'] }>>> = {
   'pbta-2d6@1.0.0': () => import('./system/pbta-2d6/client.js'),
+  'nechronica@1.2.0': () => import('./system/nechronica/client-1.2.0.js'),
+  'nechronica@1.1.0': () => import('./system/nechronica/client-1.1.0.js'),
   'nechronica@1.0.0': () => import('./system/nechronica/client.js'),
 };
 

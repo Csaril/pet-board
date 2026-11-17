@@ -9,7 +9,7 @@ import { buildSheetRollContext, canChangeSheetStructure, clampFloatingPosition, 
 import { SystemHost } from '../modules/client-host.js';
 import { loadSystemClient } from '../modules/client-registry.js';
 import { findLatestSystemMetadata, findSystemMetadata, systemMetadataOptions } from '../modules/manifest.js';
-import type { SystemIdentity, SystemRoomView, SystemRuntimeInfo } from '../modules/client-contract.js';
+import type { SheetAssetPickerRequest, SystemIdentity, SystemRoomView, SystemRuntimeInfo } from '../modules/client-contract.js';
 import { sheetSection } from './sheet-dom.js';
 import { shouldHideGmOnlyElement } from '../shared/role-ui.js';
 
@@ -181,10 +181,12 @@ let noteEditorGeneration = 0;
 let editingAssetIds: string[] = [];
 let selectedMarkerAssetId: string | undefined;
 let pendingAssetDeleteId: string | undefined;
-type AssetPickerMode = 'attachments' | 'marker' | 'sheet-portrait' | 'ability';
+type AssetPickerMode = 'attachments' | 'marker' | 'sheet-portrait' | 'ability' | 'sheet-item';
 let assetPickerMode: AssetPickerMode = 'attachments';
 let selectedSheetPortraitAssetId: string | undefined;
 let selectedAbilityAssetId: string | undefined;
+let selectedSheetItemAssetId: string | undefined;
+let sheetAssetPickerRequest: SheetAssetPickerRequest | undefined;
 let openSheetId: string | undefined;
 let sheetDialogMode: SheetPanelMode = DEFAULT_SHEET_PANEL_MODE;
 let sheetGeneration = 0;
@@ -583,6 +585,12 @@ const systemHost = new SystemHost({
           selectedAbilityAssetId = assetId ?? undefined;
           openAssetPicker('ability');
         },
+        openSheetAssetPicker: (request) => {
+          sheetAssetPickerRequest = request;
+          selectedSheetItemAssetId = request.currentAssetId ?? undefined;
+          openAssetPicker('sheet-item');
+        },
+        openPersonalNotes: () => openPersonalNotesPanel(),
         applyFont: (element, font) => applyBoardFont(element, font),
         assetUrl,
         storageScope: roomStorageScope,
@@ -1711,8 +1719,113 @@ function renderAbilityEntry(roll: DiceRollEntry): HTMLLIElement {
   return item;
 }
 
+function renderSheetReferenceEntry(roll: DiceRollEntry): HTMLLIElement {
+  const reference = roll.reference;
+  const item = document.createElement('li');
+  item.className = `dice-entry dice-entry-reference dice-entry-reference-${reference?.type ?? 'unknown'}`;
+  const title = document.createElement('div'); title.className = 'dice-entry-top';
+  const kindLabel = reference?.type === 'ability' ? 'Способность' : reference?.type === 'body' ? 'Часть тела' : 'Уза';
+  const actor = roll.actorName && roll.actorName !== roll.authorName ? `${roll.authorName} за ${roll.actorName}` : roll.authorName;
+  const heading = document.createElement('span'); heading.textContent = `${actor} · ${kindLabel}`;
+  const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt;
+  time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  title.append(heading);
+  if (isHistoricalRoll(roll)) appendHistoricalBadge(title);
+  title.append(time);
+  item.append(title);
+
+  const card = document.createElement('div'); card.className = 'dice-entry-reference-card';
+  // The image id is frozen in the snapshot: editing the sheet later never
+  // rewrites an old card, and the asset usage check keeps it alive.
+  const head = document.createElement('div'); head.className = 'dice-entry-reference-head';
+  if (reference?.imageAssetId) {
+    const image = document.createElement('img');
+    image.className = 'dice-reference-image';
+    image.src = assetUrl(reference.imageAssetId);
+    image.alt = reference.name ? `Изображение: ${reference.name}` : 'Изображение';
+    image.loading = 'lazy';
+    head.append(image);
+  }
+  const name = document.createElement('strong'); name.className = 'dice-entry-reference-name';
+  name.textContent = reference?.name || 'Без названия';
+  head.append(name);
+  card.append(head);
+
+  const metaParts: string[] = [];
+  if (reference?.source) metaParts.push(`Источник: ${reference.source}`);
+  if (reference?.timing) metaParts.push(`Тайминг: ${reference.timing}`);
+  if (reference?.cost) metaParts.push(`Цена: ${reference.cost}`);
+  if (reference?.range) metaParts.push(`Дистанция: ${reference.range}`);
+  if (reference?.target) metaParts.push(`Цель: ${reference.target}`);
+  if (reference?.fetter) metaParts.push(`Уза: ${reference.fetter}`);
+  if (reference?.madness) metaParts.push(`Безумие: ${reference.madness}`);
+  if (reference?.madnessSpent !== null && reference?.madnessSpent !== undefined) metaParts.push(`Очки безумия: ${reference.madnessSpent}/4`);
+  if (metaParts.length) {
+    const meta = document.createElement('div'); meta.className = 'dice-entry-reference-meta';
+    for (const part of metaParts) { const span = document.createElement('span'); span.textContent = part; meta.append(span); }
+    card.append(meta);
+  }
+
+  const descriptionText = reference?.description || '';
+  const description = document.createElement('div'); description.className = 'dice-entry-reference-description';
+  description.textContent = descriptionText || 'Без описания';
+  if (descriptionText.length > 220 || descriptionText.includes('\n')) {
+    description.hidden = true;
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'secondary dice-entry-details'; toggle.textContent = 'Подробнее';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', () => {
+      description.hidden = !description.hidden;
+      toggle.textContent = description.hidden ? 'Подробнее' : 'Свернуть';
+      toggle.setAttribute('aria-expanded', String(!description.hidden));
+    });
+    card.append(toggle);
+  }
+  card.append(description);
+  item.append(card);
+  return item;
+}
+
+function renderNechronicaEntry(roll: DiceRollEntry): HTMLLIElement {
+  const item = document.createElement('li');
+  const critical = roll.critical === 'critical-failure' ? 'critical-failure'
+    : roll.critical === 'critical-success' ? 'critical-success'
+      : roll.category === 'failure' ? 'failure' : 'success';
+  item.className = `dice-entry dice-entry-nechronica is-${critical}`;
+
+  const title = document.createElement('div'); title.className = 'dice-entry-top';
+  const actor = roll.actorName && roll.actorName !== roll.authorName ? `${roll.authorName} за ${roll.actorName}` : roll.authorName;
+  const heading = document.createElement('span'); heading.textContent = `${actor} · Nechronica`;
+  const time = document.createElement('time'); time.className = 'dice-entry-time'; time.dateTime = roll.createdAt;
+  time.textContent = new Date(roll.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  title.append(heading);
+  if (isHistoricalRoll(roll)) appendHistoricalBadge(title);
+  title.append(time);
+
+  const natural = roll.dice[0] ?? roll.total;
+  const bonus = roll.characteristicBonus ?? 0;
+  const bonusApplied = roll.critical === null;
+  const detail = document.createElement('div'); detail.className = 'dice-entry-detail';
+  detail.textContent = bonusApplied && bonus !== 0
+    ? `d10: ${natural} ${bonus > 0 ? '+' : '−'} ${Math.abs(bonus)} = ${roll.total}`
+    : `d10: ${natural}`;
+  const result = document.createElement('div');
+  result.className = 'dice-entry-detail dice-entry-result';
+  result.textContent = roll.critical === 'critical-failure' ? 'Критический провал'
+    : roll.critical === 'critical-success' ? 'Критический успех'
+      : roll.category === 'success' ? 'Успех' : 'Провал';
+  item.append(title, detail, result);
+  if (!bonusApplied && bonus !== 0) {
+    const note = document.createElement('div'); note.className = 'dice-entry-detail dice-entry-nechronica-note';
+    note.textContent = `Натуральный результат: ${natural} · Бонус ${bonus > 0 ? '+' : '−'}${Math.abs(bonus)} не применяется`;
+    item.append(note);
+  }
+  return item;
+}
+
 function renderDiceEntry(roll: DiceRollEntry): HTMLLIElement {
+  if (roll.kind === 'sheet-reference') return renderSheetReferenceEntry(roll);
   if (roll.kind === 'ability-use') return renderAbilityEntry(roll);
+  if (roll.kind === 'nechronica') return renderNechronicaEntry(roll);
   const item = document.createElement('li'); item.className = 'dice-entry';
   const title = document.createElement('div'); title.className = 'dice-entry-top';
   const label = roll.kind === 'free' ? `${roll.actorName} · свободный бросок` : roll.authorId === roll.actorId ? `${roll.actorName} · PbtA` : `${roll.authorName} за ${roll.actorName} · PbtA`;
@@ -2000,7 +2113,7 @@ function renderSheetPanel() {
   const editing = canChangeSheetStructure(sheetDialogMode, canEdit);
   sheetContent.replaceChildren();
 
-  if (editing) {
+  if (editing && !systemHost.ownsProfile) {
     const identitySection = sheetSection('Персонаж', 'sheet-identity-section');
     const fields = document.createElement('div'); fields.className = 'sheet-fields';
     const nameLabel = document.createElement('label'); nameLabel.textContent = 'Имя персонажа';
@@ -2193,14 +2306,15 @@ function renderNoteAttachments() {
 
 function renderAssetPicker() {
   const grid = select<HTMLElement>('#asset-picker-grid'); grid.replaceChildren();
-  const singleChoice = assetPickerMode === 'marker' || assetPickerMode === 'sheet-portrait' || assetPickerMode === 'ability';
+  const singleChoice = assetPickerMode === 'marker' || assetPickerMode === 'sheet-portrait' || assetPickerMode === 'ability' || assetPickerMode === 'sheet-item';
   for (const asset of accessibleAssets()) {
     const label = document.createElement('label'); label.className = 'asset-picker-item';
     const input = document.createElement('input'); input.type = singleChoice ? 'radio' : 'checkbox'; input.name = 'asset-picker-selection'; input.value = asset.id;
     input.checked = assetPickerMode === 'marker' ? asset.id === selectedMarkerAssetId
       : assetPickerMode === 'sheet-portrait' ? asset.id === selectedSheetPortraitAssetId
         : assetPickerMode === 'ability' ? asset.id === selectedAbilityAssetId
-          : editingAssetIds.includes(asset.id);
+          : assetPickerMode === 'sheet-item' ? asset.id === selectedSheetItemAssetId
+            : editingAssetIds.includes(asset.id);
     const image = document.createElement('img'); image.src = assetUrl(asset.id); image.alt = ''; image.loading = 'lazy';
     const name = document.createElement('span'); name.textContent = asset.originalName; name.title = asset.originalName;
     label.append(input, image, name); grid.append(label);
@@ -2302,6 +2416,7 @@ async function uploadNoteImageFiles(files: File[]) {
         else if (attached) editingAssetIds.push(result.asset.id);
         if (sameSheetEditor && targetMode === 'sheet-portrait') { selectedSheetPortraitAssetId = result.asset.id; renderSheetPanel(); }
         else if (sameSheetEditor && targetMode === 'ability') { selectedAbilityAssetId = result.asset.id; renderSheetPanel(); }
+        else if (sameSheetEditor && targetMode === 'sheet-item') { selectedSheetItemAssetId = result.asset.id; renderAssetPicker(); }
         const resultLabel = result.deduplicated ? 'Уже в библиотеке' : 'Загружено';
         const selectedForSheet = sameSheetEditor && (targetMode === 'sheet-portrait' || targetMode === 'ability');
         setUploadRow(row, `${resultLabel} · ${selectedForSheet ? 'выбрано для листа' : sameEditor && (targetMode === 'marker' || attached || targetMode === 'attachments' && editingAssetIds.includes(result.asset.id)) ? 'прикреплено к заметке' : 'сохранено в библиотеке'}`, 'success');
@@ -2424,6 +2539,14 @@ function upsertPersonalNote(note: NoteRecord): void {
     updatedAt: note.updatedAt,
   };
   roomState.personalNotes = [...(roomState.personalNotes || []).filter((current) => current.id !== note.id), entry];
+}
+
+function openPersonalNotesPanel(): void {
+  if (!identity) return;
+  notesPanel.hidden = false;
+  notesPanelMode = 'players';
+  refreshNotesListIfVisible();
+  renderNotesPanel();
 }
 
 function renderNotesPanel(): void {
@@ -2644,6 +2767,8 @@ const ASSET_USAGE_LABELS: Record<BoardAssetUsage['kind'], string> = {
   'note-marker': 'Метки заметок',
   'sheet-portrait': 'Портреты персонажей',
   'sheet-ability': 'Изображения способностей',
+  'sheet-system': 'Изображения на системных листах',
+  'dice-reference': 'Изображения в истории',
 };
 
 function renderAssetUsage(usage: BoardAssetUsage[]): void {
@@ -2864,6 +2989,7 @@ select<HTMLButtonElement>('#note-marker-image-pick').addEventListener('click', (
 select<HTMLInputElement>('#note-image-upload').addEventListener('change', (event) => { void uploadNoteImageFilesFromInput(event); });
 select<HTMLButtonElement>('#asset-picker-close').addEventListener('click', () => assetPickerDialog.close());
 select<HTMLButtonElement>('#asset-picker-cancel').addEventListener('click', () => assetPickerDialog.close());
+assetPickerDialog.addEventListener('close', () => { sheetAssetPickerRequest = undefined; });
 select<HTMLButtonElement>('#asset-delete-close').addEventListener('click', () => assetDeleteDialog.close());
 select<HTMLButtonElement>('#asset-delete-cancel').addEventListener('click', () => assetDeleteDialog.close());
 select<HTMLButtonElement>('#asset-delete-confirm').addEventListener('click', () => void confirmAssetDelete());
@@ -2877,6 +3003,10 @@ select<HTMLButtonElement>('#asset-picker-add').addEventListener('click', () => {
     if (values[0] && openSheetId) void runCommand('sheet:update', { id: openSheetId, changes: { portraitAssetId: values[0] } });
   } else if (assetPickerMode === 'ability') {
     if (editingAbilityId && openSheetId) void runCommand('sheet:ability:update', { sheetId: openSheetId, id: editingAbilityId, changes: { assetId: values[0] ?? null } });
+  } else if (assetPickerMode === 'sheet-item') {
+    const request = sheetAssetPickerRequest;
+    sheetAssetPickerRequest = undefined;
+    request?.select(values[0] ?? null);
   } else editingAssetIds = [...new Set([...editingAssetIds, ...values])];
   renderNoteAttachments(); assetPickerDialog.close();
 });
